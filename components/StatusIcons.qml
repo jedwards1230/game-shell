@@ -19,11 +19,12 @@ RowLayout {
     Process {
         id: iconThemeProbe
         command: ["bash", "-c", "for d in /usr/share/icons/breeze /usr/share/icons/Adwaita /usr/share/icons/hicolor; do [ -d \"$d\" ] && echo \"$d\" && exit; done; echo ''"]
-        running: true
         stdout: SplitParser {
             onRead: (line) => { root._iconBase = line.trim() }
         }
     }
+
+    Component.onCompleted: { iconThemeProbe.running = true }
 
     Process {
         id: ipProcess
@@ -130,7 +131,8 @@ RowLayout {
         Layout.preferredWidth: root._iconSize
         Layout.preferredHeight: root._iconSize
         radius: root._iconSize / 2
-        color: "transparent"
+        color: networkMA.containsMouse ? Theme.surfaceHover : "transparent"
+        Behavior on color { ColorAnimation { duration: 150 } }
 
         property bool _connected: root.ipAddress !== "..." && root.ipAddress !== "No IP"
         property string _netIconPath: {
@@ -157,6 +159,12 @@ RowLayout {
             color: parent._connected ? Theme.textMuted : Theme.warning
             visible: netIcon.status !== Image.Ready
         }
+
+        MouseArea {
+            id: networkMA
+            anchors.fill: parent
+            hoverEnabled: true
+        }
     }
 
     // Volume
@@ -164,7 +172,8 @@ RowLayout {
         Layout.preferredWidth: root._iconSize
         Layout.preferredHeight: root._iconSize
         radius: root._iconSize / 2
-        color: "transparent"
+        color: volumeMA.containsMouse ? Theme.surfaceHover : "transparent"
+        Behavior on color { ColorAnimation { duration: 150 } }
 
         Image {
             id: volIcon
@@ -182,6 +191,12 @@ RowLayout {
             font.pixelSize: root._imgSize
             color: Theme.textMuted
             visible: volIcon.status !== Image.Ready
+        }
+
+        MouseArea {
+            id: volumeMA
+            anchors.fill: parent
+            hoverEnabled: true
         }
     }
 }
