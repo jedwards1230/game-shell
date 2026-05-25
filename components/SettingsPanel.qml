@@ -10,16 +10,19 @@ Rectangle {
 
     property int currentSection: 0
     property var sections: [
-        { name: "Audio",     icon: "Vol" },
-        { name: "Bluetooth", icon: "BT"  },
-        { name: "Network",   icon: "Net" },
-        { name: "Display",   icon: "Scr" },
-        { name: "Power",     icon: "Pwr" }
+        { name: "Audio",      icon: "\u{1F50A}" },
+        { name: "Bluetooth",  icon: "⚡" },
+        { name: "Network",    icon: "\u{1F310}" },
+        { name: "Display",    icon: "\u{1F5A5}" },
+        { name: "Moonlight",  icon: "\u{1F3AE}" },
+        { name: "Appearance", icon: "\u{1F3A8}" },
+        { name: "Power",      icon: "⏻" }
     ]
 
     onVisibleChanged: {
         if (visible) {
             currentSection = 0
+            sidebarList.currentIndex = 0
             sidebarList.forceActiveFocus()
         }
     }
@@ -38,18 +41,19 @@ Rectangle {
                 anchors.fill: parent
                 spacing: 0
 
-                // Settings header
-                Rectangle {
+                // Settings title — plain text, no colored bar
+                Item {
                     Layout.fillWidth: true
                     height: Theme.statusBarHeight
-                    color: Theme.navy
 
                     Text {
-                        anchors.centerIn: parent
+                        anchors.left: parent.left
+                        anchors.leftMargin: 48
+                        anchors.verticalCenter: parent.verticalCenter
                         text: "Settings"
-                        font.pixelSize: Theme.fontTitle
+                        font.pixelSize: Theme.fontHero * 0.6
                         font.bold: true
-                        color: "#ffffff"
+                        color: Theme.textPrimary
                     }
                 }
 
@@ -59,7 +63,7 @@ Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     model: root.sections
-                    currentIndex: root.currentSection
+                    currentIndex: 0
                     focus: true
                     clip: true
 
@@ -67,10 +71,10 @@ Rectangle {
                         required property int index
                         required property var modelData
                         width: sidebarList.width
-                        height: 140
+                        height: 100
                         color: {
                             if (root.currentSection === index)
-                                return sidebarList.activeFocus ? Theme.crimson : Theme.navy
+                                return Theme.sidebarActive
                             if (sidebarList.currentIndex === index && sidebarList.activeFocus)
                                 return Theme.surfaceHover
                             return "transparent"
@@ -78,40 +82,35 @@ Rectangle {
 
                         Behavior on color { ColorAnimation { duration: 150 } }
 
+                        // Left accent bar on focused item
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 4
+                            height: parent.height - 16
+                            radius: 2
+                            color: Theme.focusBorder
+                            visible: sidebarList.currentIndex === index && sidebarList.activeFocus
+                        }
+
                         RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: 40
+                            anchors.leftMargin: 48
                             anchors.rightMargin: 40
-                            spacing: 28
-
-                            // Active indicator bar
-                            Rectangle {
-                                width: 8
-                                height: 72
-                                radius: 4
-                                color: root.currentSection === index ? "#ffffff" : "transparent"
-                            }
+                            spacing: 24
 
                             Text {
                                 text: modelData.icon
                                 font.pixelSize: Theme.fontBody
-                                font.bold: true
-                                color: root.currentSection === index ? "#ffffff" : Theme.textSecondary
-                                Layout.preferredWidth: 80
+                                Layout.preferredWidth: 60
                             }
 
                             Text {
                                 text: modelData.name
                                 font.pixelSize: Theme.fontBody
                                 font.bold: root.currentSection === index
-                                color: root.currentSection === index ? "#ffffff" : Theme.textPrimary
+                                color: root.currentSection === index ? Theme.textPrimary : Theme.textSecondary
                                 Layout.fillWidth: true
-                            }
-
-                            Text {
-                                text: root.currentSection === index ? ">" : ""
-                                font.pixelSize: Theme.fontBody
-                                color: "#ffffff"
                             }
                         }
 
@@ -144,12 +143,19 @@ Rectangle {
                     Keys.onDownPressed: {
                         if (currentIndex < root.sections.length - 1) currentIndex++
                     }
+
+                    Keys.onPressed: (event) => {
+                        if (event.key === Qt.Key_B && !event.modifiers) {
+                            root.closed()
+                            event.accepted = true
+                        }
+                    }
                 }
 
                 // Back hint
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 100
+                    height: 80
                     color: Theme.surfaceHover
 
                     Text {
@@ -165,8 +171,8 @@ Rectangle {
         // Divider
         Rectangle {
             Layout.fillHeight: true
-            width: 3
-            color: Theme.surfaceHover
+            width: 2
+            color: Theme.surfaceBorder
         }
 
         // Right content area
@@ -184,8 +190,10 @@ Rectangle {
                 color: Theme.surfaceHover
 
                 Text {
-                    anchors.centerIn: parent
-                    text: root.sections[root.currentSection].name
+                    anchors.left: parent.left
+                    anchors.leftMargin: 48
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.sections[root.currentSection].icon + "  " + root.sections[root.currentSection].name
                     font.pixelSize: Theme.fontTitle
                     font.bold: true
                     color: Theme.textPrimary
@@ -209,7 +217,9 @@ Rectangle {
                             case 1: return bluetoothComp
                             case 2: return networkComp
                             case 3: return displayComp
-                            case 4: return powerComp
+                            case 4: return moonlightComp
+                            case 5: return appearanceComp
+                            case 6: return powerComp
                             default: return audioComp
                         }
                     }
@@ -233,6 +243,16 @@ Rectangle {
                 Component {
                     id: displayComp
                     DisplaySettings {}
+                }
+
+                Component {
+                    id: moonlightComp
+                    MoonlightSettings {}
+                }
+
+                Component {
+                    id: appearanceComp
+                    AppearanceSettings {}
                 }
 
                 Component {

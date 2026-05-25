@@ -63,14 +63,14 @@ Item {
                             text: "Sleep"
                             font.pixelSize: Theme.fontTitle
                             font.bold: true
-                            color: suspendScope.activeFocus ? "#ffffff" : Theme.textPrimary
+                            color: suspendScope.activeFocus ? Theme.textOnDark : Theme.textPrimary
                             Layout.alignment: Qt.AlignHCenter
                         }
 
                         Text {
                             text: "Suspend to RAM"
                             font.pixelSize: Theme.fontSmall
-                            color: suspendScope.activeFocus ? "#ffffffcc" : Theme.textSecondary
+                            color: suspendScope.activeFocus ? Theme.textOnDarkMuted : Theme.textSecondary
                             Layout.alignment: Qt.AlignHCenter
                         }
                     }
@@ -115,14 +115,14 @@ Item {
                             text: "Restart"
                             font.pixelSize: Theme.fontTitle
                             font.bold: true
-                            color: restartScope.activeFocus ? "#ffffff" : Theme.textPrimary
+                            color: restartScope.activeFocus ? Theme.textOnDark : Theme.textPrimary
                             Layout.alignment: Qt.AlignHCenter
                         }
 
                         Text {
                             text: "Reboot the system"
                             font.pixelSize: Theme.fontSmall
-                            color: restartScope.activeFocus ? "#ffffffcc" : Theme.textSecondary
+                            color: restartScope.activeFocus ? Theme.textOnDarkMuted : Theme.textSecondary
                             Layout.alignment: Qt.AlignHCenter
                         }
                     }
@@ -166,14 +166,14 @@ Item {
                             text: "Shutdown"
                             font.pixelSize: Theme.fontTitle
                             font.bold: true
-                            color: shutdownScope.activeFocus ? "#ffffff" : Theme.textPrimary
+                            color: shutdownScope.activeFocus ? Theme.textOnDark : Theme.textPrimary
                             Layout.alignment: Qt.AlignHCenter
                         }
 
                         Text {
                             text: "Power off the system"
                             font.pixelSize: Theme.fontSmall
-                            color: shutdownScope.activeFocus ? "#ffffffcc" : Theme.textSecondary
+                            color: shutdownScope.activeFocus ? Theme.textOnDarkMuted : Theme.textSecondary
                             Layout.alignment: Qt.AlignHCenter
                         }
                     }

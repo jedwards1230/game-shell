@@ -138,7 +138,7 @@ Item {
                 radius: 16
                 color: Theme.surface
                 border.width: 2
-                border.color: Theme.online
+                border.color: Theme.surfaceBorder
 
                 RowLayout {
                     anchors.fill: parent
@@ -234,12 +234,12 @@ Item {
                 height: 80
                 radius: 16
                 color: {
-                    if (modelData.inUse) return Theme.navy
-                    if (wifiList.currentIndex === index && wifiList.activeFocus) return Theme.crimson
+                    if (modelData.inUse) return Theme.sidebarActive
+                    if (wifiList.currentIndex === index && wifiList.activeFocus) return Theme.surfaceHover
                     return Theme.surface
                 }
                 border.width: 2
-                border.color: Theme.surfaceHover
+                border.color: modelData.inUse ? Theme.focusBorder : Theme.surfaceBorder
 
                 Behavior on color { ColorAnimation { duration: 150 } }
 
@@ -252,7 +252,7 @@ Item {
                         text: modelData.ssid
                         font.pixelSize: Theme.fontSmall
                         font.bold: modelData.inUse
-                        color: modelData.inUse || (wifiList.currentIndex === index && wifiList.activeFocus) ? "#ffffff" : Theme.textPrimary
+                        color: modelData.inUse ? Theme.textOnDark : Theme.textPrimary
                         Layout.fillWidth: true
                     }
 
@@ -269,9 +269,9 @@ Item {
                                 color: {
                                     let threshold = (index + 1) * 25
                                     let active = modelData.signal >= threshold
-                                    if (modelData.inUse || (wifiList.currentIndex === parent.parent.parent.parent.index && wifiList.activeFocus))
-                                        return active ? "#ffffff" : "#ffffff44"
-                                    return active ? Theme.navy : Theme.surfaceHover
+                                    if (modelData.inUse)
+                                        return active ? Theme.textOnDark : Theme.textOnDarkMuted
+                                    return active ? Theme.focusBorder : Theme.surfaceHover
                                 }
                                 anchors.bottom: parent.bottom
                             }
@@ -281,20 +281,20 @@ Item {
                     Text {
                         text: modelData.signal + "%"
                         font.pixelSize: Theme.fontSmall
-                        color: modelData.inUse || (wifiList.currentIndex === index && wifiList.activeFocus) ? "#ffffffcc" : Theme.textSecondary
+                        color: modelData.inUse ? Theme.textOnDarkMuted : Theme.textSecondary
                     }
 
                     Text {
                         text: modelData.security
                         font.pixelSize: Theme.fontSmall
-                        color: modelData.inUse || (wifiList.currentIndex === index && wifiList.activeFocus) ? "#ffffffcc" : Theme.textSecondary
+                        color: modelData.inUse ? Theme.textOnDarkMuted : Theme.textSecondary
                     }
 
                     Text {
                         text: modelData.inUse ? "Connected" : ""
                         font.pixelSize: Theme.fontSmall
                         font.bold: true
-                        color: "#ffffff"
+                        color: Theme.textOnDark
                         visible: modelData.inUse
                     }
                 }

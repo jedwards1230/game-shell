@@ -11,5 +11,7 @@ BluetoothSettings 1.0 BluetoothSettings.qml
 NetworkSettings 1.0 NetworkSettings.qml
 DisplaySettings 1.0 DisplaySettings.qml
 PowerSettings 1.0 PowerSettings.qml
+MoonlightSettings 1.0 MoonlightSettings.qml
+AppearanceSettings 1.0 AppearanceSettings.qml
 AppCard 1.0 AppCard.qml
 MarqueeText 1.0 MarqueeText.qml
