@@ -130,7 +130,6 @@ Rectangle {
 
                     Keys.onReturnPressed: {
                         root.currentSection = currentIndex
-                        contentLoader.item.forceActiveFocus()
                     }
 
                     Keys.onRightPressed: {
@@ -139,11 +138,17 @@ Rectangle {
                     }
 
                     Keys.onUpPressed: {
-                        if (currentIndex > 0) currentIndex--
+                        if (currentIndex > 0) {
+                            currentIndex--
+                            root.currentSection = currentIndex
+                        }
                     }
 
                     Keys.onDownPressed: {
-                        if (currentIndex < root.sections.length - 1) currentIndex++
+                        if (currentIndex < root.sections.length - 1) {
+                            currentIndex++
+                            root.currentSection = currentIndex
+                        }
                     }
 
                     Keys.onPressed: (event) => {
