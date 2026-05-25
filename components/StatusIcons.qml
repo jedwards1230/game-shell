@@ -4,13 +4,14 @@ import Quickshell.Io
 
 RowLayout {
     id: root
-    spacing: 16
+    spacing: 12
     layoutDirection: Qt.RightToLeft
 
     signal settingsRequested()
 
     property string ipAddress: "..."
     readonly property int _iconSize: 64
+    readonly property int _imgSize: 32
 
     Process {
         id: ipProcess
@@ -36,11 +37,19 @@ RowLayout {
         color: settingsMA.containsMouse ? Theme.surfaceHover : "transparent"
         Behavior on color { ColorAnimation { duration: 150 } }
 
+        Image {
+            id: settingsIcon
+            anchors.centerIn: parent
+            source: "image://icon/preferences-system-symbolic"
+            sourceSize: Qt.size(root._imgSize, root._imgSize)
+            visible: status === Image.Ready
+        }
         Text {
             anchors.centerIn: parent
             text: "⚙"
-            font.pixelSize: Theme.fontBody
+            font.pixelSize: root._imgSize
             color: settingsMA.containsMouse ? Theme.textPrimary : Theme.textMuted
+            visible: settingsIcon.status !== Image.Ready
         }
 
         MouseArea {
@@ -60,12 +69,26 @@ RowLayout {
         color: themeMA.containsMouse ? Theme.surfaceHover : "transparent"
         Behavior on color { ColorAnimation { duration: 150 } }
 
+        property string _themeIconName: Theme.themeMode === "dark"
+            ? "weather-clear-night-symbolic"
+            : Theme.themeMode === "light"
+                ? "weather-clear-symbolic"
+                : "display-brightness-symbolic"
+
+        Image {
+            id: themeIcon
+            anchors.centerIn: parent
+            source: "image://icon/" + parent._themeIconName
+            sourceSize: Qt.size(root._imgSize, root._imgSize)
+            visible: status === Image.Ready
+        }
         Text {
             anchors.centerIn: parent
-            text: Theme.themeMode === "dark" ? "☽" :
-                  Theme.themeMode === "light" ? "☀" : "◐"
-            font.pixelSize: Theme.fontBody
+            text: Theme.themeMode === "dark" ? "☽"
+                : Theme.themeMode === "light" ? "☀" : "◐"
+            font.pixelSize: root._imgSize
             color: themeMA.containsMouse ? Theme.textPrimary : Theme.textMuted
+            visible: themeIcon.status !== Image.Ready
         }
 
         MouseArea {
@@ -88,12 +111,23 @@ RowLayout {
         radius: root._iconSize / 2
         color: "transparent"
 
+        property bool _connected: root.ipAddress !== "..." && root.ipAddress !== "No IP"
+        property string _netIconName: _connected
+            ? "network-wired-symbolic" : "network-offline-symbolic"
+
+        Image {
+            id: netIcon
+            anchors.centerIn: parent
+            source: "image://icon/" + parent._netIconName
+            sourceSize: Qt.size(root._imgSize, root._imgSize)
+            visible: status === Image.Ready
+        }
         Text {
             anchors.centerIn: parent
-            text: root.ipAddress !== "..." && root.ipAddress !== "No IP" ? "⛁" : "⚠"
-            font.pixelSize: Theme.fontBody
-            color: root.ipAddress !== "..." && root.ipAddress !== "No IP"
-                       ? Theme.textMuted : Theme.warning
+            text: parent._connected ? "⛁" : "⚠"
+            font.pixelSize: root._imgSize
+            color: parent._connected ? Theme.textMuted : Theme.warning
+            visible: netIcon.status !== Image.Ready
         }
     }
 
@@ -104,11 +138,19 @@ RowLayout {
         radius: root._iconSize / 2
         color: "transparent"
 
+        Image {
+            id: volIcon
+            anchors.centerIn: parent
+            source: "image://icon/audio-volume-high-symbolic"
+            sourceSize: Qt.size(root._imgSize, root._imgSize)
+            visible: status === Image.Ready
+        }
         Text {
             anchors.centerIn: parent
             text: "♫"
-            font.pixelSize: Theme.fontBody
+            font.pixelSize: root._imgSize
             color: Theme.textMuted
+            visible: volIcon.status !== Image.Ready
         }
     }
 }
