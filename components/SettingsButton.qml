@@ -2,15 +2,19 @@ import QtQuick
 
 Rectangle {
     id: root
-    width: 240; height: 96
+    implicitWidth: label.implicitWidth + 48
+    implicitHeight: 96
+    width: implicitWidth
+    height: implicitHeight
     radius: 16
-    color: root.activeFocus || mouseArea.containsMouse ? Theme.crimson : Theme.surface
-    border.width: root.activeFocus ? 0 : 2
-    border.color: Theme.surfaceHover
+    color: root.activeFocus || mouseArea.containsMouse ? Theme.surfaceHover : Theme.surface
+    border.width: root.activeFocus ? 3 : 2
+    border.color: root.activeFocus ? Theme.focusBorder : Theme.surfaceBorder
 
     property alias text: label.text
 
     Behavior on color { ColorAnimation { duration: 150 } }
+    Behavior on border.color { ColorAnimation { duration: 150 } }
 
     MouseArea {
         id: mouseArea
@@ -27,6 +31,6 @@ Rectangle {
         id: label
         anchors.centerIn: parent
         font.pixelSize: Theme.fontBody
-        color: root.activeFocus || mouseArea.containsMouse ? "#ffffff" : Theme.textPrimary
+        color: Theme.textPrimary
     }
 }
