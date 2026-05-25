@@ -25,18 +25,6 @@ RowLayout {
         }
     }
 
-    // Icon path resolver — tries multiple size directories
-    function _iconPath(category: string, name: string): string {
-        if (!_iconBase) return ""
-        // breeze uses size subdirs; try common sizes descending
-        let sizes = ["32", "24", "22", "48", "16"]
-        for (let i = 0; i < sizes.length; i++) {
-            let p = _iconBase + "/" + category + "/" + sizes[i] + "/" + name + ".svg"
-            return "file://" + p
-        }
-        return ""
-    }
-
     Process {
         id: ipProcess
         command: ["hostname", "-I"]
