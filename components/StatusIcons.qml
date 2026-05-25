@@ -4,12 +4,13 @@ import Quickshell.Io
 
 RowLayout {
     id: root
-    spacing: 24
+    spacing: 16
     layoutDirection: Qt.RightToLeft
 
     signal settingsRequested()
 
     property string ipAddress: "..."
+    readonly property int _iconSize: 64
 
     Process {
         id: ipProcess
@@ -27,14 +28,20 @@ RowLayout {
         onTriggered: { if (!ipProcess.running) ipProcess.running = true }
     }
 
-    Text {
-        text: "⚙"
-        font.pixelSize: Theme.fontTitle + 12
-        color: settingsMA.containsMouse ? Theme.textPrimary : Theme.textMuted
-        opacity: settingsMA.containsMouse ? 1.0 : 0.6
-        Layout.alignment: Qt.AlignVCenter
-        Behavior on opacity { NumberAnimation { duration: 150 } }
+    // Settings
+    Rectangle {
+        Layout.preferredWidth: root._iconSize
+        Layout.preferredHeight: root._iconSize
+        radius: root._iconSize / 2
+        color: settingsMA.containsMouse ? Theme.surfaceHover : "transparent"
         Behavior on color { ColorAnimation { duration: 150 } }
+
+        Text {
+            anchors.centerIn: parent
+            text: "⚙"
+            font.pixelSize: Theme.fontBody
+            color: settingsMA.containsMouse ? Theme.textPrimary : Theme.textMuted
+        }
 
         MouseArea {
             id: settingsMA
@@ -45,15 +52,21 @@ RowLayout {
         }
     }
 
-    Text {
-        text: Theme.themeMode === "dark" ? "☽" :
-              Theme.themeMode === "light" ? "☀" : "◐"
-        font.pixelSize: Theme.fontTitle
-        color: themeMA.containsMouse ? Theme.textPrimary : Theme.textMuted
-        opacity: themeMA.containsMouse ? 1.0 : 0.6
-        Layout.alignment: Qt.AlignVCenter
-        Behavior on opacity { NumberAnimation { duration: 150 } }
+    // Theme toggle
+    Rectangle {
+        Layout.preferredWidth: root._iconSize
+        Layout.preferredHeight: root._iconSize
+        radius: root._iconSize / 2
+        color: themeMA.containsMouse ? Theme.surfaceHover : "transparent"
         Behavior on color { ColorAnimation { duration: 150 } }
+
+        Text {
+            anchors.centerIn: parent
+            text: Theme.themeMode === "dark" ? "☽" :
+                  Theme.themeMode === "light" ? "☀" : "◐"
+            font.pixelSize: Theme.fontBody
+            color: themeMA.containsMouse ? Theme.textPrimary : Theme.textMuted
+        }
 
         MouseArea {
             id: themeMA
@@ -68,20 +81,34 @@ RowLayout {
         }
     }
 
-    Text {
-        text: root.ipAddress !== "..." && root.ipAddress !== "No IP" ? "⛁" : "⚠"
-        font.pixelSize: Theme.fontTitle
-        color: root.ipAddress !== "..." && root.ipAddress !== "No IP"
-                   ? Theme.textMuted : Theme.warning
-        opacity: 0.6
-        Layout.alignment: Qt.AlignVCenter
+    // Network
+    Rectangle {
+        Layout.preferredWidth: root._iconSize
+        Layout.preferredHeight: root._iconSize
+        radius: root._iconSize / 2
+        color: "transparent"
+
+        Text {
+            anchors.centerIn: parent
+            text: root.ipAddress !== "..." && root.ipAddress !== "No IP" ? "⛁" : "⚠"
+            font.pixelSize: Theme.fontBody
+            color: root.ipAddress !== "..." && root.ipAddress !== "No IP"
+                       ? Theme.textMuted : Theme.warning
+        }
     }
 
-    Text {
-        text: "♫"
-        font.pixelSize: Theme.fontTitle
-        color: Theme.textMuted
-        opacity: 0.6
-        Layout.alignment: Qt.AlignVCenter
+    // Volume
+    Rectangle {
+        Layout.preferredWidth: root._iconSize
+        Layout.preferredHeight: root._iconSize
+        radius: root._iconSize / 2
+        color: "transparent"
+
+        Text {
+            anchors.centerIn: parent
+            text: "♫"
+            font.pixelSize: Theme.fontBody
+            color: Theme.textMuted
+        }
     }
 }
