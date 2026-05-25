@@ -10,6 +10,9 @@ Item {
     // === Moonlight View Mode ===
     // "servers" (one card per host) or "apps" (one row per host, cards = apps)
     property string moonlightViewMode: "servers"
+
+    // === Controller Debug Overlay ===
+    property bool controllerDebug: false
     property int _currentHour: new Date().getHours()
     property bool darkMode: {
         if (themeMode === "dark") return true
@@ -33,6 +36,8 @@ Item {
                         themeMode = obj.themeMode
                     if (obj.moonlightViewMode === "servers" || obj.moonlightViewMode === "apps")
                         moonlightViewMode = obj.moonlightViewMode
+                    if (typeof obj.controllerDebug === "boolean")
+                        controllerDebug = obj.controllerDebug
                 } catch(e) { console.log("Theme: failed to parse settings:", e) }
             }
         }
@@ -42,7 +47,7 @@ Item {
         id: saveSettings
         command: ["bash", "-c",
             "mkdir -p " + _settingsDir + " && " +
-            "echo '{\"themeMode\":\"" + themeMode + "\",\"moonlightViewMode\":\"" + moonlightViewMode + "\"}' > " + _settingsFile]
+            "echo '{\"themeMode\":\"" + themeMode + "\",\"moonlightViewMode\":\"" + moonlightViewMode + "\",\"controllerDebug\":" + controllerDebug + "}' > " + _settingsFile]
     }
 
     function setThemeMode(mode) {
@@ -57,6 +62,11 @@ Item {
             moonlightViewMode = mode
             saveSettings.running = true
         }
+    }
+
+    function setControllerDebug(enabled) {
+        controllerDebug = enabled
+        saveSettings.running = true
     }
 
     // Re-evaluate auto mode every 60 seconds
