@@ -114,7 +114,11 @@ except ImportError:
         if (visible) {
             scanControllers.running = true
             daemonStatus.running = true
-            controllerList.forceActiveFocus()
+            // Focus first actionable element
+            if (root.controllers.length > 0)
+                controllerList.forceActiveFocus()
+            else
+                refreshScope.forceActiveFocus()
         }
     }
 
@@ -144,7 +148,7 @@ except ImportError:
                 height: refreshBtn.height
                 activeFocusOnTab: true
 
-                KeyNavigation.down: controllerList
+                KeyNavigation.down: root.controllers.length > 0 ? controllerList : grabScope
 
                 SettingsButton {
                     id: refreshBtn
