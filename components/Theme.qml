@@ -65,20 +65,20 @@ Item {
     readonly property color navy: "#304c7a"
 
     // === Semantic Colors (switch on darkMode) ===
-    property color background: darkMode ? "#0f1623" : snow
-    property color surface: darkMode ? "#1a2a42" : "#ffffff"
-    property color surfaceHover: darkMode ? "#243550" : "#ecedf0"
-    property color surfaceBorder: darkMode ? "#2d3f5a" : "#dcdee3"
+    property color background: darkMode ? "#121416" : snow
+    property color surface: darkMode ? "#1c1e22" : "#ffffff"
+    property color surfaceHover: darkMode ? "#26292e" : "#ecedf0"
+    property color surfaceBorder: darkMode ? "#33373d" : "#dcdee3"
 
     // Text hierarchy
-    property color textPrimary: darkMode ? "#e8eaf0" : "#1a2540"
-    property color textSecondary: darkMode ? "#8899b0" : "#4a5568"
-    property color textMuted: darkMode ? "#556680" : "#8892a4"
+    property color textPrimary: darkMode ? "#e6e4e0" : "#1a2540"
+    property color textSecondary: darkMode ? "#9a9690" : "#4a5568"
+    property color textMuted: darkMode ? "#5c5955" : "#8892a4"
     property color textOnDark: "#f4f5f7"
-    property color textOnDarkMuted: "#c8ccd4"
+    property color textOnDarkMuted: "#c8c5c0"
 
     // Cards
-    property color cardBackground: darkMode ? "#162033" : "#ffffff"
+    property color cardBackground: darkMode ? "#191b1f" : "#ffffff"
     property color cardAccent: ember
 
     // Status
@@ -87,11 +87,11 @@ Item {
     property color warning: ember
 
     // Interactive
-    property color focusBorder: darkMode ? "#4a9eff" : crimson
-    property color focusGlow: darkMode ? "#4a9eff33" : "#c7213833"
-    property color barBackground: darkMode ? "#0a1020" : navy
-    property color sidebarActive: darkMode ? "#1e3a5f" : navy
-    property color sidebarText: "#e8eaf0"
+    property color focusBorder: crimson
+    property color focusGlow: "#c7213833"
+    property color barBackground: darkMode ? "#0e0f11" : navy
+    property color sidebarActive: darkMode ? "#2a2c31" : navy
+    property color sidebarText: "#e6e4e0"
 
     // === Layout — couch-readable at 4K (10-foot UI) ===
     readonly property int cardWidth: 640
