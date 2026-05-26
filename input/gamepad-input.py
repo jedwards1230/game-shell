@@ -188,9 +188,12 @@ class InputDaemon:
         if event.type == ecodes.EV_KEY:
             key_event = categorize(event)
 
-            # Capture mode: resolve pending capture on key down, skip normal processing
+            # Capture mode: resolve pending capture on key down, only for remappable buttons
             if self._capture_future and not self._capture_future.done() and key_event.keystate == 1:
-                self._capture_future.set_result(event.code)
+                if event.code in REMAPPABLE_BUTTONS:
+                    self._capture_future.set_result(event.code)
+                    return
+                # Non-remappable button pressed during capture — ignore it
                 return
 
             # Track held state for combo detection
@@ -334,7 +337,13 @@ class InputDaemon:
 
     def _rebuild_button_map(self):
         """Rebuild button_map from current bindings."""
-        self.button_map = {btn: kb for btn, kb in self._bindings.values()}
+        self.button_map = {}
+        for action, (btn, kb) in self._bindings.items():
+            if btn in self.button_map:
+                existing = [a for a, (b, _) in self._bindings.items() if b == btn and a != action]
+                log.warning("Button %s (%s) assigned to multiple actions: %s and %s",
+                            _button_code_to_name(btn), btn, existing, action)
+            self.button_map[btn] = kb
 
     def _load_bindings(self):
         """Load keybinding overrides from settings.json."""
@@ -584,9 +593,11 @@ class InputDaemon:
                     loop = asyncio.get_running_loop()
                     self._capture_future = loop.create_future()
                     try:
-                        code = await self._capture_future
+                        code = await asyncio.wait_for(self._capture_future, timeout=10.0)
                         name = _button_code_to_name(code)
                         writer.write(f"captured:{name}\n".encode())
+                    except asyncio.TimeoutError:
+                        writer.write(b"timeout\n")
                     except asyncio.CancelledError:
                         writer.write(b"cancelled\n")
                     finally:

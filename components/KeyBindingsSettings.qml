@@ -24,7 +24,7 @@ FocusScope {
     ]
 
     // Actions that can be remapped via daemon IPC
-    property var remappableActions: ["select", "back", "altSelect", "confirm", "drawer"]
+    property var remappableActions: ["select", "back", "altSelect", "confirm"]
 
     property var navigationBindings: bindings.filter(function(b) { return b.category === "Navigation" })
     property var systemBindings: bindings.filter(function(b) { return b.category === "System" })
@@ -80,6 +80,7 @@ FocusScope {
         editingLabel = label
         capturing = true
         captureProc.running = true
+        captureOverlay.forceActiveFocus()
     }
 
     function cancelCapture() {
@@ -129,9 +130,11 @@ FocusScope {
         command: ["bash", "-c", "echo 'capture-next' | socat - UNIX-CONNECT:$GAME_SHELL_SOCK"]
         stdout: SplitParser {
             onRead: (line) => {
-                if (line.startsWith("captured:")) {
+                if (line.startsWith("captured:") && root.capturing) {
                     var buttonName = line.substring(9)
                     root.applyBinding(root.editingAction, buttonName)
+                } else if (line === "timeout" || line === "cancelled") {
+                    root.cancelCapture()
                 }
             }
         }
@@ -394,9 +397,11 @@ FocusScope {
 
     // --- Capture Overlay ---
     Rectangle {
+        id: captureOverlay
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.8)
         visible: root.capturing
+        focus: visible
         z: 50
 
         Column {
@@ -404,7 +409,7 @@ FocusScope {
             spacing: 24
 
             Text {
-                text: "Press a button to assign to"
+                text: "Press a face button, bumper, or stick click"
                 font.pixelSize: Theme.fontBody
                 color: Theme.textOnDark
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -417,7 +422,7 @@ FocusScope {
                 anchors.horizontalCenter: parent.horizontalCenter
             }
             Text {
-                text: "B to cancel"
+                text: "Times out in 10 seconds"
                 font.pixelSize: Theme.fontSmall
                 color: Theme.textMuted
                 anchors.horizontalCenter: parent.horizontalCenter

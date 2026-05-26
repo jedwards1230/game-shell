@@ -43,6 +43,9 @@ Item {
         }
     }
 
+    // NOTE: Both Theme.qml and the input daemon do read-modify-write on
+    // settings.json without file locking.  This is acceptable for a single-user
+    // kiosk — the two writers update disjoint keys and rarely race in practice.
     Process {
         id: saveSettings
         command: ["python3", "-c",
@@ -52,7 +55,7 @@ Item {
             "d=json.loads(p.read_text()) if p.exists() else {};" +
             "d['themeMode']='" + themeMode + "';" +
             "d['moonlightViewMode']='" + moonlightViewMode + "';" +
-            "d['controllerDebug']=" + controllerDebug + ";" +
+            "d['controllerDebug']=" + (controllerDebug ? "True" : "False") + ";" +
             "p.write_text(json.dumps(d,separators=(',',':')))"]
     }
 
