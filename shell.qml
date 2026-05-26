@@ -171,11 +171,15 @@ ShellRoot {
         command: ["hyprctl", "dispatch", "closewindow", "class:" + appClass]
     }
 
+    property var _prelaunchClasses: []
+
     function launchDesktopApp(app) {
         root.state = "appRunning"
         root.runningAppClass = ""
+        snapshotClients.running = true
         appRunner.command = ["hyprctl", "dispatch", "exec", app.exec || app.name]
         appRunner.running = true
+        detectNewWindow.restart()
     }
 
     function returnToShell() {
@@ -192,6 +196,49 @@ ShellRoot {
     Process {
         id: appRunner
         command: ["echo"]
+    }
+
+    Process {
+        id: snapshotClients
+        command: ["hyprctl", "clients", "-j"]
+        stdout: SplitParser {
+            property string buffer: ""
+            onRead: (line) => { buffer += line }
+        }
+        onExited: {
+            try {
+                let clients = JSON.parse(snapshotClients.stdout.buffer)
+                root._prelaunchClasses = clients.map(c => c["class"])
+            } catch(e) { root._prelaunchClasses = [] }
+            snapshotClients.stdout.buffer = ""
+        }
+    }
+
+    Process {
+        id: detectClient
+        command: ["hyprctl", "clients", "-j"]
+        stdout: SplitParser {
+            property string buffer: ""
+            onRead: (line) => { buffer += line }
+        }
+        onExited: {
+            try {
+                let clients = JSON.parse(detectClient.stdout.buffer)
+                for (let i = 0; i < clients.length; i++) {
+                    if (root._prelaunchClasses.indexOf(clients[i]["class"]) < 0 && clients[i]["class"] !== "") {
+                        root.runningAppClass = clients[i]["class"]
+                        break
+                    }
+                }
+            } catch(e) {}
+            detectClient.stdout.buffer = ""
+        }
+    }
+
+    Timer {
+        id: detectNewWindow
+        interval: 2000
+        onTriggered: { detectClient.running = true }
     }
 
     function launchStream(target) {

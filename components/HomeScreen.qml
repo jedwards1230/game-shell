@@ -80,12 +80,6 @@ except:
         loadRecents.running = true
     }
 
-    // App launcher + recents tracker
-    Process {
-        id: appLauncher
-        command: ["echo"]
-    }
-
     function launchApp(app) {
         root.appLaunchRequested(app)
         recentsTracker.command = ["python3", "-c",
@@ -340,7 +334,10 @@ except:
                     if (recentsRow.currentItem)
                         root.launchApp(recentsRow.currentItem.modelData)
                 }
-                Keys.onEnterPressed: Keys.onReturnPressed(event)
+                Keys.onEnterPressed: {
+                    if (recentsRow.currentItem)
+                        root.launchApp(recentsRow.currentItem.modelData)
+                }
                 Keys.onUpPressed: statusIcons.forceActiveFocus()
                 Keys.onDownPressed: {
                     if (Theme.moonlightViewMode === "servers") {
@@ -400,7 +397,10 @@ except:
                     if (moonlightRow.currentItem)
                         root.streamRequested(moonlightRow.currentItem.modelData)
                 }
-                Keys.onEnterPressed: Keys.onReturnPressed(event)
+                Keys.onEnterPressed: {
+                    if (moonlightRow.currentItem)
+                        root.streamRequested(moonlightRow.currentItem.modelData)
+                }
                 Keys.onUpPressed: recentsRow.visible ? recentsRow.forceActiveFocus() : statusIcons.forceActiveFocus()
                 Keys.onDownPressed: appsRow.forceActiveFocus()
                 Keys.onEscapePressed: root.settingsRequested()
@@ -495,7 +495,13 @@ except:
                                 root.streamRequested(t)
                             }
                         }
-                        Keys.onEnterPressed: Keys.onReturnPressed(event)
+                        Keys.onEnterPressed: {
+                            if (appViewRow.currentItem) {
+                                let t = JSON.parse(JSON.stringify(hostTarget))
+                                t.app = appViewRow.currentItem.modelData
+                                root.streamRequested(t)
+                            }
+                        }
 
                         Keys.onUpPressed: {
                             if (appViewRowDelegate.index === 0) {
