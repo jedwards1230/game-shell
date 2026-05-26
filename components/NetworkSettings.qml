@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell.Io
 
-Item {
+FocusScope {
     id: root
 
     property var activeConnections: []

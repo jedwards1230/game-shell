@@ -10,21 +10,29 @@ Rectangle {
 
     property int currentSection: 0
     property var sections: [
-        { name: "Audio",      icon: "\u{1F50A}" },
-        { name: "Bluetooth",  icon: "⚡" },
-        { name: "Network",    icon: "\u{1F310}" },
-        { name: "Display",    icon: "\u{1F5A5}" },
-        { name: "Moonlight",  icon: "\u{1F3AE}" },
-        { name: "Appearance", icon: "\u{1F3A8}" },
-        { name: "Power",      icon: "⏻" }
+        { name: "Audio",       icon: "\u{1F50A}" },
+        { name: "Bluetooth",   icon: "⚡" },
+        { name: "Network",     icon: "\u{1F310}" },
+        { name: "Display",     icon: "\u{1F5A5}" },
+        { name: "Controllers", icon: "\u{1F3AE}" },
+        { name: "Moonlight",   icon: "\u{1F319}" },
+        { name: "Appearance",  icon: "\u{1F3A8}" },
+        { name: "Power",       icon: "⏻" }
     ]
 
     onVisibleChanged: {
         if (visible) {
             currentSection = 0
             sidebarList.currentIndex = 0
-            sidebarList.forceActiveFocus()
+            // Delay focus slightly to ensure Loader has settled
+            focusTimer.restart()
         }
+    }
+
+    Timer {
+        id: focusTimer
+        interval: 50
+        onTriggered: { sidebarList.forceActiveFocus() }
     }
 
     RowLayout {
@@ -129,7 +137,6 @@ Rectangle {
 
                     Keys.onReturnPressed: {
                         root.currentSection = currentIndex
-                        contentLoader.item.forceActiveFocus()
                     }
 
                     Keys.onRightPressed: {
@@ -218,9 +225,10 @@ Rectangle {
                             case 1: return bluetoothComp
                             case 2: return networkComp
                             case 3: return displayComp
-                            case 4: return moonlightComp
-                            case 5: return appearanceComp
-                            case 6: return powerComp
+                            case 4: return controllerComp
+                            case 5: return moonlightComp
+                            case 6: return appearanceComp
+                            case 7: return powerComp
                             default: return audioComp
                         }
                     }
@@ -244,6 +252,11 @@ Rectangle {
                 Component {
                     id: displayComp
                     DisplaySettings {}
+                }
+
+                Component {
+                    id: controllerComp
+                    ControllerSettings {}
                 }
 
                 Component {
