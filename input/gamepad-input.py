@@ -178,6 +178,7 @@ class InputDaemon:
             log.info("Found gamepad: %s at %s", self.gamepad.name, self.gamepad.path)
             self._calibrate_stick()
             await self._grab()
+            await self._notify_subscribers("controller-wake")
 
             try:
                 async for event in self.gamepad.async_read_loop():

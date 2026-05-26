@@ -48,6 +48,11 @@ ShellRoot {
         onTriggered: { if (!avStatusCheck.running) avStatusCheck.running = true }
     }
 
+    Timer {
+        id: avWakeCooldown
+        interval: 30000
+    }
+
     Component.onCompleted: { loadTargets.running = true; comboListener.running = true }
 
     Timer {
@@ -121,6 +126,10 @@ ShellRoot {
             onRead: (line) => {
                 if (line === "combo:force-quit") root.forceQuit()
                 else if (line === "combo:end-session") endSession.running = true
+                else if (line === "controller-wake" && root.state === "idle" && !avWake.running && !avWakeCooldown.running) {
+                    avWake.running = true
+                    avWakeCooldown.restart()
+                }
             }
         }
         onExited: { comboReconnect.start() }
@@ -283,10 +292,7 @@ ShellRoot {
                     onTriggered: { root.avWaking = false }
                 }
 
-                Timer {
-                    id: avWakeCooldown
-                    interval: 30000
-                }
+
 
                 // --- Debug Input Overlay ---
                 // Shows currently-held buttons as a combo display.
