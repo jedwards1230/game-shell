@@ -13,6 +13,7 @@ ShellRoot {
     property int crashCount: 0
     property var targets: []
     property bool overlayDrawerOpen: false
+    property var _applications: []
 
     Process {
         id: loadTargets
@@ -52,7 +53,7 @@ ShellRoot {
     Components.AppLifecycleManager {
         id: appLifecycle
         shellState: root.state
-        applications: layout.homeScreen ? layout.homeScreen.applications : []
+        applications: root._applications
         onAppLaunched: { root.state = "appRunning" }
         onAppClosed: root.returnToShell()
     }
@@ -182,6 +183,7 @@ ShellRoot {
                 overlayDrawerOpen: root.overlayDrawerOpen
                 avSystemOn: avController.systemOn
                 avWaking: avController.waking
+                onApplicationsChanged: root._applications = applications
                 onStreamRequested: (target) => root.launchStream(target)
                 onAppLaunchRequested: (app) => appLifecycle.checkAndLaunchApp(app)
                 onAppFocusRequested: (windowClass) => appLifecycle.focusApp(windowClass)
