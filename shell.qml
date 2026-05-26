@@ -216,14 +216,6 @@ ShellRoot {
                 Components.NavigationDrawer {
                     id: navDrawer
                     z: 50
-                    onForceQuitRequested: {
-                        moonlight.running = false
-                        root.state = "idle"
-                        overlay.hide()
-                        grabInput()
-                        navDrawer.opened = false
-                        homeFocusTimer.restart()
-                    }
                     onSettingsRequested: {
                         settingsPanel.visible = true
                         settingsPanel.forceActiveFocus()
