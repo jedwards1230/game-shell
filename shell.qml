@@ -48,6 +48,11 @@ ShellRoot {
         onTriggered: { if (!avStatusCheck.running) avStatusCheck.running = true }
     }
 
+    Timer {
+        id: avWakeCooldown
+        interval: 30000
+    }
+
     Component.onCompleted: { loadTargets.running = true; comboListener.running = true }
 
     Timer {
@@ -121,6 +126,10 @@ ShellRoot {
             onRead: (line) => {
                 if (line === "combo:force-quit") root.forceQuit()
                 else if (line === "combo:end-session") endSession.running = true
+                else if (line === "controller-wake" && root.state === "idle" && !avWake.running && !avWakeCooldown.running) {
+                    avWake.running = true
+                    avWakeCooldown.restart()
+                }
             }
         }
         onExited: { comboReconnect.start() }
@@ -195,12 +204,13 @@ ShellRoot {
                 anchors.fill: parent
 
                 // Guide button (KEY_HOMEPAGE) toggles navigation drawer
-                // If AV system is off while idle, wake it via CEC
+                // Always claim CEC active source (wake if off, switch input if on different source)
                 Keys.onPressed: (event) => {
                     if (event.key === Qt.Key_HomePage) {
-                        if (!root.avSystemOn && root.state === "idle") {
-                            root.avWaking = true
+                        if (root.state === "idle" && !avWake.running && !avWakeCooldown.running) {
+                            if (!root.avSystemOn) root.avWaking = true
                             avWake.running = true
+                            avWakeCooldown.restart()
                         }
                         navDrawer.opened = !navDrawer.opened
                         if (navDrawer.opened)
@@ -281,6 +291,8 @@ ShellRoot {
                     running: root.avWaking
                     onTriggered: { root.avWaking = false }
                 }
+
+
 
                 // --- Debug Input Overlay ---
                 // Shows currently-held buttons as a combo display.
