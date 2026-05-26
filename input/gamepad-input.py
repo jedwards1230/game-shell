@@ -248,11 +248,9 @@ class InputDaemon:
             return
         keys = [ecodes.KEY_LEFTCTRL, ecodes.KEY_LEFTALT, ecodes.KEY_LEFTSHIFT, ecodes.KEY_Q]
         for k in keys:
-            self.uinput.write(ecodes.EV_KEY, k, 1)
-        self.uinput.syn()
+            self._emit_key(k, 1)
         for k in reversed(keys):
-            self.uinput.write(ecodes.EV_KEY, k, 0)
-        self.uinput.syn()
+            self._emit_key(k, 0)
         log.info("Sent Ctrl+Alt+Shift+Q to quit Moonlight")
 
     def _emit_key(self, key, value):
@@ -367,6 +365,12 @@ class InputDaemon:
             self.combo_task.cancel()
             self.combo_task = None
 
+    def _cancel_combo_unconditional(self):
+        """Cancel combo task regardless of held key state (for mode transitions)."""
+        if self.combo_task:
+            self.combo_task.cancel()
+            self.combo_task = None
+
     def _check_quit_combo(self):
         if QUIT_COMBO_KEYS.issubset(self.held_keys):
             log.info("Force-quit combo detected (Back+Home+LB+RB)")
@@ -390,7 +394,9 @@ class InputDaemon:
             try:
                 self.gamepad.grab()
                 self.grabbed = True
+                self._cancel_combo_unconditional()
                 self.held_keys.clear()
+                self._reset_triggers()
                 log.info("Grabbed gamepad exclusively")
             except OSError as e:
                 log.error("Failed to grab gamepad: %s", e)
@@ -400,7 +406,9 @@ class InputDaemon:
             try:
                 self.gamepad.ungrab()
                 self.grabbed = False
+                self._cancel_combo_unconditional()
                 self.held_keys.clear()
+                self._reset_triggers()
                 log.info("Released gamepad grab")
             except OSError as e:
                 log.error("Failed to ungrab gamepad: %s", e)
