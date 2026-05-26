@@ -222,40 +222,23 @@ ShellRoot {
         command: ["echo"]
     }
 
-    Process {
+    Components.HyprctlClients {
         id: snapshotClients
-        command: ["hyprctl", "clients", "-j"]
-        stdout: SplitParser {
-            property string buffer: ""
-            onRead: (line) => { buffer += line }
+        onClientsReceived: (clients) => {
+            root._prelaunchClasses = clients.map(c => c["class"])
         }
-        onExited: {
-            try {
-                let clients = JSON.parse(snapshotClients.stdout.buffer)
-                root._prelaunchClasses = clients.map(c => c["class"])
-            } catch(e) { root._prelaunchClasses = [] }
-            snapshotClients.stdout.buffer = ""
-        }
+        onErrorOccurred: { root._prelaunchClasses = [] }
     }
 
-    Process {
+    Components.HyprctlClients {
         id: detectClient
-        command: ["hyprctl", "clients", "-j"]
-        stdout: SplitParser {
-            property string buffer: ""
-            onRead: (line) => { buffer += line }
-        }
-        onExited: {
-            try {
-                let clients = JSON.parse(detectClient.stdout.buffer)
-                for (let i = 0; i < clients.length; i++) {
-                    if (root._prelaunchClasses.indexOf(clients[i]["class"]) < 0 && clients[i]["class"] !== "") {
-                        root.runningAppClass = clients[i]["class"]
-                        break
-                    }
+        onClientsReceived: (clients) => {
+            for (let i = 0; i < clients.length; i++) {
+                if (root._prelaunchClasses.indexOf(clients[i]["class"]) < 0 && clients[i]["class"] !== "") {
+                    root.runningAppClass = clients[i]["class"]
+                    break
                 }
-            } catch(e) {}
-            detectClient.stdout.buffer = ""
+            }
         }
     }
 
@@ -265,18 +248,12 @@ ShellRoot {
         onTriggered: { detectClient.running = true }
     }
 
-    // === App Resume: query running windows before launching ===
-    Process {
+    Components.HyprctlClients {
         id: windowQuery
-        command: ["hyprctl", "clients", "-j"]
-        stdout: SplitParser {
-            property string buffer: ""
-            onRead: (line) => { buffer += line }
+        onClientsReceived: (clients) => {
+            root._handleWindowQueryResult(clients)
         }
-        onExited: {
-            root._handleWindowQueryResult(windowQuery.stdout.buffer)
-            windowQuery.stdout.buffer = ""
-        }
+        onErrorOccurred: { root._handleWindowQueryResult([]) }
     }
 
     Process {
@@ -294,76 +271,63 @@ ShellRoot {
         windowQuery.running = true
     }
 
-    function _handleWindowQueryResult(jsonStr) {
+    function _handleWindowQueryResult(clients) {
         let app = root._pendingApp
         if (!app) return
         root._pendingApp = null
 
-        try {
-            let clients = JSON.parse(jsonStr)
-            let matchClass = (app.wmClass || "").toLowerCase()
-            let matchExec = (app.exec || "").split(/\s/)[0].split("/").pop().toLowerCase()
-            let matchName = (app.name || "").toLowerCase()
+        let matchClass = (app.wmClass || "").toLowerCase()
+        let matchExec = (app.exec || "").split(/\s/)[0].split("/").pop().toLowerCase()
+        let matchName = (app.name || "").toLowerCase()
 
-            for (let i = 0; i < clients.length; i++) {
-                let cls = (clients[i]["class"] || "").toLowerCase()
-                let initCls = (clients[i]["initialClass"] || "").toLowerCase()
-                if ((matchClass && (cls === matchClass || initCls === matchClass)) ||
-                    (matchExec && (cls === matchExec || initCls === matchExec)) ||
-                    (matchName && (cls === matchName || initCls === matchName))) {
-                    // Found running instance — focus it
-                    root.runningAppClass = clients[i]["class"]
-                    focusWindow.windowClass = clients[i]["class"]
-                    focusWindow.running = true
-                    root.state = "appRunning"
-                    return
-                }
+        for (let i = 0; i < clients.length; i++) {
+            let cls = (clients[i]["class"] || "").toLowerCase()
+            let initCls = (clients[i]["initialClass"] || "").toLowerCase()
+            if ((matchClass && (cls === matchClass || initCls === matchClass)) ||
+                (matchExec && (cls === matchExec || initCls === matchExec)) ||
+                (matchName && (cls === matchName || initCls === matchName))) {
+                root.runningAppClass = clients[i]["class"]
+                focusWindow.windowClass = clients[i]["class"]
+                focusWindow.running = true
+                root.state = "appRunning"
+                return
             }
-        } catch(e) {}
+        }
 
-        // Not running — launch new
         root.launchDesktopApp(app)
     }
 
-    // === Running Windows Polling ===
-    Process {
+    Components.HyprctlClients {
         id: windowPoller
-        command: ["hyprctl", "clients", "-j"]
-        stdout: SplitParser {
-            property string buffer: ""
-            onRead: (line) => { buffer += line }
-        }
-        onExited: {
-            try {
-                let clients = JSON.parse(windowPoller.stdout.buffer)
-                let windows = []
-                for (let i = 0; i < clients.length; i++) {
-                    let c = clients[i]
-                    if (c["class"] && c["class"] !== "" && c["class"].indexOf("quickshell") < 0) {
-                        let cls = c["class"]
-                        let iconName = (c["initialClass"] || cls).toLowerCase()
-                        let appIcon = iconName
-                        for (let j = 0; j < homeScreen.applications.length; j++) {
-                            let a = homeScreen.applications[j]
-                            let wm = (a.wmClass || "").toLowerCase()
-                            let ex = (a.exec || "").split(/\s/)[0].split("/").pop().toLowerCase()
-                            if (wm === cls.toLowerCase() || ex === cls.toLowerCase() || (a.name || "").toLowerCase() === cls.toLowerCase()) {
-                                appIcon = a.icon || iconName
-                                break
-                            }
+        onClientsReceived: (clients) => {
+            let apps = (typeof homeScreen !== "undefined" && homeScreen) ? homeScreen.applications : []
+            let windows = []
+            for (let i = 0; i < clients.length; i++) {
+                let c = clients[i]
+                if (c["class"] && c["class"] !== "" && c["class"].indexOf("quickshell") < 0) {
+                    let cls = c["class"]
+                    let iconName = (c["initialClass"] || cls).toLowerCase()
+                    let appIcon = iconName
+                    for (let j = 0; j < apps.length; j++) {
+                        let a = apps[j]
+                        let wm = (a.wmClass || "").toLowerCase()
+                        let ex = (a.exec || "").split(/\s/)[0].split("/").pop().toLowerCase()
+                        if (wm === cls.toLowerCase() || ex === cls.toLowerCase() || (a.name || "").toLowerCase() === cls.toLowerCase()) {
+                            appIcon = a.icon || iconName
+                            break
                         }
-                        windows.push({
-                            windowClass: cls,
-                            title: c["title"] || cls,
-                            name: c["title"] || cls,
-                            icon: appIcon,
-                            exec: ""
-                        })
                     }
+                    windows.push({
+                        windowClass: cls,
+                        title: c["title"] || cls,
+                        name: c["title"] || cls,
+                        icon: appIcon,
+                        exec: ""
+                    })
                 }
-                root.runningWindows = windows
-            } catch(e) { root.runningWindows = [] }
-            windowPoller.stdout.buffer = ""
+            }
+            root.runningWindows = windows
+
             if (root.state === "appRunning" && root.runningAppClass !== "") {
                 let found = false
                 for (let i = 0; i < root.runningWindows.length; i++) {
@@ -375,6 +339,7 @@ ShellRoot {
                 if (!found) root.returnToShell()
             }
         }
+        onErrorOccurred: { root.runningWindows = [] }
     }
 
     Timer {
