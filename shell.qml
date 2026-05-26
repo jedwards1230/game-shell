@@ -170,39 +170,36 @@ ShellRoot {
                 }
 
                 // --- Debug Input Overlay ---
-                // Visible when controllerDebug is enabled in settings.
-                // Subscribes to the input daemon socket for real-time events.
-                // NOTE: The daemon currently only broadcasts combo events
-                // (e.g. "combo:end-session"). Per-button/axis event streaming
-                // requires a daemon-side enhancement to call _notify_subscribers
-                // for each input event.
+                // Shows currently-held buttons as a combo display.
+                // Only visible when buttons are pressed and controllerDebug is on.
                 Item {
                     id: debugOverlay
                     anchors.fill: parent
                     visible: Components.Theme.controllerDebug
                     z: 100
 
-                    property var eventLog: []
-                    property int maxEvents: 4
+                    property string currentCombo: ""
+                    property string displayCombo: ""
+                    property bool showingCombo: false
 
-                    property real _now: Date.now()
-
-                    // Subscribe to daemon events
                     Process {
                         id: debugSubscribe
-                        command: ["python3", "-c", "import socket,os; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock')); s.sendall(b'subscribe\\n'); exec('while True:\\n d=s.recv(1024)\\n if not d: break\\n for l in d.decode().splitlines(): print(l,flush=True)')"]
+                        command: ["python3", "-c", "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'subscribe\\n');[print(l,flush=True) for d in iter(lambda:s.recv(1024),b'') for l in d.decode().splitlines()]"]
                         stdout: SplitParser {
                             onRead: (line) => {
                                 if (line === "subscribed") return
-                                let events = debugOverlay.eventLog.slice()
-                                events.unshift({ text: line, time: Date.now() })
-                                if (events.length > debugOverlay.maxEvents)
-                                    events = events.slice(0, debugOverlay.maxEvents)
-                                debugOverlay.eventLog = events
+                                if (line.startsWith("buttons:")) {
+                                    let combo = line.substring(8).trim()
+                                    debugOverlay.currentCombo = combo
+                                    if (combo !== "") {
+                                        debugOverlay.displayCombo = combo
+                                        debugOverlay.showingCombo = true
+                                        comboFadeTimer.restart()
+                                    }
+                                }
                             }
                         }
                         onExited: {
-                            // Reconnect if overlay is still visible
                             if (debugOverlay.visible)
                                 reconnectDebug.start()
                         }
@@ -217,24 +214,12 @@ ShellRoot {
                         }
                     }
 
-                    // Update _now for toast fade animation
                     Timer {
-                        id: nowTimer
-                        interval: 100
-                        repeat: true
-                        onTriggered: { debugOverlay._now = Date.now() }
-                    }
-
-                    // Fade out old events
-                    Timer {
-                        id: fadeTimer
-                        interval: 500
-                        repeat: true
+                        id: comboFadeTimer
+                        interval: 1500
                         onTriggered: {
-                            let now = Date.now()
-                            let filtered = debugOverlay.eventLog.filter(e => now - e.time < 1500)
-                            if (filtered.length !== debugOverlay.eventLog.length)
-                                debugOverlay.eventLog = filtered
+                            if (debugOverlay.currentCombo === "")
+                                debugOverlay.showingCombo = false
                         }
                     }
 
@@ -242,70 +227,37 @@ ShellRoot {
                         if (!visible) {
                             debugSubscribe.running = false
                             reconnectDebug.running = false
-                            nowTimer.running = false
-                            fadeTimer.running = false
-                            eventLog = []
+                            showingCombo = false
+                            currentCombo = ""
+                            displayCombo = ""
                         } else {
                             debugSubscribe.running = true
-                            nowTimer.running = true
-                            fadeTimer.running = true
                         }
                     }
 
-                    // Toast container — bottom-right
-                    Column {
+                    Rectangle {
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
                         anchors.rightMargin: 48
                         anchors.bottomMargin: 48
-                        spacing: 8
+                        width: comboText.implicitWidth + 64
+                        height: comboText.implicitHeight + 32
+                        radius: 16
+                        color: Qt.rgba(0, 0, 0, 0.8)
+                        border.width: 2
+                        border.color: Components.Theme.ember
+                        visible: debugOverlay.showingCombo
+                        opacity: debugOverlay.currentCombo !== "" ? 1.0 : 0.4
 
-                        // "Debug mode active" indicator
-                        Rectangle {
-                            width: debugLabel.implicitWidth + 48
-                            height: debugLabel.implicitHeight + 24
-                            radius: 12
-                            color: Qt.rgba(0, 0, 0, 0.7)
-                            border.width: 2
-                            border.color: Components.Theme.ember
+                        Behavior on opacity { NumberAnimation { duration: 300 } }
 
-                            Text {
-                                id: debugLabel
-                                anchors.centerIn: parent
-                                text: "Debug Input Active"
-                                font.pixelSize: Components.Theme.fontSmall
-                                color: Components.Theme.ember
-                            }
-                        }
-
-                        // Event toasts
-                        Repeater {
-                            model: debugOverlay.eventLog
-
-                            Rectangle {
-                                required property var modelData
-                                required property int index
-                                width: eventText.implicitWidth + 48
-                                height: eventText.implicitHeight + 24
-                                radius: 12
-                                color: Qt.rgba(0, 0, 0, 0.75)
-
-                                opacity: {
-                                    let age = debugOverlay._now - modelData.time
-                                    if (age > 1200) return Math.max(0, 1.0 - (age - 1200) / 300)
-                                    return 1.0
-                                }
-
-                                Behavior on opacity { NumberAnimation { duration: 200 } }
-
-                                Text {
-                                    id: eventText
-                                    anchors.centerIn: parent
-                                    text: modelData.text
-                                    font.pixelSize: Components.Theme.fontSmall
-                                    color: Components.Theme.textOnDark
-                                }
-                            }
+                        Text {
+                            id: comboText
+                            anchors.centerIn: parent
+                            text: debugOverlay.displayCombo
+                            font.pixelSize: Components.Theme.fontBody
+                            font.bold: true
+                            color: Components.Theme.textOnDark
                         }
                     }
                 }

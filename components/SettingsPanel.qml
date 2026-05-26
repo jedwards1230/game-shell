@@ -24,8 +24,15 @@ Rectangle {
         if (visible) {
             currentSection = 0
             sidebarList.currentIndex = 0
-            sidebarList.forceActiveFocus()
+            // Delay focus slightly to ensure Loader has settled
+            focusTimer.restart()
         }
+    }
+
+    Timer {
+        id: focusTimer
+        interval: 50
+        onTriggered: { sidebarList.forceActiveFocus() }
     }
 
     RowLayout {

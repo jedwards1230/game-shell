@@ -35,6 +35,30 @@ BUTTON_MAP = {
 COMBO_KEYS = {ecodes.BTN_MODE, ecodes.BTN_EAST}
 COMBO_HOLD_SECS = 3.0
 
+BUTTON_NAMES = {
+    ecodes.BTN_SOUTH: "A",
+    ecodes.BTN_EAST: "B",
+    ecodes.BTN_NORTH: "Y",
+    ecodes.BTN_WEST: "X",
+    ecodes.BTN_TL: "LB",
+    ecodes.BTN_TR: "RB",
+    ecodes.BTN_TL2: "LT",
+    ecodes.BTN_TR2: "RT",
+    ecodes.BTN_SELECT: "Back",
+    ecodes.BTN_START: "Start",
+    ecodes.BTN_MODE: "Home",
+    ecodes.BTN_THUMBL: "L3",
+    ecodes.BTN_THUMBR: "R3",
+}
+
+DPAD_NAMES = {
+    ecodes.KEY_UP: "D-Up",
+    ecodes.KEY_DOWN: "D-Down",
+    ecodes.KEY_LEFT: "D-Left",
+    ecodes.KEY_RIGHT: "D-Right",
+}
+
+
 # Left analog stick configuration
 STICK_DEADZONE = 0.30  # 30% of half-range from center before triggering
 
@@ -122,9 +146,11 @@ class InputDaemon:
             if key_event.keystate == 1:  # down
                 self.held_keys.add(event.code)
                 self._check_combo_start()
+                asyncio.ensure_future(self._notify_held_buttons())
             elif key_event.keystate == 0:  # up
                 self.held_keys.discard(event.code)
                 self._cancel_combo()
+                asyncio.ensure_future(self._notify_held_buttons())
 
             # Map to keyboard
             mapped = BUTTON_MAP.get(event.code)
@@ -137,19 +163,29 @@ class InputDaemon:
             if event.code == ecodes.ABS_HAT0X:
                 if event.value == -1:
                     self._emit_key(ecodes.KEY_LEFT, 1)
+                    self.held_keys.add(ecodes.KEY_LEFT)
                 elif event.value == 1:
                     self._emit_key(ecodes.KEY_RIGHT, 1)
+                    self.held_keys.add(ecodes.KEY_RIGHT)
                 else:
                     self._emit_key(ecodes.KEY_LEFT, 0)
                     self._emit_key(ecodes.KEY_RIGHT, 0)
+                    self.held_keys.discard(ecodes.KEY_LEFT)
+                    self.held_keys.discard(ecodes.KEY_RIGHT)
+                asyncio.ensure_future(self._notify_held_buttons())
             elif event.code == ecodes.ABS_HAT0Y:
                 if event.value == -1:
                     self._emit_key(ecodes.KEY_UP, 1)
+                    self.held_keys.add(ecodes.KEY_UP)
                 elif event.value == 1:
                     self._emit_key(ecodes.KEY_DOWN, 1)
+                    self.held_keys.add(ecodes.KEY_DOWN)
                 else:
                     self._emit_key(ecodes.KEY_UP, 0)
                     self._emit_key(ecodes.KEY_DOWN, 0)
+                    self.held_keys.discard(ecodes.KEY_UP)
+                    self.held_keys.discard(ecodes.KEY_DOWN)
+                asyncio.ensure_future(self._notify_held_buttons())
 
             # Left analog stick → arrow keys (with deadzone + repeat)
             elif event.code == ecodes.ABS_X:
@@ -299,6 +335,20 @@ class InputDaemon:
                 log.info("Released gamepad grab")
             except OSError as e:
                 log.error("Failed to ungrab gamepad: %s", e)
+
+    async def _notify_held_buttons(self):
+        if not self.subscribers:
+            return
+        names = []
+        for code in sorted(self.held_keys):
+            if code in BUTTON_NAMES:
+                names.append(BUTTON_NAMES[code])
+            elif code in DPAD_NAMES:
+                names.append(DPAD_NAMES[code])
+        if names:
+            await self._notify_subscribers("buttons:" + " + ".join(names))
+        else:
+            await self._notify_subscribers("buttons:")
 
     async def _notify_subscribers(self, message: str):
         dead = []
