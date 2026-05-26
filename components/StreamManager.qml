@@ -18,6 +18,8 @@ Item {
     signal requestInputGrab()
 
     function launch(target) {
+        reconnectTimer.stop()
+        errorDismissTimer.stop()
         currentTarget = target
         crashCount = 0
         requestOverlayShow("Launching " + (target.app || target.name) + "...")
@@ -25,6 +27,8 @@ Item {
     }
 
     function stop() {
+        reconnectTimer.stop()
+        errorDismissTimer.stop()
         moonlight.running = false
     }
 
