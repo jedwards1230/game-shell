@@ -300,6 +300,7 @@ ShellRoot {
     Components.HyprctlClients {
         id: windowPoller
         onClientsReceived: (clients) => {
+            let apps = (typeof homeScreen !== "undefined" && homeScreen) ? homeScreen.applications : []
             let windows = []
             for (let i = 0; i < clients.length; i++) {
                 let c = clients[i]
@@ -307,8 +308,8 @@ ShellRoot {
                     let cls = c["class"]
                     let iconName = (c["initialClass"] || cls).toLowerCase()
                     let appIcon = iconName
-                    for (let j = 0; j < homeScreen.applications.length; j++) {
-                        let a = homeScreen.applications[j]
+                    for (let j = 0; j < apps.length; j++) {
+                        let a = apps[j]
                         let wm = (a.wmClass || "").toLowerCase()
                         let ex = (a.exec || "").split(/\s/)[0].split("/").pop().toLowerCase()
                         if (wm === cls.toLowerCase() || ex === cls.toLowerCase() || (a.name || "").toLowerCase() === cls.toLowerCase()) {
