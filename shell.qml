@@ -140,13 +140,25 @@ ShellRoot {
             Item {
                 anchors.fill: parent
 
+                // Guide button (KEY_HOMEPAGE) toggles navigation drawer
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_HomePage) {
+                        navDrawer.opened = !navDrawer.opened
+                        if (navDrawer.opened)
+                            navDrawer.forceActiveFocus()
+                        else
+                            homeFocusTimer.restart()
+                        event.accepted = true
+                    }
+                }
+
                 Components.HomeScreen {
                     id: homeScreen
                     anchors.fill: parent
                     visible: root.state === "idle"
                     targets: root.targets
                     shellState: root.state
-                    focus: root.state === "idle" && !settingsPanel.visible
+                    focus: root.state === "idle" && !settingsPanel.visible && !navDrawer.opened
 
                     onStreamRequested: (target) => root.launchStream(target)
                     onSettingsRequested: {
@@ -173,6 +185,27 @@ ShellRoot {
                 Components.StreamOverlay {
                     id: overlay
                     anchors.fill: parent
+                }
+
+                // === Navigation Drawer ===
+                Components.NavigationDrawer {
+                    id: navDrawer
+                    z: 50
+                    onForceQuitRequested: {
+                        moonlight.running = false
+                        root.state = "idle"
+                        overlay.hide()
+                        grabInput()
+                        navDrawer.opened = false
+                        homeFocusTimer.restart()
+                    }
+                    onSettingsRequested: {
+                        settingsPanel.visible = true
+                        settingsPanel.forceActiveFocus()
+                    }
+                    onClosed: {
+                        homeFocusTimer.restart()
+                    }
                 }
 
                 // --- Debug Input Overlay ---

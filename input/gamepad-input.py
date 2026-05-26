@@ -30,6 +30,7 @@ BUTTON_MAP = {
     ecodes.BTN_EAST: ecodes.KEY_ESC,      # B → Escape
     ecodes.BTN_NORTH: ecodes.KEY_TAB,     # Y → Tab
     ecodes.BTN_START: ecodes.KEY_ENTER,   # Start → Enter
+    ecodes.BTN_MODE: ecodes.KEY_HOMEPAGE, # Guide → Homepage (navigation drawer)
 }
 
 COMBO_KEYS = {ecodes.BTN_MODE, ecodes.BTN_EAST}
@@ -105,8 +106,10 @@ class InputDaemon:
         self.stick_threshold_y: int = 0
 
     async def start(self):
+        # Deduplicate mapped keys (e.g., BTN_SOUTH and BTN_START both map to KEY_ENTER)
+        mapped_keys = list(set(BUTTON_MAP.values()))
         self.uinput = UInput(
-            {ecodes.EV_KEY: list(BUTTON_MAP.values()) + [
+            {ecodes.EV_KEY: mapped_keys + [
                 ecodes.KEY_UP, ecodes.KEY_DOWN, ecodes.KEY_LEFT, ecodes.KEY_RIGHT,
             ]},
             name="game-shell-virtual-kb",

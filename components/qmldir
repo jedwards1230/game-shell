@@ -16,3 +16,5 @@ AppearanceSettings 1.0 AppearanceSettings.qml
 AppCard 1.0 AppCard.qml
 ControllerSettings 1.0 ControllerSettings.qml
 MarqueeText 1.0 MarqueeText.qml
+Drawer 1.0 Drawer.qml
+NavigationDrawer 1.0 NavigationDrawer.qml
