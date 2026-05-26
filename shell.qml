@@ -141,7 +141,7 @@ ShellRoot {
         if (currentTarget.fps) { args.push("--fps"); args.push(String(currentTarget.fps)) }
         if (currentTarget.hdr) args.push("--hdr")
         if (currentTarget.codec) { args.push("--video-codec"); args.push(currentTarget.codec) }
-        args.push("--display-mode", "borderless")
+        args.push("--display-mode", "fullscreen")
         args.push("--no-quit-after")
         args.push("--no-frame-pacing")
 
