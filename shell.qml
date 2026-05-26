@@ -36,9 +36,6 @@ ShellRoot {
     Process {
         id: avWake
         command: ["/usr/local/bin/living-room-cec", "on"]
-        onExited: (exitCode, exitStatus) => {
-            if (root.state === "launching") launchMoonlight()
-        }
     }
 
     Process {
@@ -133,6 +130,7 @@ ShellRoot {
         root.crashCount = 0
         overlay.show("Launching " + target.name + "...")
         avWake.running = true
+        launchMoonlight()
     }
 
     function launchMoonlight() {
