@@ -43,19 +43,14 @@ ShellRoot {
         onExited: (exitCode, exitStatus) => {
             if (exitCode === 0) {
                 root.state = "idle"
-                overlay.hide()
                 grabInput()
             } else {
                 root.crashCount++
                 if (root.crashCount < 5) {
                     root.state = "reconnecting"
-                    overlay.show("Reconnecting...")
-                    overlay.attemptCount = root.crashCount
                     reconnectTimer.start()
                 } else {
                     root.state = "idle"
-                    overlay.show("Stream failed after 5 attempts")
-                    errorDismissTimer.start()
                     grabInput()
                 }
             }
@@ -112,7 +107,6 @@ ShellRoot {
         moonlight.running = false
         forceKill.running = true
         root.state = "idle"
-        overlay.hide()
         grabInput()
         navDrawer.opened = false
         settingsPanel.visible = false
@@ -128,7 +122,6 @@ ShellRoot {
         root.currentTarget = target
         root.state = "launching"
         root.crashCount = 0
-        overlay.show("Launching " + target.name + "...")
         avWake.running = true
         launchMoonlight()
     }
@@ -146,7 +139,6 @@ ShellRoot {
         moonlight.command = args
         releaseInput()
         root.state = "streaming"
-        overlay.hide()
         moonlight.running = true
     }
 
