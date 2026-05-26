@@ -160,8 +160,14 @@ ShellRoot {
                     anchors.fill: parent
                     onClosed: {
                         settingsPanel.visible = false
-                        homeScreen.forceActiveFocus()
+                        homeFocusTimer.restart()
                     }
+                }
+
+                Timer {
+                    id: homeFocusTimer
+                    interval: 50
+                    onTriggered: { homeScreen.forceActiveFocus() }
                 }
 
                 Components.StreamOverlay {

@@ -94,6 +94,10 @@ class InputDaemon:
         self.stick_x_repeat: asyncio.Task | None = None
         self.stick_y_repeat: asyncio.Task | None = None
 
+        # Trigger state
+        self.left_trigger_held = False
+        self.right_trigger_held = False
+
         # Stick calibration — computed from device absinfo on connect
         self.stick_center_x: int = 0
         self.stick_center_y: int = 0
@@ -199,6 +203,18 @@ class InputDaemon:
                     ecodes.KEY_UP, ecodes.KEY_DOWN,
                 )
 
+            # Triggers (analog axes treated as digital)
+            elif event.code == ecodes.ABS_Z:  # Left trigger
+                was = self.left_trigger_held
+                self.left_trigger_held = event.value > 100
+                if was != self.left_trigger_held:
+                    asyncio.ensure_future(self._notify_held_buttons())
+            elif event.code == ecodes.ABS_RZ:  # Right trigger
+                was = self.right_trigger_held
+                self.right_trigger_held = event.value > 100
+                if was != self.right_trigger_held:
+                    asyncio.ensure_future(self._notify_held_buttons())
+
     def _emit_key(self, key, value):
         if self.uinput:
             try:
@@ -207,6 +223,10 @@ class InputDaemon:
             except OSError:
                 log.debug("uinput write failed (device closed)")
                 return
+
+    def _reset_triggers(self):
+        self.left_trigger_held = False
+        self.right_trigger_held = False
 
     def _reset_stick_state(self):
         """Release any held stick keys and cancel repeat tasks."""
@@ -345,6 +365,18 @@ class InputDaemon:
                 names.append(BUTTON_NAMES[code])
             elif code in DPAD_NAMES:
                 names.append(DPAD_NAMES[code])
+            else:
+                ecode_name = ecodes.bytype.get(ecodes.EV_KEY, {}).get(code)
+                if ecode_name:
+                    if isinstance(ecode_name, list):
+                        ecode_name = ecode_name[0]
+                    names.append(ecode_name.replace("BTN_", "").replace("KEY_", "").title())
+                else:
+                    names.append(f"0x{code:x}")
+        if self.left_trigger_held:
+            names.append("LT")
+        if self.right_trigger_held:
+            names.append("RT")
         if names:
             await self._notify_subscribers("buttons:" + " + ".join(names))
         else:
