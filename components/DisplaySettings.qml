@@ -425,7 +425,7 @@ FocusScope {
                             return Theme.sidebarActive;
                         if (modeDropdownList.currentIndex === index && modeDropdownList.activeFocus)
                             return Theme.surfaceHover;
-                        return Theme.card;
+                        return Theme.cardBackground;
                     }
                     border.width: isCurrent ? 2 : 1
                     border.color: isCurrent ? Theme.focusBorder : Theme.surfaceBorder

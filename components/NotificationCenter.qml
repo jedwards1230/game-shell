@@ -27,35 +27,30 @@ FocusScope {
         if (event.key === Qt.Key_Up) {
             if (_selectedIndex > 0)
                 _selectedIndex--;
-            event.accepted = true;
         } else if (event.key === Qt.Key_Down) {
             if (_selectedIndex < entries.length - 1)
                 _selectedIndex++;
-            event.accepted = true;
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            // A button -- open error details if entry is error level
             if (entries.length > 0) {
                 var entry = entries[_selectedIndex];
                 if (entry.level === "error")
                     root.errorLogRequested();
             }
-            event.accepted = true;
         } else if (event.key === Qt.Key_Escape) {
-            // B button -- close
             root.opened = false;
-            event.accepted = true;
         } else if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
-            // X button -- clear all
             NotificationManager.clearHistory();
             ErrorLog.clear();
             _selectedIndex = 0;
-            event.accepted = true;
         }
+        // Modal: block all keys from reaching items below
+        event.accepted = true;
     }
 
     // Backdrop
     DimmedBackdrop {
         dimLevel: 0.85
+        onClicked: root.opened = false
     }
 
     // Content

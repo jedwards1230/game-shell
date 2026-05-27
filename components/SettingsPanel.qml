@@ -9,46 +9,107 @@ Rectangle {
     signal closed
 
     property int currentSection: 0
-    property var sections: [
+
+    Component {
+        id: audioComp
+        AudioSettings {}
+    }
+
+    Component {
+        id: bluetoothComp
+        BluetoothSettings {}
+    }
+
+    Component {
+        id: networkComp
+        NetworkSettings {}
+    }
+
+    Component {
+        id: displayComp
+        DisplaySettings {}
+    }
+
+    Component {
+        id: controllerComp
+        ControllerSettings {}
+    }
+
+    Component {
+        id: keyBindingsComp
+        KeyBindingsSettings {}
+    }
+
+    Component {
+        id: avControlComp
+        AVControlSettings {}
+    }
+
+    Component {
+        id: moonlightComp
+        MoonlightSettings {}
+    }
+
+    Component {
+        id: appearanceComp
+        AppearanceSettings {}
+    }
+
+    Component {
+        id: powerComp
+        PowerSettings {}
+    }
+
+    readonly property var sections: [
         {
             name: "Audio",
-            icon: "\u{1F50A}"
+            icon: "\u{1F50A}",
+            component: audioComp
         },
         {
             name: "Bluetooth",
-            icon: "⚡"
+            icon: "⚡",
+            component: bluetoothComp
         },
         {
             name: "Network",
-            icon: "\u{1F310}"
+            icon: "\u{1F310}",
+            component: networkComp
         },
         {
             name: "Display",
-            icon: "\u{1F5A5}"
+            icon: "\u{1F5A5}",
+            component: displayComp
         },
         {
             name: "Controllers",
-            icon: "\u{1F3AE}"
+            icon: "\u{1F3AE}",
+            component: controllerComp
         },
         {
             name: "Key Bindings",
-            icon: "⌨"
+            icon: "⌨",
+            component: keyBindingsComp
         },
         {
             name: "AV Control",
-            icon: "\u{1F4FA}"
+            icon: "\u{1F4FA}",
+            component: avControlComp
         },
         {
             name: "Moonlight",
-            icon: "\u{1F319}"
+            icon: "\u{1F319}",
+            component: moonlightComp
         },
         {
             name: "Appearance",
-            icon: "\u{1F3A8}"
+            icon: "\u{1F3A8}",
+            component: appearanceComp
         },
         {
             name: "Power",
-            icon: "⏻"
+            icon: "⏻",
+            component: powerComp
         }
     ]
 
@@ -272,82 +333,7 @@ Rectangle {
                 Loader {
                     id: contentLoader
                     anchors.fill: parent
-                    sourceComponent: {
-                        switch (root.currentSection) {
-                        case 0:
-                            return audioComp;
-                        case 1:
-                            return bluetoothComp;
-                        case 2:
-                            return networkComp;
-                        case 3:
-                            return displayComp;
-                        case 4:
-                            return controllerComp;
-                        case 5:
-                            return keyBindingsComp;
-                        case 6:
-                            return avControlComp;
-                        case 7:
-                            return moonlightComp;
-                        case 8:
-                            return appearanceComp;
-                        case 9:
-                            return powerComp;
-                        default:
-                            return audioComp;
-                        }
-                    }
-                }
-
-                Component {
-                    id: audioComp
-                    AudioSettings {}
-                }
-
-                Component {
-                    id: bluetoothComp
-                    BluetoothSettings {}
-                }
-
-                Component {
-                    id: networkComp
-                    NetworkSettings {}
-                }
-
-                Component {
-                    id: displayComp
-                    DisplaySettings {}
-                }
-
-                Component {
-                    id: controllerComp
-                    ControllerSettings {}
-                }
-
-                Component {
-                    id: keyBindingsComp
-                    KeyBindingsSettings {}
-                }
-
-                Component {
-                    id: avControlComp
-                    AVControlSettings {}
-                }
-
-                Component {
-                    id: moonlightComp
-                    MoonlightSettings {}
-                }
-
-                Component {
-                    id: appearanceComp
-                    AppearanceSettings {}
-                }
-
-                Component {
-                    id: powerComp
-                    PowerSettings {}
+                    sourceComponent: root.sections[root.currentSection].component
                 }
             }
         }

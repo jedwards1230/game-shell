@@ -14,6 +14,42 @@ ShellRoot {
     property var _applications: []
     property var _layout: null
 
+    // Declarative state machine — ShellRoot doesn't inherit Item,
+    // so we host states/transitions on an internal Item wrapper.
+    Item {
+        id: stateMachine
+        state: root.state
+
+        states: [
+            State {
+                name: "idle"
+                PropertyChanges {
+                    target: root
+                    overlayDrawerOpen: false
+                }
+            },
+            State {
+                name: "launching"
+            },
+            State {
+                name: "streaming"
+            },
+            State {
+                name: "reconnecting"
+            },
+            State {
+                name: "appRunning"
+            }
+        ]
+
+        transitions: [
+            Transition {
+                from: "*"
+                to: "idle"
+            }
+        ]
+    }
+
     Process {
         id: loadTargets
         command: ["cat", "/opt/game-shell/targets.json"]
@@ -47,7 +83,7 @@ ShellRoot {
         }
         onHomeHeld: {
             if (root.state === "appRunning")
-                root.closeAndReturnToShell();
+                root.returnToShell();
         }
     }
 
@@ -116,7 +152,6 @@ ShellRoot {
         if (root.state === "appRunning")
             closeAndReturnToShell();
         appLifecycle.runningAppClass = "";
-        root.overlayDrawerOpen = false;
         root.state = "idle";
         inputManager.grab();
         if (root._layout) {
@@ -130,7 +165,6 @@ ShellRoot {
     }
 
     function returnToShell() {
-        root.overlayDrawerOpen = false;
         root.state = "idle";
         inputManager.grab();
         if (root._layout) {

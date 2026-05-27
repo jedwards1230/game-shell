@@ -12,6 +12,7 @@ Rectangle {
 
     MouseArea {
         anchors.fill: parent
+        hoverEnabled: true
         onClicked: root.clicked()
     }
 

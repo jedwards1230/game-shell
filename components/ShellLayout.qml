@@ -37,11 +37,16 @@ FocusScope {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_HomePage) {
             root.homeKeyPressed();
-            navDrawer.opened = !navDrawer.opened;
-            if (navDrawer.opened)
-                navDrawer.forceActiveFocus();
-            else
+            if (notificationCenter.opened) {
+                notificationCenter.opened = false;
                 homeFocusTimer.restart();
+            } else {
+                navDrawer.opened = !navDrawer.opened;
+                if (navDrawer.opened)
+                    navDrawer.forceActiveFocus();
+                else
+                    homeFocusTimer.restart();
+            }
             event.accepted = true;
         }
     }
@@ -52,7 +57,7 @@ FocusScope {
         visible: root.shellState === "idle"
         targets: root.targets
         shellState: root.shellState
-        focus: root.shellState === "idle" && !settingsPanel.visible && !navDrawer.opened
+        focus: root.shellState === "idle" && !settingsPanel.visible && !navDrawer.opened && !notificationCenter.opened
 
         runningWindows: root.runningWindows
 
@@ -83,6 +88,8 @@ FocusScope {
         id: homeFocusTimer
         interval: 50
         onTriggered: {
+            if (notificationCenter.opened || errorLogViewer.opened)
+                return;
             homeScreen.forceActiveFocus();
         }
     }
@@ -173,7 +180,7 @@ FocusScope {
                 settingsPanel.forceActiveFocus();
             }
             onNotificationCenterRequested: {
-                root.overlayDrawerClosed();
+                root.returnToShellRequested();
                 notificationCenter.opened = true;
                 notificationCenter.forceActiveFocus();
             }

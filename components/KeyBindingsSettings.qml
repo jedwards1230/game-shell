@@ -102,10 +102,10 @@ FocusScope {
         },
         {
             action: "homeHold",
-            label: "Go Home (close app)",
+            label: "Go Home",
             keys: ["Home (hold 2s)"],
             category: "System",
-            description: "Close foreground app and return to home screen"
+            description: "Return to home screen (app stays running)"
         },
         {
             action: "mouseLB",
@@ -139,13 +139,6 @@ FocusScope {
 
     // Actions that can be remapped via daemon IPC
     property var remappableActions: ["select", "back", "altSelect", "confirm"]
-
-    property var navigationBindings: bindings.filter(function (b) {
-        return b.category === "Navigation";
-    })
-    property var systemBindings: bindings.filter(function (b) {
-        return b.category === "System";
-    })
 
     // Capture state
     property int editingIndex: -1
@@ -306,34 +299,52 @@ FocusScope {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.padding
-        spacing: 32
+        spacing: 16
 
-        // Navigation section header
-        Text {
-            text: "Navigation"
-            font.pixelSize: Theme.fontBody
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        // Navigation bindings list
         ListView {
             id: bindingsList
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(root.navigationBindings.length * 88, 1060)
+            Layout.fillHeight: true
             spacing: 8
             clip: true
-            model: root.navigationBindings
             focus: true
-            interactive: false
-            keyNavigationEnabled: true
+            model: root.bindings
+            onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
-            KeyNavigation.down: systemList
+            section.property: "category"
+            section.delegate: Item {
+                required property string section
+                width: bindingsList.width
+                height: sectionLabel.implicitHeight + 24
 
-            Keys.onReturnPressed: {
-                var binding = root.navigationBindings[currentIndex];
-                if (root.remappableActions.indexOf(binding.action) >= 0) {
-                    root.startCapture(currentIndex, binding.action, binding.label);
+                Text {
+                    id: sectionLabel
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 8
+                    text: section
+                    font.pixelSize: Theme.fontBody
+                    font.bold: true
+                    color: Theme.textPrimary
+                }
+            }
+
+            Keys.onPressed: event => {
+                if (event.key === Qt.Key_Down) {
+                    if (currentIndex < count - 1)
+                        currentIndex++;
+                    else
+                        resetButton.forceActiveFocus();
+                    event.accepted = true;
+                } else if (event.key === Qt.Key_Up) {
+                    if (currentIndex > 0)
+                        currentIndex--;
+                    event.accepted = true;
+                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    var binding = root.bindings[currentIndex];
+                    if (root.remappableActions.indexOf(binding.action) >= 0)
+                        root.startCapture(currentIndex, binding.action, binding.label);
+                    event.accepted = true;
                 }
             }
 
@@ -341,7 +352,7 @@ FocusScope {
                 required property int index
                 required property var modelData
                 width: bindingsList.width
-                height: 80
+                height: modelData.action === "drawer" ? 100 : 80
                 radius: 16
                 color: bindingsList.currentIndex === index && bindingsList.activeFocus ? Theme.surfaceHover : Theme.surface
                 border.width: 2
@@ -363,102 +374,6 @@ FocusScope {
                     anchors.rightMargin: 24
                     spacing: 16
 
-                    // Action label
-                    Text {
-                        text: modelData.label
-                        font.pixelSize: Theme.fontSmall
-                        color: Theme.textPrimary
-                        Layout.fillWidth: true
-                    }
-
-                    // Key cap badges
-                    Row {
-                        Layout.alignment: Qt.AlignRight
-                        spacing: 8
-
-                        Repeater {
-                            model: modelData.keys
-
-                            Row {
-                                spacing: 8
-
-                                // "+" separator for combo keys (after first key)
-                                Text {
-                                    text: "+"
-                                    font.pixelSize: Theme.fontSmall
-                                    color: Theme.textMuted
-                                    visible: index > 0
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                Rectangle {
-                                    width: keyText.implicitWidth + 24
-                                    height: keyText.implicitHeight + 16
-                                    radius: 8
-                                    color: Theme.surface
-                                    border.width: 2
-                                    border.color: Theme.ember
-
-                                    Text {
-                                        id: keyText
-                                        anchors.centerIn: parent
-                                        text: modelData
-                                        font.pixelSize: Theme.fontSmall
-                                        color: Theme.textPrimary
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // System section header
-        Text {
-            text: "System"
-            font.pixelSize: Theme.fontBody
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        // System bindings list (read-only)
-        ListView {
-            id: systemList
-            Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(root.systemBindings.length * 108, 400)
-            spacing: 8
-            clip: true
-            model: root.systemBindings
-            interactive: false
-            keyNavigationEnabled: true
-
-            KeyNavigation.up: bindingsList
-            KeyNavigation.down: resetButton
-
-            delegate: Rectangle {
-                required property int index
-                required property var modelData
-                width: systemList.width
-                height: modelData.action === "drawer" ? 100 : 80
-                radius: 16
-                color: systemList.currentIndex === index && systemList.activeFocus ? Theme.surfaceHover : Theme.surface
-                border.width: 2
-                border.color: Theme.surfaceBorder
-
-                Behavior on color {
-                    ColorAnimation {
-                        duration: 150
-                    }
-                }
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 24
-                    anchors.rightMargin: 24
-                    spacing: 16
-
-                    // Action label + optional subtitle
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 4
@@ -477,7 +392,6 @@ FocusScope {
                         }
                     }
 
-                    // Key cap badges
                     Row {
                         Layout.alignment: Qt.AlignRight
                         spacing: 8
@@ -497,15 +411,15 @@ FocusScope {
                                 }
 
                                 Rectangle {
-                                    width: sysKeyText.implicitWidth + 24
-                                    height: sysKeyText.implicitHeight + 16
+                                    width: capText.implicitWidth + 24
+                                    height: capText.implicitHeight + 16
                                     radius: 8
                                     color: Theme.surface
                                     border.width: 2
                                     border.color: Theme.ember
 
                                     Text {
-                                        id: sysKeyText
+                                        id: capText
                                         anchors.centerIn: parent
                                         text: modelData
                                         font.pixelSize: Theme.fontSmall
@@ -519,21 +433,23 @@ FocusScope {
             }
         }
 
-        // Reset to Defaults button
-        SettingsButton {
-            id: resetButton
-            text: "Reset to Defaults"
-            Layout.alignment: Qt.AlignHCenter
+        FocusScope {
+            id: resetScope
+            Layout.fillWidth: true
+            Layout.preferredHeight: resetButton.height
 
-            KeyNavigation.up: systemList
+            SettingsButton {
+                id: resetButton
+                text: "Reset to Defaults"
+                anchors.horizontalCenter: parent.horizontalCenter
+                focus: parent.activeFocus
 
-            Keys.onReturnPressed: {
-                root.resetDefaults();
+                Keys.onUpPressed: {
+                    bindingsList.currentIndex = bindingsList.count - 1;
+                    bindingsList.forceActiveFocus();
+                }
+                Keys.onReturnPressed: root.resetDefaults()
             }
-        }
-
-        Item {
-            Layout.fillHeight: true
         }
 
         Text {

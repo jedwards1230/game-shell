@@ -149,7 +149,15 @@ Item {
         onExited: exitCode => {
             if (exitCode !== 0 && root.shellState === "appRunning")
                 root.appClosed();
+            else
+                ensureFullscreen.running = true;
         }
+    }
+
+    // Window rule only applies at creation — restore fullscreen on resume
+    Process {
+        id: ensureFullscreen
+        command: ["bash", "-c", "FS=$(hyprctl activewindow -j | grep -o '\"fullscreen\": [0-9]*' | grep -o '[0-9]*'); [ \"$FS\" = \"0\" ] && hyprctl dispatch fullscreen 0; exit 0"]
     }
 
     function _handleWindowQueryResult(clients) {

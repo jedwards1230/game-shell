@@ -33,29 +33,23 @@ FocusScope {
         if (event.key === Qt.Key_Up) {
             if (_selectedIndex > 0)
                 _selectedIndex--;
-            event.accepted = true;
         } else if (event.key === Qt.Key_Down) {
             if (_selectedIndex < entries.length - 1)
                 _selectedIndex++;
-            event.accepted = true;
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            // A button — toggle details
             if (entries.length > 0) {
                 var entry = entries[_selectedIndex];
                 _expandedId = (_expandedId === entry.id) ? -1 : entry.id;
             }
-            event.accepted = true;
         } else if (event.key === Qt.Key_Escape) {
-            // B button — close
             root.opened = false;
-            event.accepted = true;
         } else if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
-            // X button — clear all
             ErrorLog.clear();
             _selectedIndex = 0;
             _expandedId = -1;
-            event.accepted = true;
         }
+        // Modal: block all keys from reaching items below
+        event.accepted = true;
     }
 
     // Backdrop
