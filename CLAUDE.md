@@ -54,7 +54,7 @@ scripts/
 
 - **Streaming targets**: Loaded from `/opt/game-shell/targets.json` at startup (single-line JSON — see gotchas). Managed in-UI via MoonlightSettings.
 - **Settings persistence**: `~/.config/game-shell/settings.json` stores `themeMode` and `moonlightViewMode`. Add new fields to both `loadSettings` and `saveSettings` in Theme.qml.
-- **Input daemon IPC**: QML sends `grab`/`release` via Unix socket (`/run/user/$UID/game-shell-input.sock`). Released during streaming so Moonlight gets raw input.
+- **Input daemon IPC**: See [docs/IPC_PROTOCOL.md](docs/IPC_PROTOCOL.md) for the full protocol specification. QML sends commands via Unix socket; the daemon streams events to subscribers.
 - **Settings panels**: SettingsPanel uses a Loader to swap between section components. Each section manages its own system calls via `Quickshell.Io.Process`.
 
 ## System Integration

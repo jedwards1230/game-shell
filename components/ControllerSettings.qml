@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell.Io
 
+// IPC protocol: see docs/IPC_PROTOCOL.md
+// Commands used: status, grab, release
 FocusScope {
     id: root
 

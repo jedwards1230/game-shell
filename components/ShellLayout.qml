@@ -158,6 +158,7 @@ FocusScope {
     }
 
     // --- Debug Input Overlay ---
+    // IPC: subscribes to buttons:* events for real-time display (see docs/IPC_PROTOCOL.md)
     Item {
         id: debugOverlay
         anchors.fill: parent

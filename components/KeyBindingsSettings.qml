@@ -2,6 +2,9 @@ import Quickshell.Io
 import QtQuick
 import QtQuick.Layouts
 
+// IPC protocol: see docs/IPC_PROTOCOL.md
+// Commands used: get-bindings, set-binding, capture-next, capture-cancel
+// Known issue: hardcodes socket path /run/user/1000/ instead of using GAME_SHELL_SOCK
 FocusScope {
     id: root
 

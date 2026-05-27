@@ -1,6 +1,9 @@
 import Quickshell.Io
 import QtQuick
 
+// IPC protocol: see docs/IPC_PROTOCOL.md
+// Commands used: grab, release, subscribe
+// Events handled: combo:force-quit, combo:end-session, input-mode:*, controller-wake, controller-disconnected, home-press, combo:home-hold
 Item {
     id: root
 
