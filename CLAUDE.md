@@ -118,3 +118,7 @@ Requires Linux with evdev and uinput access. Auto-discovers gamepad by vendor/pr
 - **WAYLAND_DISPLAY may vary**: Usually `wayland-1` but try `wayland-0` if grim/hyprctl fails.
 - **Hyprland instance signature**: Multiple instances may exist in `/run/user/1000/hypr/`; use `tail -1` for the latest.
 - **Theme property renames cascade**: `Theme.text` → `Theme.textPrimary` will also hit `Theme.textDim` producing `Theme.textPrimaryDim`. Replace longest matches first.
+
+## CI
+
+- **QML formatting**: `qmlformat` (Qt 6.8) enforced via GitHub Actions. On PRs, unformatted files are auto-fixed and pushed. On main, unformatted files fail the check.
