@@ -8,10 +8,6 @@ export XDG_CURRENT_DESKTOP=Hyprland
 export GAME_SHELL_TARGETS="${GAME_SHELL_TARGETS:-$SHELL_DIR/targets.yaml}"
 export GAME_SHELL_SOCK="/run/user/$(id -u)/game-shell-input.sock"
 
-# Scale desktop apps for couch viewing (shell itself runs at scale=1)
-export GDK_SCALE=2
-export QT_SCALE_FACTOR=1.75
-
 # Start input daemon
 python3 "$SHELL_DIR/input/gamepad-input.py" &
 INPUT_PID=$!

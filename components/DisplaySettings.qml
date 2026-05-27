@@ -230,11 +230,11 @@ FocusScope {
             KeyNavigation.up: monitorList
             KeyNavigation.down: modeDropdownScope
 
+            property var scales: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0]
             property int selectedScale: {
                 if (root.monitors.length <= root.selectedMonitor)
                     return 1;
                 let s = root.monitors[root.selectedMonitor].scale;
-                let scales = [0.5, 1.0, 1.25, 1.5, 2.0];
                 for (let i = 0; i < scales.length; i++) {
                     if (Math.abs(scales[i] - s) < 0.05)
                         return i;
@@ -248,11 +248,10 @@ FocusScope {
                     focusedIndex--;
             }
             Keys.onRightPressed: {
-                if (focusedIndex < 4)
+                if (focusedIndex < scales.length - 1)
                     focusedIndex++;
             }
             Keys.onReturnPressed: {
-                let scales = [0.5, 1.0, 1.25, 1.5, 2.0];
                 if (root.monitors.length > root.selectedMonitor) {
                     setScale.monName = root.monitors[root.selectedMonitor].name;
                     setScale.scaleVal = scales[focusedIndex];
@@ -265,7 +264,7 @@ FocusScope {
                 spacing: 16
 
                 Repeater {
-                    model: [0.5, 1.0, 1.25, 1.5, 2.0]
+                    model: scaleRow.scales
 
                     FocusScope {
                         id: scaleScope

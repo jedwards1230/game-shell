@@ -88,9 +88,9 @@ Item {
             Image {
                 id: iconImage
                 source: root.app.icon ? "image://icon/" + root.app.icon : ""
-                sourceSize: Qt.size(240, 240)
-                Layout.preferredWidth: 240
-                Layout.preferredHeight: 240
+                sourceSize: Qt.size(Units.iconSizeXL, Units.iconSizeXL)
+                Layout.preferredWidth: Units.iconSizeXL
+                Layout.preferredHeight: Units.iconSizeXL
                 Layout.alignment: Qt.AlignHCenter
                 fillMode: Image.PreserveAspectFit
                 visible: status === Image.Ready
@@ -100,11 +100,11 @@ Item {
             Text {
                 visible: iconImage.status !== Image.Ready
                 text: (root.app.name || "?").charAt(0).toUpperCase()
-                font.pixelSize: 120
+                font.pixelSize: Units.iconSizeLG
                 font.bold: true
                 color: Theme.textSecondary
-                Layout.preferredWidth: 240
-                Layout.preferredHeight: 240
+                Layout.preferredWidth: Units.iconSizeXL
+                Layout.preferredHeight: Units.iconSizeXL
                 Layout.alignment: Qt.AlignHCenter
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter

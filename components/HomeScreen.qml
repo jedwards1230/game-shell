@@ -233,298 +233,338 @@ except:
         return rows;
     }
 
-    ColumnLayout {
+    Flickable {
+        id: scrollView
         anchors.fill: parent
         anchors.margins: Theme.padding
-        spacing: 24
+        contentHeight: contentColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
 
-        // === Hero Clock Area ===
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 480
-            spacing: 32
+        function ensureVisible(item) {
+            if (!item)
+                return;
+            let mapped = item.mapToItem(contentColumn, 0, 0);
+            let itemTop = mapped.y;
+            let itemBottom = itemTop + item.height;
+            if (itemTop < contentY)
+                contentY = Math.max(0, itemTop - 24);
+            else if (itemBottom > contentY + height)
+                contentY = Math.min(contentHeight - height, itemBottom - height + 24);
+        }
 
-            // Clock + date (left side)
-            ColumnLayout {
-                spacing: 24
-                Layout.alignment: Qt.AlignVCenter
+        Behavior on contentY {
+            NumberAnimation {
+                duration: 300
+                easing.type: Easing.OutCubic
+            }
+        }
 
-                Text {
-                    id: heroClockText
-                    font.pixelSize: Theme.fontHero
-                    font.bold: true
-                    color: Theme.textPrimary
+        ColumnLayout {
+            id: contentColumn
+            width: scrollView.width
+            spacing: 24
 
-                    Timer {
-                        interval: 1000
-                        running: true
-                        repeat: true
-                        triggeredOnStart: true
-                        onTriggered: {
-                            let now = new Date();
-                            heroClockText.text = now.toLocaleTimeString(Qt.locale(), "h:mm AP");
+            // === Hero Clock Area ===
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Units.gridUnit * 9
+                spacing: 32
+
+                // Clock + date (left side)
+                ColumnLayout {
+                    spacing: 24
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        id: heroClockText
+                        font.pixelSize: Theme.fontHero
+                        font.bold: true
+                        color: Theme.textPrimary
+
+                        Timer {
+                            interval: 1000
+                            running: true
+                            repeat: true
+                            triggeredOnStart: true
+                            onTriggered: {
+                                let now = new Date();
+                                heroClockText.text = now.toLocaleTimeString(Qt.locale(), "h:mm AP");
+                            }
                         }
                     }
-                }
 
-                Text {
-                    id: heroDateText
-                    font.pixelSize: Theme.fontTitle
-                    color: Theme.textSecondary
+                    Text {
+                        id: heroDateText
+                        font.pixelSize: Theme.fontTitle
+                        color: Theme.textSecondary
 
-                    Timer {
-                        interval: 60000
-                        running: true
-                        repeat: true
-                        triggeredOnStart: true
-                        onTriggered: {
-                            let now = new Date();
-                            heroDateText.text = now.toLocaleDateString(Qt.locale(), "dddd, MMMM d");
+                        Timer {
+                            interval: 60000
+                            running: true
+                            repeat: true
+                            triggeredOnStart: true
+                            onTriggered: {
+                                let now = new Date();
+                                heroDateText.text = now.toLocaleDateString(Qt.locale(), "dddd, MMMM d");
+                            }
                         }
                     }
-                }
-            }
-
-            Item {
-                Layout.fillWidth: true
-            }
-
-            // Status icons (right side)
-            StatusIcons {
-                id: statusIcons
-                Layout.alignment: Qt.AlignTop | Qt.AlignRight
-                onSettingsRequested: root.settingsRequested()
-                onFocusDownRequested: root._focusFirstVisibleRow()
-            }
-        }
-
-        // === Running Windows Row ===
-        Text {
-            visible: root.runningWindows.length > 0
-            text: "Running"
-            font.pixelSize: Theme.fontTitle
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        NavigableRow {
-            id: runningRow
-            visible: root.runningWindows.length > 0
-            Layout.fillWidth: true
-            Layout.preferredHeight: visible ? Theme.rowHeight : 0
-            keyNavigationWraps: true
-            previousRow: statusIcons
-            nextRow: recentsRow
-            model: root.runningWindows
-
-            delegate: AppCard {
-                required property int index
-                required property var modelData
-                height: Theme.cardHeight
-                width: Theme.cardWidth
-                app: modelData
-                focus: index === runningRow.currentIndex
-                onActivated: root.appFocusRequested(modelData.windowClass)
-            }
-
-            onEscaped: root.settingsRequested()
-        }
-
-        // === Recents Row ===
-        Text {
-            visible: root.recentApps.length > 0
-            text: "Recent"
-            font.pixelSize: Theme.fontTitle
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        NavigableRow {
-            id: recentsRow
-            visible: root.recentApps.length > 0
-            Layout.fillWidth: true
-            Layout.preferredHeight: visible ? Theme.rowHeight : 0
-            keyNavigationWraps: true
-            focus: visible && !runningRow.visible
-            previousRow: runningRow
-            nextRow: {
-                var _ = appViewRepeater.count;
-                if (Theme.moonlightViewMode === "servers")
-                    return moonlightRow;
-                return root._appViewRowItem(0) || appsRow;
-            }
-            model: root.recentApps
-
-            delegate: AppCard {
-                required property int index
-                required property var modelData
-                height: Theme.cardHeight
-                width: Theme.cardWidth
-                app: modelData
-                focus: index === recentsRow.currentIndex
-                onActivated: root.launchApp(modelData)
-            }
-
-            onEscaped: root.settingsRequested()
-        }
-
-        // === Moonlight Section (server-view or app-view) ===
-
-        // Server view: single "Moonlight" row with one card per server
-        Text {
-            visible: Theme.moonlightViewMode === "servers"
-            text: "Moonlight"
-            font.pixelSize: Theme.fontTitle
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        NavigableRow {
-            id: moonlightRow
-            visible: Theme.moonlightViewMode === "servers"
-            Layout.fillWidth: true
-            Layout.preferredHeight: visible ? Theme.rowHeight : 0
-            keyNavigationWraps: true
-            focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible
-            previousRow: recentsRow
-            nextRow: appsRow
-            model: root.targets
-
-            delegate: StreamCard {
-                required property int index
-                required property var modelData
-                height: Theme.cardHeight
-                width: Theme.cardWidth
-                target: modelData
-                focus: index === moonlightRow.currentIndex
-                onActivated: root.streamRequested(modelData)
-            }
-
-            onEscaped: root.settingsRequested()
-        }
-
-        // App view: one row per host, each card is an available app
-        Repeater {
-            id: appViewRepeater
-            model: Theme.moonlightViewMode === "apps" ? root._appViewRows : []
-
-            delegate: ColumnLayout {
-                id: appViewRowDelegate
-                required property var modelData
-                required property int index
-
-                Layout.fillWidth: true
-                spacing: 8
-
-                property var hostData: modelData
-                property var hostTarget: modelData.target
-                property var hostAppList: modelData.apps
-                property alias navigableRow: appViewNavRow
-
-                Text {
-                    text: "Moonlight — " + hostData.name
-                    font.pixelSize: Theme.fontTitle
-                    font.bold: true
-                    color: Theme.textPrimary
                 }
 
                 Item {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Theme.rowHeight
+                }
 
-                    // Offline state
+                // Status icons (right side)
+                StatusIcons {
+                    id: statusIcons
+                    Layout.alignment: Qt.AlignTop | Qt.AlignRight
+                    onSettingsRequested: root.settingsRequested()
+                    onFocusDownRequested: root._focusFirstVisibleRow()
+                    onActiveFocusChanged: if (activeFocus)
+                        scrollView.contentY = 0
+                }
+            }
+
+            // === Running Windows Row ===
+            Text {
+                visible: root.runningWindows.length > 0
+                text: "Running"
+                font.pixelSize: Theme.fontTitle
+                font.bold: true
+                color: Theme.textPrimary
+            }
+
+            NavigableRow {
+                id: runningRow
+                visible: root.runningWindows.length > 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: visible ? Theme.rowHeight : 0
+                keyNavigationWraps: true
+                previousRow: statusIcons
+                nextRow: recentsRow
+                model: root.runningWindows
+                onActiveFocusChanged: if (activeFocus)
+                    scrollView.ensureVisible(this)
+
+                delegate: AppCard {
+                    required property int index
+                    required property var modelData
+                    height: Theme.cardHeight
+                    width: Theme.cardWidth
+                    app: modelData
+                    focus: index === runningRow.currentIndex
+                    onActivated: root.appFocusRequested(modelData.windowClass)
+                }
+
+                onEscaped: root.settingsRequested()
+            }
+
+            // === Recents Row ===
+            Text {
+                visible: root.recentApps.length > 0
+                text: "Recent"
+                font.pixelSize: Theme.fontTitle
+                font.bold: true
+                color: Theme.textPrimary
+            }
+
+            NavigableRow {
+                id: recentsRow
+                visible: root.recentApps.length > 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: visible ? Theme.rowHeight : 0
+                keyNavigationWraps: true
+                focus: visible && !runningRow.visible
+                previousRow: runningRow
+                onActiveFocusChanged: if (activeFocus)
+                    scrollView.ensureVisible(this)
+                nextRow: {
+                    var _ = appViewRepeater.count;
+                    if (Theme.moonlightViewMode === "servers")
+                        return moonlightRow;
+                    return root._appViewRowItem(0) || appsRow;
+                }
+                model: root.recentApps
+
+                delegate: AppCard {
+                    required property int index
+                    required property var modelData
+                    height: Theme.cardHeight
+                    width: Theme.cardWidth
+                    app: modelData
+                    focus: index === recentsRow.currentIndex
+                    onActivated: root.launchApp(modelData)
+                }
+
+                onEscaped: root.settingsRequested()
+            }
+
+            // === Moonlight Section (server-view or app-view) ===
+
+            // Server view: single "Moonlight" row with one card per server
+            Text {
+                visible: Theme.moonlightViewMode === "servers"
+                text: "Moonlight"
+                font.pixelSize: Theme.fontTitle
+                font.bold: true
+                color: Theme.textPrimary
+            }
+
+            NavigableRow {
+                id: moonlightRow
+                visible: Theme.moonlightViewMode === "servers"
+                Layout.fillWidth: true
+                Layout.preferredHeight: visible ? Theme.rowHeight : 0
+                keyNavigationWraps: true
+                focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible
+                previousRow: recentsRow
+                nextRow: appsRow
+                onActiveFocusChanged: if (activeFocus)
+                    scrollView.ensureVisible(this)
+                model: root.targets
+
+                delegate: StreamCard {
+                    required property int index
+                    required property var modelData
+                    height: Theme.cardHeight
+                    width: Theme.cardWidth
+                    target: modelData
+                    focus: index === moonlightRow.currentIndex
+                    onActivated: root.streamRequested(modelData)
+                }
+
+                onEscaped: root.settingsRequested()
+            }
+
+            // App view: one row per host, each card is an available app
+            Repeater {
+                id: appViewRepeater
+                model: Theme.moonlightViewMode === "apps" ? root._appViewRows : []
+
+                delegate: ColumnLayout {
+                    id: appViewRowDelegate
+                    required property var modelData
+                    required property int index
+
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    property var hostData: modelData
+                    property var hostTarget: modelData.target
+                    property var hostAppList: modelData.apps
+                    property alias navigableRow: appViewNavRow
+
                     Text {
-                        visible: hostAppList.length === 0 && !root._appDiscoveryRunning
-                        anchors.centerIn: parent
-                        text: "Offline or no apps found"
-                        font.pixelSize: Theme.fontSmall
-                        color: Theme.textMuted
+                        text: "Moonlight — " + hostData.name
+                        font.pixelSize: Theme.fontTitle
+                        font.bold: true
+                        color: Theme.textPrimary
                     }
 
-                    // Loading state
-                    Text {
-                        visible: hostAppList.length === 0 && root._appDiscoveryRunning
-                        anchors.centerIn: parent
-                        text: "Discovering apps..."
-                        font.pixelSize: Theme.fontSmall
-                        color: Theme.textMuted
-                    }
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Theme.rowHeight
 
-                    NavigableRow {
-                        id: appViewNavRow
-                        anchors.fill: parent
-                        visible: hostAppList.length > 0
-                        keyNavigationWraps: true
-                        focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible
-                        model: hostAppList
-                        previousRow: {
-                            var _ = appViewRepeater.count;
-                            return appViewRowDelegate.index === 0 ? recentsRow : root._appViewRowItem(appViewRowDelegate.index - 1);
+                        // Offline state
+                        Text {
+                            visible: hostAppList.length === 0 && !root._appDiscoveryRunning
+                            anchors.centerIn: parent
+                            text: "Offline or no apps found"
+                            font.pixelSize: Theme.fontSmall
+                            color: Theme.textMuted
                         }
-                        nextRow: appViewRowDelegate.index < appViewRepeater.count - 1 ? root._appViewRowItem(appViewRowDelegate.index + 1) : appsRow
 
-                        delegate: StreamCard {
-                            required property int index
-                            required property var modelData
-                            height: Theme.cardHeight
-                            width: Theme.cardWidth
-                            target: hostTarget
-                            appName: modelData
-                            focus: index === appViewNavRow.currentIndex
-                            onActivated: {
-                                let t = JSON.parse(JSON.stringify(hostTarget));
-                                t.app = modelData;
-                                root.streamRequested(t);
+                        // Loading state
+                        Text {
+                            visible: hostAppList.length === 0 && root._appDiscoveryRunning
+                            anchors.centerIn: parent
+                            text: "Discovering apps..."
+                            font.pixelSize: Theme.fontSmall
+                            color: Theme.textMuted
+                        }
+
+                        NavigableRow {
+                            id: appViewNavRow
+                            anchors.fill: parent
+                            visible: hostAppList.length > 0
+                            keyNavigationWraps: true
+                            focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible
+                            onActiveFocusChanged: if (activeFocus)
+                                scrollView.ensureVisible(appViewRowDelegate)
+                            model: hostAppList
+                            previousRow: {
+                                var _ = appViewRepeater.count;
+                                return appViewRowDelegate.index === 0 ? recentsRow : root._appViewRowItem(appViewRowDelegate.index - 1);
                             }
-                        }
+                            nextRow: appViewRowDelegate.index < appViewRepeater.count - 1 ? root._appViewRowItem(appViewRowDelegate.index + 1) : appsRow
 
-                        onEscaped: root.settingsRequested()
+                            delegate: StreamCard {
+                                required property int index
+                                required property var modelData
+                                height: Theme.cardHeight
+                                width: Theme.cardWidth
+                                target: hostTarget
+                                appName: modelData
+                                focus: index === appViewNavRow.currentIndex
+                                onActivated: {
+                                    let t = JSON.parse(JSON.stringify(hostTarget));
+                                    t.app = modelData;
+                                    root.streamRequested(t);
+                                }
+                            }
+
+                            onEscaped: root.settingsRequested()
+                        }
                     }
                 }
             }
-        }
 
-        // === Applications Row ===
-        Text {
-            text: "Applications"
-            font.pixelSize: Theme.fontTitle
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        NavigableRow {
-            id: appsRow
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.minimumHeight: Theme.rowHeight
-            keyNavigationWraps: true
-            previousRow: {
-                if (Theme.moonlightViewMode === "servers")
-                    return moonlightRow;
-                return root._appViewRowItem(appViewRepeater.count - 1) || recentsRow;
-            }
-            model: root.applications
-
-            delegate: AppCard {
-                required property int index
-                required property var modelData
-                height: Theme.cardHeight
-                width: Theme.cardWidth
-                app: modelData
-                focus: index === appsRow.currentIndex
-                onActivated: root.launchApp(modelData)
+            // === Applications Row ===
+            Text {
+                text: "Applications"
+                font.pixelSize: Theme.fontTitle
+                font.bold: true
+                color: Theme.textPrimary
             }
 
-            onEscaped: root.settingsRequested()
-        }
+            NavigableRow {
+                id: appsRow
+                Layout.fillWidth: true
+                Layout.preferredHeight: Theme.rowHeight
+                keyNavigationWraps: true
+                onActiveFocusChanged: if (activeFocus)
+                    scrollView.ensureVisible(this)
+                previousRow: {
+                    if (Theme.moonlightViewMode === "servers")
+                        return moonlightRow;
+                    return root._appViewRowItem(appViewRepeater.count - 1) || recentsRow;
+                }
+                model: root.applications
 
-        // === Hint Bar ===
-        Text {
-            text: "A: Launch  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row"
-            font.pixelSize: Theme.fontHint
-            color: Theme.textMuted
-            Layout.alignment: Qt.AlignHCenter
-            Layout.bottomMargin: 16
+                delegate: AppCard {
+                    required property int index
+                    required property var modelData
+                    height: Theme.cardHeight
+                    width: Theme.cardWidth
+                    app: modelData
+                    focus: index === appsRow.currentIndex
+                    onActivated: root.launchApp(modelData)
+                }
+
+                onEscaped: root.settingsRequested()
+            }
+
+            // === Hint Bar ===
+            Text {
+                text: "A: Launch  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row"
+                font.pixelSize: Theme.fontHint
+                color: Theme.textMuted
+                Layout.alignment: Qt.AlignHCenter
+                Layout.bottomMargin: 16
+            }
         }
     }
 }

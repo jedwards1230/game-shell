@@ -5,7 +5,7 @@ import Quickshell.Io
 Drawer {
     id: root
     edge: "left"
-    drawerWidth: 960
+    drawerWidth: Units.gridUnit * 18
 
     property bool overlayMode: false
 
@@ -32,7 +32,7 @@ Drawer {
         // === Clock + Date Header ===
         Item {
             Layout.fillWidth: true
-            Layout.preferredHeight: 280
+            Layout.preferredHeight: Units.gridUnit * 5
 
             ColumnLayout {
                 anchors.centerIn: parent
@@ -103,7 +103,7 @@ Drawer {
                 required property int index
                 required property var modelData
                 width: navList.width
-                height: 120
+                height: Math.round(Units.gridUnit * 2.2)
                 color: navList.currentIndex === index && navList.activeFocus ? Theme.surfaceHover : "transparent"
                 Behavior on color {
                     ColorAnimation {
@@ -123,14 +123,14 @@ Drawer {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 48
-                    anchors.rightMargin: 48
-                    spacing: 24
+                    anchors.leftMargin: Units.gridUnit
+                    anchors.rightMargin: Units.gridUnit
+                    spacing: Units.spacingLG
 
                     Text {
                         text: modelData.icon
                         font.pixelSize: Theme.fontTitle
-                        Layout.preferredWidth: 64
+                        Layout.preferredWidth: Units.gridUnit
                         horizontalAlignment: Text.AlignHCenter
                     }
                     Text {
@@ -190,7 +190,7 @@ Drawer {
                 required property int index
                 required property var modelData
                 width: bottomList.width
-                height: 120
+                height: Math.round(Units.gridUnit * 2.2)
                 color: bottomList.currentIndex === index && bottomList.activeFocus ? Theme.surfaceHover : "transparent"
                 Behavior on color {
                     ColorAnimation {
@@ -210,14 +210,14 @@ Drawer {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 48
-                    anchors.rightMargin: 48
-                    spacing: 24
+                    anchors.leftMargin: Units.gridUnit
+                    anchors.rightMargin: Units.gridUnit
+                    spacing: Units.spacingLG
 
                     Text {
                         text: modelData.icon
                         font.pixelSize: Theme.fontTitle
-                        Layout.preferredWidth: 64
+                        Layout.preferredWidth: Units.gridUnit
                         horizontalAlignment: Text.AlignHCenter
                     }
                     Text {
