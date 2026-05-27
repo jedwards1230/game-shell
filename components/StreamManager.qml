@@ -27,6 +27,9 @@ Item {
     // Emitted when Sunshine reports a different app is already running
     signal sessionConflictDetected(string runningApp, string hostName)
     signal sessionCheckCancelled
+    signal streamSuspended
+
+    property bool _suspending: false
 
     function launch(target) {
         reconnectTimer.stop();
@@ -38,6 +41,7 @@ Item {
         activeSessionApp = "";
         _sessionCheckCancelled = false;
         _forceKilled = false;
+        _suspending = false;
         ErrorLog.setCurrentTarget(target.name || target.app || "");
 
         if (target.sunshineUser && target.sunshinePass) {
@@ -76,6 +80,13 @@ Item {
         moonlight.running = false;
     }
 
+    function suspend() {
+        _suspending = true;
+        reconnectTimer.stop();
+        errorDismissTimer.stop();
+        moonlight.running = false;
+    }
+
     function forceKill() {
         _forceKilled = true;
         stop();
@@ -96,9 +107,12 @@ Item {
     }
 
     function _launchMoonlight() {
-        let args = ["env", "QT_QPA_PLATFORM=wayland", "moonlight", "stream", currentTarget.host, currentTarget.app];
+        let args = ["env", "QT_QPA_PLATFORM=wayland", "LIBVA_DRIVER_NAME=radeonsi", "moonlight", "stream", currentTarget.host, currentTarget.app];
         if (currentTarget.resolution === "3840x2160")
             args.push("--4K");
+        // Sunshine min_fps_target defaults to 60 when clientRefreshRateX100 is 0.
+        // The --fps flag sets the SDP maxFPS but won't raise the server-side floor
+        // unless the client also advertises its display refresh rate.
         if (currentTarget.fps) {
             args.push("--fps");
             args.push(String(currentTarget.fps));
@@ -211,6 +225,15 @@ Item {
             launchTimeout.stop();
             if (root._forceKilled)
                 return;
+            if (root._suspending) {
+                root._suspending = false;
+                root._lastStderr = "";
+                root._stderrLines = [];
+                root.requestOverlayHide();
+                root.requestInputGrab();
+                root.streamSuspended();
+                return;
+            }
             if (exitCode === 0) {
                 root._lastStderr = "";
                 root._stderrLines = [];

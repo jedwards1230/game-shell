@@ -51,6 +51,13 @@ ShellRoot {
     }
 
     Process {
+        id: streamQuitProc
+        onExited: {
+            Components.NotificationManager.info("stream", "Stream Session Ended");
+        }
+    }
+
+    Process {
         id: loadTargets
         command: ["cat", "/opt/game-shell/targets.json"]
         stdout: SplitParser {
@@ -66,6 +73,7 @@ ShellRoot {
 
     Component.onCompleted: {
         loadTargets.running = true;
+        inputManager.grab();
         inputManager.startListening();
     }
 
@@ -73,6 +81,10 @@ ShellRoot {
         id: inputManager
         onForceQuitRequested: root.forceQuit()
         onEndSessionRequested: inputManager.endSession()
+        onSuspendStreamRequested: {
+            if (root.state === "streaming" || root.state === "reconnecting")
+                streamManager.suspend();
+        }
         onControllerWake: {
             if (root.state === "idle")
                 avController.wake();
@@ -112,7 +124,11 @@ ShellRoot {
             root.state = "streaming";
         }
         onStreamEnded: {
-            Components.NotificationManager.info("stream", "Stream Ended");
+            Components.NotificationManager.info("stream", "Stream Suspended");
+            root.returnToShell();
+        }
+        onStreamSuspended: {
+            Components.NotificationManager.info("stream", "Stream Suspended");
             root.returnToShell();
         }
         onStreamCrashed: attempts => {
@@ -222,6 +238,10 @@ ShellRoot {
                     root.state = "launching";
                     avController.forceWake();
                     streamManager.launch(target);
+                }
+                onStreamQuitRequested: target => {
+                    streamQuitProc.command = ["moonlight", "quit", target.host];
+                    streamQuitProc.running = true;
                 }
                 onAppLaunchRequested: app => appLifecycle.checkAndLaunchApp(app)
                 onAppFocusRequested: windowClass => appLifecycle.focusApp(windowClass)

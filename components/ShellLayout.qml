@@ -20,6 +20,7 @@ FocusScope {
     property alias notificationCenter: notificationCenter
 
     signal streamRequested(var target)
+    signal streamQuitRequested(var target)
     signal appLaunchRequested(var app)
     signal appFocusRequested(string windowClass)
     signal appCloseRequested(string windowClass)
@@ -62,6 +63,7 @@ FocusScope {
         runningWindows: root.runningWindows
 
         onStreamRequested: target => root.streamRequested(target)
+        onStreamQuitRequested: target => root.streamQuitRequested(target)
         onAppLaunchRequested: app => root.appLaunchRequested(app)
         onAppFocusRequested: windowClass => root.appFocusRequested(windowClass)
         onAppCloseRequested: windowClass => root.appCloseRequested(windowClass)

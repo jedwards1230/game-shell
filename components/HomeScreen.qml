@@ -18,6 +18,7 @@ FocusScope {
     property var runningWindows: []
 
     signal streamRequested(var target)
+    signal streamQuitRequested(var target)
     signal appLaunchRequested(var app)
     signal appFocusRequested(string windowClass)
     signal appCloseRequested(string windowClass)
@@ -485,10 +486,38 @@ except:
                     height: Theme.cardHeight
                     width: Theme.cardWidth
                     target: modelData
+                    shellState: root.shellState
                     focus: index === moonlightRow.currentIndex
                     onActivated: root.streamRequested(modelData)
                 }
 
+                onContextRequested: {
+                    if (currentItem && currentIndex >= 0 && currentIndex < root.targets.length) {
+                        let card = currentItem;
+                        let target = root.targets[currentIndex];
+                        if (card.hasActiveSession) {
+                            let pos = card.mapToItem(root, card.width / 2, 0);
+                            popoverMenu.targetX = pos.x;
+                            popoverMenu.targetY = pos.y;
+                            popoverMenu.actions = [
+                                {
+                                    label: "Resume",
+                                    action: function () {
+                                        root.streamRequested(target);
+                                    }
+                                },
+                                {
+                                    label: "Quit Stream",
+                                    action: function () {
+                                        root.streamQuitRequested(target);
+                                    }
+                                }
+                            ];
+                            popoverMenu.opened = true;
+                            popoverMenu.forceActiveFocus();
+                        }
+                    }
+                }
                 onEscaped: root.settingsRequested()
             }
 
@@ -572,6 +601,7 @@ except:
                                 width: Theme.cardWidth
                                 target: hostTarget
                                 appName: modelData
+                                shellState: root.shellState
                                 focus: index === appViewNavRow.currentIndex
                                 onActivated: {
                                     let t = JSON.parse(JSON.stringify(hostTarget));
@@ -580,6 +610,34 @@ except:
                                 }
                             }
 
+                            onContextRequested: {
+                                if (currentItem && currentIndex >= 0 && currentIndex < hostAppList.length) {
+                                    let card = currentItem;
+                                    if (card.hasActiveSession) {
+                                        let pos = card.mapToItem(root, card.width / 2, 0);
+                                        popoverMenu.targetX = pos.x;
+                                        popoverMenu.targetY = pos.y;
+                                        let t = JSON.parse(JSON.stringify(hostTarget));
+                                        t.app = hostAppList[currentIndex];
+                                        popoverMenu.actions = [
+                                            {
+                                                label: "Resume",
+                                                action: function () {
+                                                    root.streamRequested(t);
+                                                }
+                                            },
+                                            {
+                                                label: "Quit Stream",
+                                                action: function () {
+                                                    root.streamQuitRequested(t);
+                                                }
+                                            }
+                                        ];
+                                        popoverMenu.opened = true;
+                                        popoverMenu.forceActiveFocus();
+                                    }
+                                }
+                            }
                             onEscaped: root.settingsRequested()
                         }
                     }
@@ -623,7 +681,7 @@ except:
 
             // === Hint Bar ===
             Text {
-                text: runningRow.activeFocus ? "A: Resume  |  Y: Actions  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row" : "A: Launch  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row"
+                text: runningRow.activeFocus ? "A: Resume  |  Y: Actions  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row" : (moonlightRow.activeFocus ? "A: Stream  |  Y: Actions  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row" : "A: Launch  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row")
                 font.pixelSize: Theme.fontHint
                 color: Theme.textMuted
                 Layout.alignment: Qt.AlignHCenter

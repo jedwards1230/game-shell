@@ -66,6 +66,9 @@ COMBO_HOLD_SECS = 3.0
 # Force-quit combo: Back + Home + LB + RB (instant, no hold required)
 QUIT_COMBO_KEYS = {ecodes.BTN_SELECT, ecodes.BTN_MODE, ecodes.BTN_TL, ecodes.BTN_TR}
 
+# Suspend combo: LB + RB + Start (instant, disconnects Moonlight but keeps Sunshine session)
+SUSPEND_COMBO_KEYS = {ecodes.BTN_START, ecodes.BTN_TL, ecodes.BTN_TR}
+
 BUTTON_NAMES = {
     ecodes.BTN_SOUTH: "A",
     ecodes.BTN_EAST: "B",
@@ -251,6 +254,7 @@ class InputDaemon:
                 self.held_keys.add(event.code)
                 self._check_combo_start()
                 self._check_quit_combo()
+                self._check_suspend_combo()
                 asyncio.ensure_future(self._notify_held_buttons())
                 # Input mode: LB/RB → mouse, other remappable buttons → controller
                 if event.code in (ecodes.BTN_TL, ecodes.BTN_TR):
@@ -377,6 +381,7 @@ class InputDaemon:
             self.held_keys.add(event.code)
             self._check_combo_start()
             self._check_quit_combo()
+            self._check_suspend_combo()
             asyncio.ensure_future(self._notify_held_buttons())
             # Input mode: LB/RB → mouse, other remappable buttons → controller
             if event.code in (ecodes.BTN_TL, ecodes.BTN_TR):
@@ -663,6 +668,11 @@ class InputDaemon:
             if not self.grabbed:
                 self._send_moonlight_quit()
             asyncio.ensure_future(self._notify_subscribers("combo:force-quit"))
+
+    def _check_suspend_combo(self):
+        if SUSPEND_COMBO_KEYS.issubset(self.held_keys) and not QUIT_COMBO_KEYS.issubset(self.held_keys):
+            log.info("Suspend combo detected (LB+RB+Start)")
+            asyncio.ensure_future(self._notify_subscribers("combo:suspend-stream"))
 
     async def _combo_timer(self):
         try:

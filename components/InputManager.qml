@@ -3,12 +3,13 @@ import QtQuick
 
 // IPC protocol: see docs/IPC_PROTOCOL.md
 // Commands used: grab, release, subscribe
-// Events handled: combo:force-quit, combo:end-session, input-mode:*, controller-wake, controller-disconnected, home-press, combo:home-hold
+// Events handled: combo:force-quit, combo:end-session, combo:suspend-stream, input-mode:*, controller-wake, controller-disconnected, home-press, combo:home-hold
 Item {
     id: root
 
     signal forceQuitRequested
     signal endSessionRequested
+    signal suspendStreamRequested
     signal inputModeChanged(string mode)
     signal controllerWake
     signal controllerDisconnected
@@ -52,6 +53,8 @@ Item {
                     root.forceQuitRequested();
                 else if (line === "combo:end-session")
                     root.endSessionRequested();
+                else if (line === "combo:suspend-stream")
+                    root.suspendStreamRequested();
                 else if (line === "input-mode:mouse") {
                     Theme.mouseMode = true;
                     root.inputModeChanged("mouse");
