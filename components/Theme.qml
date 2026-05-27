@@ -112,13 +112,13 @@ Item {
             textSecondary: "#c2bfba",
             textMuted: "#928e88",
             cardBackground: "#2e3139",
-            focusBorder: "#c72138",
-            focusGlow: "#c7213833",
+            focusBorder: String(crimson),
+            focusGlow: String(crimson) + "33",
             barBackground: "#111215",
             sidebarActive: "#424650"
         })
     readonly property var _lightPalette: ({
-            background: "#f4f5f7",
+            background: String(snow),
             surface: "#ffffff",
             surfaceHover: "#ecedf0",
             surfaceBorder: "#dcdee3",
@@ -126,10 +126,10 @@ Item {
             textSecondary: "#4a5568",
             textMuted: "#8892a4",
             cardBackground: "#ffffff",
-            focusBorder: "#c72138",
-            focusGlow: "#c7213833",
-            barBackground: "#304c7a",
-            sidebarActive: "#304c7a"
+            focusBorder: String(crimson),
+            focusGlow: String(crimson) + "33",
+            barBackground: String(navy),
+            sidebarActive: String(navy)
         })
     readonly property var palette: darkMode ? _darkPalette : _lightPalette
 

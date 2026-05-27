@@ -51,8 +51,8 @@
 | online         | #2d8a4e   | Online/connected indicator         |
 | offline        | (crimson) | Offline/disconnected indicator     |
 | warning        | (ember)   | Warning states                     |
-| focusBorder    | (crimson) | Focus ring on interactive elements |
-| focusGlow      | #c7213833 | Focus glow (crimson at 20% alpha)  |
+
+Note: `focusBorder` and `focusGlow` are in the palette objects (they reference the `crimson` accent token). They appear in both dark and light palettes with the same value today, but live in the palette so a future theme could override them.
 
 ## Theme Modes
 
