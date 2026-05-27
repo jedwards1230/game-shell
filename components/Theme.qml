@@ -100,21 +100,54 @@ Item {
     readonly property color gold: "#d7a64b"
     readonly property color navy: "#304c7a"
 
-    // === Semantic Colors (switch on darkMode) ===
-    property color background: darkMode ? "#111215" : snow
-    property color surface: darkMode ? "#33363f" : "#ffffff"
-    property color surfaceHover: darkMode ? "#424650" : "#ecedf0"
-    property color surfaceBorder: darkMode ? "#4d525c" : "#dcdee3"
+    // === Structured Palette Objects ===
+    // All theme-dependent colors grouped per mode. Adding a new theme =
+    // one new object instead of editing 12 ternaries.
+    readonly property var _darkPalette: ({
+            background: "#111215",
+            surface: "#33363f",
+            surfaceHover: "#424650",
+            surfaceBorder: "#4d525c",
+            textPrimary: "#e6e4e0",
+            textSecondary: "#c2bfba",
+            textMuted: "#928e88",
+            cardBackground: "#2e3139",
+            focusBorder: String(crimson),
+            focusGlow: String(crimson) + "33",
+            barBackground: "#111215",
+            sidebarActive: "#424650"
+        })
+    readonly property var _lightPalette: ({
+            background: String(snow),
+            surface: "#ffffff",
+            surfaceHover: "#ecedf0",
+            surfaceBorder: "#dcdee3",
+            textPrimary: "#1a2540",
+            textSecondary: "#4a5568",
+            textMuted: "#8892a4",
+            cardBackground: "#ffffff",
+            focusBorder: String(crimson),
+            focusGlow: String(crimson) + "33",
+            barBackground: String(navy),
+            sidebarActive: String(navy)
+        })
+    readonly property var palette: darkMode ? _darkPalette : _lightPalette
+
+    // === Semantic Colors (aliases into active palette — no breaking changes) ===
+    property color background: palette.background
+    property color surface: palette.surface
+    property color surfaceHover: palette.surfaceHover
+    property color surfaceBorder: palette.surfaceBorder
 
     // Text hierarchy
-    property color textPrimary: darkMode ? "#e6e4e0" : "#1a2540"
-    property color textSecondary: darkMode ? "#c2bfba" : "#4a5568"
-    property color textMuted: darkMode ? "#928e88" : "#8892a4"
+    property color textPrimary: palette.textPrimary
+    property color textSecondary: palette.textSecondary
+    property color textMuted: palette.textMuted
     property color textOnDark: "#f4f5f7"
     property color textOnDarkMuted: "#d8d5d0"
 
     // Cards
-    property color cardBackground: darkMode ? "#2e3139" : "#ffffff"
+    property color cardBackground: palette.cardBackground
     property color cardAccent: ember
 
     // Status
@@ -123,10 +156,10 @@ Item {
     property color warning: ember
 
     // Interactive
-    property color focusBorder: crimson
-    property color focusGlow: "#c7213833"
-    property color barBackground: darkMode ? "#111215" : navy
-    property color sidebarActive: darkMode ? "#424650" : navy
+    property color focusBorder: palette.focusBorder
+    property color focusGlow: palette.focusGlow
+    property color barBackground: palette.barBackground
+    property color sidebarActive: palette.sidebarActive
     property color sidebarText: "#e6e4e0"
 
     // === Layout — derived from Units.gridUnit (couch-readable, resolution-adaptive) ===

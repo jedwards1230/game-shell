@@ -17,6 +17,7 @@ MoonlightSettings 1.0 MoonlightSettings.qml
 AppearanceSettings 1.0 AppearanceSettings.qml
 AVControlSettings 1.0 AVControlSettings.qml
 BaseCard 1.0 BaseCard.qml
+FocusFrame 1.0 FocusFrame.qml
 AppCard 1.0 AppCard.qml
 ControllerSettings 1.0 ControllerSettings.qml
 MarqueeText 1.0 MarqueeText.qml

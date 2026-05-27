@@ -51,8 +51,8 @@
 | online         | #2d8a4e   | Online/connected indicator         |
 | offline        | (crimson) | Offline/disconnected indicator     |
 | warning        | (ember)   | Warning states                     |
-| focusBorder    | (crimson) | Focus ring on interactive elements |
-| focusGlow      | #c7213833 | Focus glow (crimson at 20% alpha)  |
+
+Note: `focusBorder` and `focusGlow` are in the palette objects (they reference the `crimson` accent token). They appear in both dark and light palettes with the same value today, but live in the palette so a future theme could override them.
 
 ## Theme Modes
 
@@ -61,6 +61,14 @@
 - **Auto**: Time-based switching (dark 8 PM - 7 AM, light otherwise)
 
 Persisted to `~/.config/game-shell/settings.json`.
+
+## Palette Object Pattern
+
+Theme-dependent colors are backed by `_darkPalette` and `_lightPalette` objects in `Theme.qml`. The active palette is exposed as `Theme.palette`, and existing property names (`Theme.background`, `Theme.textPrimary`, etc.) are aliases into it. To add a new theme, duplicate one palette object and adjust the hex values — no ternaries to edit.
+
+Tokens in the palette objects: `background`, `surface`, `surfaceHover`, `surfaceBorder`, `textPrimary`, `textSecondary`, `textMuted`, `cardBackground`, `focusBorder`, `focusGlow`, `barBackground`, `sidebarActive`.
+
+Theme-independent tokens (`textOnDark`, `textOnDarkMuted`, `sidebarText`, `online`, `offline`, `warning`) remain standalone properties.
 
 ## Rules
 

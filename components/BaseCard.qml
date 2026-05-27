@@ -23,47 +23,12 @@ Item {
         }
     }
 
-    transform: [
-        Scale {
-            origin.x: root.width / 2
-            origin.y: root.height / 2
-            xScale: root.isFocused ? 1.05 : 1.0
-            yScale: root.isFocused ? 1.05 : 1.0
-            Behavior on xScale {
-                NumberAnimation {
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-            }
-            Behavior on yScale {
-                NumberAnimation {
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-            }
-        }
-    ]
-
     z: root.isFocused ? 10 : 0
 
-    Rectangle {
-        id: card
+    FocusFrame {
+        id: focusFrame
         anchors.fill: parent
-        radius: Theme.cardRadius
-        color: Theme.cardBackground
-        border.width: root.isFocused ? 6 : 2
-        border.color: root.isFocused ? Theme.focusBorder : Theme.surfaceBorder
-
-        Behavior on border.width {
-            NumberAnimation {
-                duration: 200
-            }
-        }
-        Behavior on border.color {
-            ColorAnimation {
-                duration: 200
-            }
-        }
+        focused: root.isFocused
 
         MouseArea {
             id: mouseArea
