@@ -312,6 +312,7 @@ except:
             visible: root.runningWindows.length > 0
             Layout.fillWidth: true
             Layout.preferredHeight: visible ? Theme.rowHeight : 0
+            keyNavigationWraps: true
             previousRow: statusIcons
             nextRow: recentsRow
             model: root.runningWindows
@@ -343,6 +344,7 @@ except:
             visible: root.recentApps.length > 0
             Layout.fillWidth: true
             Layout.preferredHeight: visible ? Theme.rowHeight : 0
+            keyNavigationWraps: true
             focus: visible && !runningRow.visible
             previousRow: runningRow
             nextRow: {
@@ -382,6 +384,7 @@ except:
             visible: Theme.moonlightViewMode === "servers"
             Layout.fillWidth: true
             Layout.preferredHeight: visible ? Theme.rowHeight : 0
+            keyNavigationWraps: true
             focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible
             previousRow: recentsRow
             nextRow: appsRow
@@ -451,6 +454,7 @@ except:
                         id: appViewNavRow
                         anchors.fill: parent
                         visible: hostAppList.length > 0
+                        keyNavigationWraps: true
                         focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible
                         model: hostAppList
                         previousRow: {
@@ -493,6 +497,7 @@ except:
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: Theme.rowHeight
+            keyNavigationWraps: true
             previousRow: {
                 if (Theme.moonlightViewMode === "servers")
                     return moonlightRow;

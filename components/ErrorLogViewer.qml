@@ -59,9 +59,8 @@ FocusScope {
     }
 
     // Backdrop
-    Rectangle {
-        anchors.fill: parent
-        color: Qt.rgba(0, 0, 0, 0.85)
+    DimmedBackdrop {
+        dimLevel: 0.85
     }
 
     // Content

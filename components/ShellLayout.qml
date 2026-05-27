@@ -129,11 +129,15 @@ FocusScope {
     }
 
     // === Overlay Drawer (appRunning state) ===
-    Rectangle {
+    Item {
         anchors.fill: parent
-        color: Qt.rgba(0, 0, 0, 0.5)
         visible: root.shellState === "appRunning" && root.overlayDrawerOpen
         z: 50
+
+        DimmedBackdrop {
+            dimLevel: 0.5
+            onClicked: root.overlayDrawerClosed()
+        }
 
         NavigationDrawer {
             id: overlayNavDrawer
@@ -159,18 +163,11 @@ FocusScope {
     }
 
     // --- AV Wake Overlay ---
-    Rectangle {
-        anchors.fill: parent
-        color: Qt.rgba(0, 0, 0, 0.7)
+    DimmedBackdrop {
         visible: root.avWaking
         z: 40
-
-        Text {
-            anchors.centerIn: parent
-            text: "Waking AV System..."
-            font.pixelSize: Theme.fontTitle
-            color: Theme.textOnDark
-        }
+        dimLevel: 0.7
+        message: "Waking AV System..."
     }
 
     // --- Debug Input Overlay ---

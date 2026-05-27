@@ -1,9 +1,8 @@
 import QtQuick
 import QtQuick.Layouts
 
-Rectangle {
+Item {
     id: root
-    color: Qt.rgba(0, 0, 0, 0.85)
     visible: false
 
     property string message: ""
@@ -18,6 +17,10 @@ Rectangle {
     function hide() {
         visible = false;
         attemptCount = 0;
+    }
+
+    DimmedBackdrop {
+        dimLevel: 0.85
     }
 
     ColumnLayout {
