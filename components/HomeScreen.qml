@@ -369,6 +369,7 @@ except:
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Theme.rowHeight : 0
                 keyNavigationWraps: true
+                focus: visible
                 previousRow: statusIcons
                 nextRow: recentsRow
                 model: root.runningWindows
@@ -469,7 +470,7 @@ except:
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Theme.rowHeight : 0
                 keyNavigationWraps: true
-                focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible
+                focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible && !runningRow.visible
                 previousRow: recentsRow
                 nextRow: appsRow
                 onActiveFocusChanged: if (activeFocus)
@@ -552,7 +553,7 @@ except:
                             anchors.fill: parent
                             visible: hostAppList.length > 0
                             keyNavigationWraps: true
-                            focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible
+                            focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible && !runningRow.visible
                             onActiveFocusChanged: if (activeFocus)
                                 scrollView.ensureVisible(appViewRowDelegate)
                             model: hostAppList
