@@ -325,15 +325,16 @@ FocusScope {
             }
         }
 
-        Keys.onDownPressed: {
-            if (currentIndex >= count - 1)
+        Keys.onPressed: event => {
+            if (event.key === Qt.Key_Down && currentIndex >= count - 1) {
                 resetButton.forceActiveFocus();
-        }
-
-        Keys.onReturnPressed: {
-            var binding = root.bindings[currentIndex];
-            if (root.remappableActions.indexOf(binding.action) >= 0)
-                root.startCapture(currentIndex, binding.action, binding.label);
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                var binding = root.bindings[currentIndex];
+                if (root.remappableActions.indexOf(binding.action) >= 0)
+                    root.startCapture(currentIndex, binding.action, binding.label);
+                event.accepted = true;
+            }
         }
 
         delegate: Rectangle {
