@@ -3,6 +3,10 @@
 
 Grabs a gamepad exclusively via EVIOCGRAB and emits keyboard events via uinput.
 Listens on a unix socket for grab/release/subscribe commands from the shell.
+
+IPC protocol: see docs/IPC_PROTOCOL.md
+Commands: grab, release, status, subscribe, get-bindings, set-binding, capture-next, capture-cancel
+Events (to subscribers): controller-wake, controller-disconnected, home-press, combo:*, input-mode:*, buttons:*
 """
 
 import asyncio
