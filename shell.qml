@@ -53,7 +53,10 @@ ShellRoot {
         shellState: root.state
         applications: root._applications
         onAppLaunched: { root.state = "appRunning" }
-        onAppClosed: root.returnToShell()
+        onAppClosed: {
+            appLifecycle.runningAppClass = ""
+            root.returnToShell()
+        }
     }
 
     Components.StreamManager {
@@ -75,6 +78,7 @@ ShellRoot {
     function forceQuit() {
         streamManager.forceKill()
         if (root.state === "appRunning") closeAndReturnToShell()
+        appLifecycle.runningAppClass = ""
         root.overlayDrawerOpen = false
         root.state = "idle"
         inputManager.grab()
@@ -84,7 +88,6 @@ ShellRoot {
     }
 
     function returnToShell() {
-        appLifecycle.runningAppClass = ""
         root.overlayDrawerOpen = false
         root.state = "idle"
         inputManager.grab()
