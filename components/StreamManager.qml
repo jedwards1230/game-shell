@@ -93,7 +93,7 @@ Item {
     }
 
     function _launchMoonlight() {
-        let args = ["moonlight", "stream", currentTarget.host, currentTarget.app];
+        let args = ["env", "QT_QPA_PLATFORM=wayland", "moonlight", "stream", currentTarget.host, currentTarget.app];
         if (currentTarget.resolution === "3840x2160")
             args.push("--4K");
         if (currentTarget.fps) {
@@ -112,6 +112,7 @@ Item {
         moonlight.command = args;
         requestInputRelease();
         streamStarted();
+        launchTimeout.restart();
         moonlight.running = true;
     }
 
@@ -194,6 +195,7 @@ Item {
             }
         }
         onExited: (exitCode, exitStatus) => {
+            launchTimeout.stop();
             if (exitCode === 0) {
                 root._lastStderr = "";
                 root._stderrLines = [];
@@ -233,6 +235,23 @@ Item {
         id: errorDismissTimer
         interval: 5000
         onTriggered: root.requestOverlayHide()
+    }
+
+    Timer {
+        id: launchTimeout
+        interval: 30000
+        onTriggered: {
+            if (moonlight.running) {
+                moonlight.running = false;
+                forceKillProc.running = true;
+                let msg = "Stream launch timed out after 30s";
+                ErrorLog.log("moonlight", msg, root._stderrLines.join("\n"));
+                root.requestOverlayShow(msg);
+                errorDismissTimer.start();
+                root.requestInputGrab();
+                root.streamFailed(msg);
+            }
+        }
     }
 
     Timer {
