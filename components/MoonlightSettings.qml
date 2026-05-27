@@ -9,6 +9,14 @@ FocusScope {
     property bool showAddForm: false
     property int confirmRemoveIndex: -1
 
+    // Connection status per host: { "host": "paired" | "unpaired" | "offline" | "checking" }
+    property var hostStatus: ({})
+    property int _statusCheckIndex: -1
+
+    // Pairing state
+    property int pairingServerIndex: -1
+    property string pairingPin: ""
+
     // Form fields
     property string newName: ""
     property string newHost: ""
@@ -32,12 +40,158 @@ FocusScope {
                 }
             }
         }
+        onExited: root._checkAllStatuses()
     }
 
     Process {
         id: saveServers
         property string json: "[]"
         command: ["bash", "-c", "echo '" + json + "' > /opt/game-shell/targets.json"]
+    }
+
+    // Connection status checker — runs moonlight list per host
+    Process {
+        id: statusChecker
+        property string _host: ""
+        property string _output: ""
+        command: ["moonlight", "list", _host]
+        stdout: SplitParser {
+            onRead: line => {
+                statusChecker._output += line + "\n";
+            }
+        }
+        stderr: SplitParser {
+            onRead: line => {
+                statusChecker._output += line + "\n";
+            }
+        }
+        onExited: (exitCode, exitStatus) => {
+            let host = statusChecker._host;
+            let output = statusChecker._output;
+            statusChecker._output = "";
+
+            let updated = root.hostStatus;
+            if (output.indexOf("not been paired") >= 0)
+                updated[host] = "unpaired";
+            else if (exitCode === 0)
+                updated[host] = "paired";
+            else
+                updated[host] = "offline";
+            root.hostStatus = JSON.parse(JSON.stringify(updated));
+
+            root._statusCheckIndex++;
+            root._checkNextStatus();
+        }
+    }
+
+    // Pairing process
+    Process {
+        id: pairProcess
+        property string _output: ""
+        stdout: SplitParser {
+            onRead: line => {
+                pairProcess._output += line + "\n";
+                let match = line.match(/(\d{4})/);
+                if (match && root.pairingPin === "")
+                    root.pairingPin = match[1];
+            }
+        }
+        stderr: SplitParser {
+            onRead: line => {
+                pairProcess._output += line + "\n";
+                let match = line.match(/(\d{4})/);
+                if (match && root.pairingPin === "")
+                    root.pairingPin = match[1];
+            }
+        }
+        onExited: (exitCode, exitStatus) => {
+            let host = root.pairingServerIndex >= 0 && root.pairingServerIndex < root.servers.length ? root.servers[root.pairingServerIndex].host : "";
+            if (exitCode === 0 && host !== "") {
+                let updated = root.hostStatus;
+                updated[host] = "paired";
+                root.hostStatus = JSON.parse(JSON.stringify(updated));
+                NotificationManager.notify("Pairing Successful", host, {
+                    source: "moonlight"
+                });
+            } else {
+                NotificationManager.notify("Pairing Failed", pairProcess._output.substring(0, 100), {
+                    source: "moonlight"
+                });
+            }
+            pairProcess._output = "";
+            root.pairingServerIndex = -1;
+            root.pairingPin = "";
+            serverList.forceActiveFocus();
+        }
+    }
+
+    function _checkAllStatuses() {
+        if (root.servers.length === 0)
+            return;
+        _statusCheckIndex = 0;
+        let initial = {};
+        for (let i = 0; i < root.servers.length; i++)
+            initial[root.servers[i].host] = "checking";
+        root.hostStatus = initial;
+        _checkNextStatus();
+    }
+
+    function _checkNextStatus() {
+        if (_statusCheckIndex >= root.servers.length) {
+            _statusCheckIndex = -1;
+            return;
+        }
+        let host = root.servers[_statusCheckIndex].host || "";
+        if (host === "") {
+            _statusCheckIndex++;
+            _checkNextStatus();
+            return;
+        }
+        statusChecker._host = host;
+        statusChecker._output = "";
+        statusChecker.running = true;
+    }
+
+    function _statusColor(host) {
+        let s = root.hostStatus[host] || "";
+        if (s === "paired")
+            return Theme.online;
+        if (s === "unpaired")
+            return Theme.warning;
+        if (s === "offline")
+            return Theme.offline;
+        return Theme.textMuted;
+    }
+
+    function _statusText(host) {
+        let s = root.hostStatus[host] || "";
+        if (s === "paired")
+            return "Paired";
+        if (s === "unpaired")
+            return "Not Paired";
+        if (s === "offline")
+            return "Offline";
+        if (s === "checking")
+            return "Checking...";
+        return "";
+    }
+
+    function startPairing(idx) {
+        if (idx < 0 || idx >= root.servers.length)
+            return;
+        root.pairingServerIndex = idx;
+        root.pairingPin = "";
+        pairProcess._output = "";
+        pairProcess.command = ["moonlight", "pair", root.servers[idx].host];
+        pairProcess.running = true;
+    }
+
+    function cancelPairing() {
+        pairProcess.running = false;
+        pairProcess._output = "";
+        root.pairingServerIndex = -1;
+        root.pairingPin = "";
+        serverList.forceActiveFocus();
     }
 
     function persistServers() {
@@ -280,6 +434,24 @@ FocusScope {
                                 font.pixelSize: Theme.fontSmall
                                 color: Theme.textSecondary
                             }
+
+                            // Status indicator
+                            RowLayout {
+                                spacing: 8
+
+                                Rectangle {
+                                    width: 16
+                                    height: 16
+                                    radius: 8
+                                    color: root._statusColor(modelData.host)
+                                }
+
+                                Text {
+                                    text: root._statusText(modelData.host)
+                                    font.pixelSize: Theme.fontSmall
+                                    color: root._statusColor(modelData.host)
+                                }
+                            }
                         }
 
                         RowLayout {
@@ -303,6 +475,28 @@ FocusScope {
                                 color: Theme.textSecondary
                             }
                         }
+                    }
+
+                    // Pair button (visible when unpaired)
+                    FocusScope {
+                        width: pairBtn.width
+                        height: pairBtn.height
+                        visible: root.hostStatus[modelData.host] === "unpaired"
+
+                        SettingsButton {
+                            id: pairBtn
+                            text: "Pair"
+                            focus: parent.activeFocus
+
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.startPairing(index)
+                            }
+                        }
+
+                        Keys.onReturnPressed: root.startPairing(index)
                     }
 
                     // Remove button
@@ -713,5 +907,89 @@ FocusScope {
         Keys.onEscapePressed: {
             root.confirmRemoveIndex = -1;
         }
+    }
+
+    // Pairing dialog
+    Rectangle {
+        anchors.fill: parent
+        color: Qt.rgba(0, 0, 0, 0.7)
+        visible: root.pairingServerIndex >= 0
+        z: 55
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {}
+        }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 900
+            height: 420
+            radius: 32
+            color: Theme.surface
+
+            ColumnLayout {
+                anchors.centerIn: parent
+                spacing: 32
+
+                Text {
+                    text: "Pairing with " + (root.pairingServerIndex >= 0 && root.pairingServerIndex < root.servers.length ? root.servers[root.pairingServerIndex].name : "")
+                    font.pixelSize: Theme.fontTitle
+                    font.bold: true
+                    color: Theme.textPrimary
+                    Layout.alignment: Qt.AlignHCenter
+                }
+
+                Text {
+                    text: root.pairingPin !== "" ? "Enter this PIN in the Sunshine web UI:" : "Waiting for PIN..."
+                    font.pixelSize: Theme.fontBody
+                    color: Theme.textSecondary
+                    Layout.alignment: Qt.AlignHCenter
+                }
+
+                Text {
+                    visible: root.pairingPin !== ""
+                    text: root.pairingPin
+                    font.pixelSize: Theme.fontHero
+                    font.bold: true
+                    color: Theme.ember
+                    Layout.alignment: Qt.AlignHCenter
+                }
+
+                Text {
+                    visible: root.pairingPin !== ""
+                    text: root.pairingServerIndex >= 0 && root.pairingServerIndex < root.servers.length ? "https://" + root.servers[root.pairingServerIndex].host + ":47990" : ""
+                    font.pixelSize: Theme.fontSmall
+                    color: Theme.textMuted
+                    Layout.alignment: Qt.AlignHCenter
+                }
+
+                FocusScope {
+                    id: pairCancelScope
+                    width: pairCancelBtn.width
+                    height: pairCancelBtn.height
+                    Layout.alignment: Qt.AlignHCenter
+                    focus: root.pairingServerIndex >= 0
+
+                    SettingsButton {
+                        id: pairCancelBtn
+                        text: "Cancel"
+                        focus: parent.activeFocus
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.cancelPairing()
+                        }
+                    }
+
+                    Keys.onReturnPressed: root.cancelPairing()
+                    Keys.onEscapePressed: root.cancelPairing()
+                }
+            }
+        }
+
+        Keys.onEscapePressed: root.cancelPairing()
     }
 }
