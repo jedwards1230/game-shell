@@ -366,17 +366,20 @@ except:
                         popoverMenu.targetX = pos.x;
                         popoverMenu.targetY = pos.y;
                         let wc = root.runningWindows[currentIndex].windowClass;
-                        popoverMenu.actions = [{
-                            label: "Resume",
-                            action: function () {
-                                root.appFocusRequested(wc);
+                        popoverMenu.actions = [
+                            {
+                                label: "Resume",
+                                action: function () {
+                                    root.appFocusRequested(wc);
+                                }
+                            },
+                            {
+                                label: "Quit App",
+                                action: function () {
+                                    root.appCloseRequested(wc);
+                                }
                             }
-                        }, {
-                            label: "Quit App",
-                            action: function () {
-                                root.appCloseRequested(wc);
-                            }
-                        }];
+                        ];
                         popoverMenu.opened = true;
                         popoverMenu.forceActiveFocus();
                     }
