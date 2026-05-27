@@ -304,7 +304,6 @@ FocusScope {
         clip: true
         focus: true
         model: root.bindings
-        keyNavigationEnabled: true
         onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
         section.property: "category"
@@ -326,8 +325,15 @@ FocusScope {
         }
 
         Keys.onPressed: event => {
-            if (event.key === Qt.Key_Down && currentIndex >= count - 1) {
-                resetButton.forceActiveFocus();
+            if (event.key === Qt.Key_Down) {
+                if (currentIndex < count - 1)
+                    currentIndex++;
+                else
+                    resetButton.forceActiveFocus();
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Up) {
+                if (currentIndex > 0)
+                    currentIndex--;
                 event.accepted = true;
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 var binding = root.bindings[currentIndex];
