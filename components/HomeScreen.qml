@@ -233,9 +233,37 @@ except:
         return rows;
     }
 
-    ColumnLayout {
+    Flickable {
+        id: scrollView
         anchors.fill: parent
         anchors.margins: Theme.padding
+        contentHeight: contentColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+
+        function ensureVisible(item) {
+            if (!item)
+                return;
+            let mapped = item.mapToItem(contentColumn, 0, 0);
+            let itemTop = mapped.y;
+            let itemBottom = itemTop + item.height;
+            if (itemTop < contentY)
+                contentY = Math.max(0, itemTop - 24);
+            else if (itemBottom > contentY + height)
+                contentY = Math.min(contentHeight - height, itemBottom - height + 24);
+        }
+
+        Behavior on contentY {
+            NumberAnimation {
+                duration: 300
+                easing.type: Easing.OutCubic
+            }
+        }
+
+    ColumnLayout {
+        id: contentColumn
+        width: scrollView.width
         spacing: 24
 
         // === Hero Clock Area ===
@@ -316,6 +344,7 @@ except:
             previousRow: statusIcons
             nextRow: recentsRow
             model: root.runningWindows
+            onActiveFocusChanged: if (activeFocus) scrollView.ensureVisible(this)
 
             delegate: AppCard {
                 required property int index
@@ -347,6 +376,7 @@ except:
             keyNavigationWraps: true
             focus: visible && !runningRow.visible
             previousRow: runningRow
+            onActiveFocusChanged: if (activeFocus) scrollView.ensureVisible(this)
             nextRow: {
                 var _ = appViewRepeater.count;
                 if (Theme.moonlightViewMode === "servers")
@@ -388,6 +418,7 @@ except:
             focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible
             previousRow: recentsRow
             nextRow: appsRow
+            onActiveFocusChanged: if (activeFocus) scrollView.ensureVisible(this)
             model: root.targets
 
             delegate: StreamCard {
@@ -456,6 +487,7 @@ except:
                         visible: hostAppList.length > 0
                         keyNavigationWraps: true
                         focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible
+                        onActiveFocusChanged: if (activeFocus) scrollView.ensureVisible(appViewRowDelegate)
                         model: hostAppList
                         previousRow: {
                             var _ = appViewRepeater.count;
@@ -495,9 +527,9 @@ except:
         NavigableRow {
             id: appsRow
             Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.minimumHeight: Theme.rowHeight
+            Layout.preferredHeight: Theme.rowHeight
             keyNavigationWraps: true
+            onActiveFocusChanged: if (activeFocus) scrollView.ensureVisible(this)
             previousRow: {
                 if (Theme.moonlightViewMode === "servers")
                     return moonlightRow;
@@ -526,5 +558,6 @@ except:
             Layout.alignment: Qt.AlignHCenter
             Layout.bottomMargin: 16
         }
+    }
     }
 }

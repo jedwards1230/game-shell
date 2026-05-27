@@ -7,34 +7,8 @@ FocusScope {
 
     property var monitors: []
     property int selectedMonitor: 0
-    property real appScale: 1.75
 
     // --- Processes ---
-
-    Process {
-        id: getAppScale
-        command: ["sh", "-c", "grep -oP 'env = QT_SCALE_FACTOR,\\K[\\d.]+' /opt/game-shell/config/hyprland.conf"]
-        stdout: SplitParser {
-            onRead: line => {
-                let val = parseFloat(line);
-                if (!isNaN(val))
-                    root.appScale = val;
-            }
-        }
-    }
-
-    Process {
-        id: setAppScale
-        property real newScale: 1.75
-        command: ["sh", "-c", "sed -i 's/env = QT_SCALE_FACTOR,.*/env = QT_SCALE_FACTOR," + newScale + "/' /opt/game-shell/config/hyprland.conf" + " && sed -i 's/env = GDK_SCALE,.*/env = GDK_SCALE," + (newScale <= 1.0 ? "1" : "2") + "/' /opt/game-shell/config/hyprland.conf" + " && hyprctl reload"]
-        onExited: (exitCode, exitStatus) => {
-            if (exitCode === 0) {
-                root.appScale = newScale;
-            } else {
-                getAppScale.running = true;
-            }
-        }
-    }
 
     Process {
         id: getMonitors
@@ -96,13 +70,11 @@ FocusScope {
 
     Component.onCompleted: {
         getMonitors.running = true;
-        getAppScale.running = true;
     }
 
     onVisibleChanged: {
         if (visible) {
             getMonitors.running = true;
-            getAppScale.running = true;
             monitorList.forceActiveFocus();
         }
     }
@@ -256,13 +228,13 @@ FocusScope {
             visible: root.monitors.length > 0
 
             KeyNavigation.up: monitorList
-            KeyNavigation.down: appScaleRow
+            KeyNavigation.down: modeDropdownScope
 
+            property var scales: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0]
             property int selectedScale: {
                 if (root.monitors.length <= root.selectedMonitor)
                     return 1;
                 let s = root.monitors[root.selectedMonitor].scale;
-                let scales = [0.5, 1.0, 1.25, 1.5, 2.0];
                 for (let i = 0; i < scales.length; i++) {
                     if (Math.abs(scales[i] - s) < 0.05)
                         return i;
@@ -276,11 +248,10 @@ FocusScope {
                     focusedIndex--;
             }
             Keys.onRightPressed: {
-                if (focusedIndex < 4)
+                if (focusedIndex < scales.length - 1)
                     focusedIndex++;
             }
             Keys.onReturnPressed: {
-                let scales = [0.5, 1.0, 1.25, 1.5, 2.0];
                 if (root.monitors.length > root.selectedMonitor) {
                     setScale.monName = root.monitors[root.selectedMonitor].name;
                     setScale.scaleVal = scales[focusedIndex];
@@ -293,7 +264,7 @@ FocusScope {
                 spacing: 16
 
                 Repeater {
-                    model: [0.5, 1.0, 1.25, 1.5, 2.0]
+                    model: scaleRow.scales
 
                     FocusScope {
                         id: scaleScope
@@ -334,114 +305,6 @@ FocusScope {
             }
         }
 
-        // App scale controls (QT_SCALE_FACTOR / GDK_SCALE for launched apps)
-        Text {
-            text: "App Scale"
-            font.pixelSize: Theme.fontBody
-            font.bold: true
-            color: Theme.textPrimary
-            visible: root.monitors.length > 0
-        }
-
-        FocusScope {
-            id: appScaleRow
-            Layout.fillWidth: true
-            Layout.preferredHeight: 96
-            visible: root.monitors.length > 0
-
-            KeyNavigation.up: scaleRow
-            KeyNavigation.down: modeDropdownScope
-
-            property var appScales: [1.0, 1.25, 1.5, 1.75, 2.0]
-            property int focusedIndex: 3
-
-            function syncFocusIndex() {
-                for (let i = 0; i < appScales.length; i++) {
-                    if (Math.abs(appScales[i] - root.appScale) < 0.05) {
-                        focusedIndex = i;
-                        return;
-                    }
-                }
-                focusedIndex = 3;
-            }
-
-            Component.onCompleted: syncFocusIndex()
-            Connections {
-                target: root
-                function onAppScaleChanged() {
-                    appScaleRow.syncFocusIndex();
-                }
-            }
-
-            Keys.onLeftPressed: {
-                if (focusedIndex > 0)
-                    focusedIndex--;
-            }
-            Keys.onRightPressed: {
-                if (focusedIndex < appScales.length - 1)
-                    focusedIndex++;
-            }
-            Keys.onReturnPressed: {
-                setAppScale.newScale = appScales[focusedIndex];
-                setAppScale.running = true;
-            }
-
-            RowLayout {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: 64
-                spacing: 16
-
-                Repeater {
-                    model: appScaleRow.appScales
-
-                    FocusScope {
-                        id: appScaleScope
-                        required property var modelData
-                        required property int index
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-
-                        SettingsButton {
-                            id: appScaleBtn
-                            text: parent.modelData + "x"
-                            anchors.fill: parent
-
-                            property bool isCurrent: Math.abs(root.appScale - parent.modelData) < 0.05
-                            property bool isFocused: appScaleRow.activeFocus && appScaleRow.focusedIndex === appScaleScope.index
-
-                            color: isCurrent ? Theme.sidebarActive : isFocused ? Theme.surfaceHover : Theme.surface
-                            border.width: isFocused ? 2 : 1
-                            border.color: isFocused ? Theme.focusBorder : Theme.surfaceBorder
-
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    appScaleRow.forceActiveFocus();
-                                    appScaleRow.focusedIndex = appScaleScope.index;
-                                    setAppScale.newScale = appScaleScope.modelData;
-                                    setAppScale.running = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Text {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                text: "Scales desktop apps for couch viewing. New apps use this scale immediately; reboot session for all apps."
-                font.pixelSize: Theme.fontHint
-                color: Theme.textMuted
-                wrapMode: Text.WordWrap
-            }
-        }
-
         // Resolution / Mode dropdown
         Text {
             text: "Resolution"
@@ -474,7 +337,7 @@ FocusScope {
                 return res + (hz ? "  @  " + hz : "");
             }
 
-            KeyNavigation.up: appScaleRow
+            KeyNavigation.up: scaleRow
 
             Behavior on Layout.preferredHeight {
                 NumberAnimation {
