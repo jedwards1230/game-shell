@@ -133,6 +133,7 @@ Item {
         }
         args.push("--display-mode", "fullscreen");
         args.push("--no-quit-after");
+        args.push("--no-frame-pacing");
         moonlight.command = args;
         requestInputRelease();
         streamStarted();
