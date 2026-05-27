@@ -16,6 +16,7 @@ PowerSettings 1.0 PowerSettings.qml
 MoonlightSettings 1.0 MoonlightSettings.qml
 AppearanceSettings 1.0 AppearanceSettings.qml
 AVControlSettings 1.0 AVControlSettings.qml
+BaseCard 1.0 BaseCard.qml
 AppCard 1.0 AppCard.qml
 ControllerSettings 1.0 ControllerSettings.qml
 MarqueeText 1.0 MarqueeText.qml
@@ -35,3 +36,5 @@ NotificationToast 1.0 NotificationToast.qml
 NotificationStack 1.0 NotificationStack.qml
 singleton ErrorLog 1.0 ErrorLog.qml
 ErrorLogViewer 1.0 ErrorLogViewer.qml
+PopoverMenu 1.0 PopoverMenu.qml
+SessionDialog 1.0 SessionDialog.qml

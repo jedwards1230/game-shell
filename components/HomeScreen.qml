@@ -20,6 +20,7 @@ FocusScope {
     signal streamRequested(var target)
     signal appLaunchRequested(var app)
     signal appFocusRequested(string windowClass)
+    signal appCloseRequested(string windowClass)
     signal settingsRequested
 
     // Load installed applications
@@ -236,7 +237,10 @@ except:
     Flickable {
         id: scrollView
         anchors.fill: parent
-        anchors.margins: Theme.padding
+        anchors.topMargin: Theme.padding
+        anchors.bottomMargin: Theme.padding
+        anchors.leftMargin: Theme.padding
+        anchors.rightMargin: Theme.padding
         contentHeight: contentColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -359,6 +363,30 @@ except:
                     onActivated: root.appFocusRequested(modelData.windowClass)
                 }
 
+                onContextRequested: {
+                    if (currentItem && currentIndex >= 0 && currentIndex < root.runningWindows.length) {
+                        let pos = currentItem.mapToItem(root, currentItem.width / 2, 0);
+                        popoverMenu.targetX = pos.x;
+                        popoverMenu.targetY = pos.y;
+                        let wc = root.runningWindows[currentIndex].windowClass;
+                        popoverMenu.actions = [
+                            {
+                                label: "Resume",
+                                action: function () {
+                                    root.appFocusRequested(wc);
+                                }
+                            },
+                            {
+                                label: "Quit App",
+                                action: function () {
+                                    root.appCloseRequested(wc);
+                                }
+                            }
+                        ];
+                        popoverMenu.opened = true;
+                        popoverMenu.forceActiveFocus();
+                    }
+                }
                 onEscaped: root.settingsRequested()
             }
 
@@ -457,11 +485,22 @@ except:
                     property var hostAppList: modelData.apps
                     property alias navigableRow: appViewNavRow
 
-                    Text {
-                        text: "Moonlight — " + hostData.name
-                        font.pixelSize: Theme.fontTitle
-                        font.bold: true
-                        color: Theme.textPrimary
+                    RowLayout {
+                        spacing: 12
+
+                        Text {
+                            text: "Moonlight — " + hostData.name
+                            font.pixelSize: Theme.fontTitle
+                            font.bold: true
+                            color: Theme.textPrimary
+                        }
+
+                        Rectangle {
+                            width: 14
+                            height: 14
+                            radius: 7
+                            color: hostAppList.length > 0 ? Theme.online : Theme.offline
+                        }
                     }
 
                     Item {
@@ -559,12 +598,20 @@ except:
 
             // === Hint Bar ===
             Text {
-                text: "A: Launch  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row"
+                text: runningRow.activeFocus ? "A: Resume  |  Y: Actions  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row" : "A: Launch  |  B: Settings  |  ←→: Scroll  |  ↑↓: Switch Row"
                 font.pixelSize: Theme.fontHint
                 color: Theme.textMuted
                 Layout.alignment: Qt.AlignHCenter
                 Layout.bottomMargin: 16
             }
+        }
+    }
+
+    PopoverMenu {
+        id: popoverMenu
+        onClosed: {
+            popoverMenu.opened = false;
+            runningRow.forceActiveFocus();
         }
     }
 }

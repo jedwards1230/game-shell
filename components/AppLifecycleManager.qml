@@ -52,6 +52,13 @@ Item {
         }
     }
 
+    function closeAppByClass(windowClass) {
+        if (windowClass && windowClass !== "") {
+            closeAppWindow.appClass = windowClass;
+            closeAppWindow.running = true;
+        }
+    }
+
     function focusApp(windowClass) {
         runningAppClass = windowClass;
         focusWindow.windowClass = windowClass;

@@ -99,6 +99,19 @@ ShellRoot {
         }
         onRequestInputRelease: inputManager.release()
         onRequestInputGrab: inputManager.grab()
+        onSessionConflictDetected: (runningApp, hostName) => {
+            if (root._layout) {
+                root._layout.sessionDialog.runningApp = runningApp;
+                root._layout.sessionDialog.hostName = hostName;
+                root._layout.sessionDialog.opened = true;
+            }
+        }
+        onSessionCheckCancelled: {
+            root.state = "idle";
+            inputManager.grab();
+            if (root._layout)
+                root._layout.focusHome();
+        }
     }
 
     function forceQuit() {
@@ -111,6 +124,7 @@ ShellRoot {
         inputManager.grab();
         if (root._layout) {
             root._layout.overlay.hide();
+            root._layout.sessionDialog.opened = false;
             root._layout.navDrawer.opened = false;
             root._layout.settingsPanel.visible = false;
             root._layout.focusHome();
@@ -139,7 +153,7 @@ ShellRoot {
         PanelWindow {
             required property var modelData
             screen: modelData
-            visible: root.state !== "appRunning" || root.overlayDrawerOpen
+            visible: (root.state !== "appRunning" && root.state !== "streaming") || root.overlayDrawerOpen
 
             anchors {
                 top: true
@@ -176,6 +190,7 @@ ShellRoot {
                 }
                 onAppLaunchRequested: app => appLifecycle.checkAndLaunchApp(app)
                 onAppFocusRequested: windowClass => appLifecycle.focusApp(windowClass)
+                onAppCloseRequested: windowClass => appLifecycle.closeAppByClass(windowClass)
                 onHomeKeyPressed: {
                     if (root.state === "idle")
                         avController.wake();
@@ -183,6 +198,22 @@ ShellRoot {
                 onReturnToShellRequested: root.returnToShell()
                 onOverlayDrawerClosed: {
                     root.overlayDrawerOpen = false;
+                }
+
+                Connections {
+                    target: layout.sessionDialog
+                    function onResumeRequested() {
+                        layout.sessionDialog.opened = false;
+                        streamManager.resumeSession();
+                    }
+                    function onQuitRequested() {
+                        layout.sessionDialog.opened = false;
+                        streamManager.quitAndRelaunch();
+                    }
+                    function onCancelled() {
+                        layout.sessionDialog.opened = false;
+                        streamManager.cancelSessionCheck();
+                    }
                 }
             }
         }

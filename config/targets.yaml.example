@@ -6,3 +6,9 @@ targets:
     fps: 120
     codec: HEVC
     hdr: true
+    # Optional: Sunshine API credentials for session detection.
+    # When present, the shell checks for active sessions before launching
+    # and offers Resume / Quit & Relaunch if a different app is running.
+    # sunshineUser: admin
+    # sunshinePass: your-password
+    # sunshinePort: 47990  # default if omitted

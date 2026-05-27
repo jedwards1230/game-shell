@@ -14,6 +14,7 @@ FocusScope {
 
     signal activated
     signal escaped
+    signal contextRequested
 
     readonly property alias listView: listView
 
@@ -22,6 +23,7 @@ FocusScope {
         anchors.fill: parent
         anchors.topMargin: -16
         anchors.bottomMargin: -16
+        leftMargin: 16
         orientation: ListView.Horizontal
         spacing: Theme.cardSpacing
         clip: false
@@ -40,6 +42,12 @@ FocusScope {
                 root.activated();
         }
         Keys.onEscapePressed: root.escaped()
+        Keys.onTabPressed: event => {
+            if (listView.currentItem) {
+                root.contextRequested();
+                event.accepted = true;
+            }
+        }
         Keys.onUpPressed: root._navigateUp()
         Keys.onDownPressed: root._navigateDown()
     }

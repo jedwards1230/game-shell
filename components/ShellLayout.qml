@@ -21,9 +21,13 @@ FocusScope {
     signal streamRequested(var target)
     signal appLaunchRequested(var app)
     signal appFocusRequested(string windowClass)
+    signal appCloseRequested(string windowClass)
     signal homeKeyPressed
     signal returnToShellRequested
     signal overlayDrawerClosed
+
+    // Session conflict dialog — driven by StreamManager signals
+    property alias sessionDialog: sessionDialog
 
     function focusHome() {
         homeFocusTimer.restart();
@@ -43,7 +47,7 @@ FocusScope {
 
     Shortcut {
         sequence: "Tab"
-        enabled: NotificationManager.hasActiveError && root.shellState === "idle"
+        enabled: NotificationManager.hasActiveError && root.shellState === "idle" && !homeScreen.activeFocus
         onActivated: {
             NotificationManager.dismissErrors();
             errorLogViewer.opened = true;
@@ -64,6 +68,7 @@ FocusScope {
         onStreamRequested: target => root.streamRequested(target)
         onAppLaunchRequested: app => root.appLaunchRequested(app)
         onAppFocusRequested: windowClass => root.appFocusRequested(windowClass)
+        onAppCloseRequested: windowClass => root.appCloseRequested(windowClass)
         onSettingsRequested: {
             settingsPanel.visible = true;
             settingsPanel.forceActiveFocus();
@@ -90,6 +95,10 @@ FocusScope {
     StreamOverlay {
         id: overlay
         anchors.fill: parent
+    }
+
+    SessionDialog {
+        id: sessionDialog
     }
 
     // === Navigation Drawer (idle state) ===
