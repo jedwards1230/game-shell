@@ -140,12 +140,6 @@ FocusScope {
     // Actions that can be remapped via daemon IPC
     property var remappableActions: ["select", "back", "altSelect", "confirm"]
 
-    property var navigationBindings: bindings.filter(function (b) {
-        return b.category === "Navigation";
-    })
-    property var systemBindings: bindings.filter(function (b) {
-        return b.category === "System";
-    })
 
     // Capture state
     property int editingIndex: -1
@@ -303,109 +297,117 @@ FocusScope {
         }
     }
 
-    ColumnLayout {
+    ListView {
+        id: bindingsList
         anchors.fill: parent
         anchors.margins: Theme.padding
-        spacing: 32
+        spacing: 8
+        clip: true
+        focus: true
+        model: root.bindings
+        keyNavigationEnabled: true
+        onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
-        // Navigation section header
-        Text {
-            text: "Navigation"
-            font.pixelSize: Theme.fontBody
-            font.bold: true
-            color: Theme.textPrimary
+        section.property: "category"
+        section.delegate: Item {
+            required property string section
+            width: bindingsList.width
+            height: sectionLabel.implicitHeight + 24
+
+            Text {
+                id: sectionLabel
+                anchors.left: parent.left
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 8
+                text: section
+                font.pixelSize: Theme.fontBody
+                font.bold: true
+                color: Theme.textPrimary
+            }
         }
 
-        // Navigation bindings list
-        ListView {
-            id: bindingsList
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 8
-            clip: true
-            model: root.navigationBindings
-            focus: true
-            keyNavigationEnabled: true
-            onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+        Keys.onReturnPressed: {
+            var binding = root.bindings[currentIndex];
+            if (root.remappableActions.indexOf(binding.action) >= 0)
+                root.startCapture(currentIndex, binding.action, binding.label);
+        }
 
-            KeyNavigation.down: systemList
+        delegate: Rectangle {
+            required property int index
+            required property var modelData
+            width: bindingsList.width
+            height: modelData.action === "drawer" ? 100 : 80
+            radius: 16
+            color: bindingsList.currentIndex === index && bindingsList.activeFocus ? Theme.surfaceHover : Theme.surface
+            border.width: 2
+            border.color: {
+                if (root.remappableActions.indexOf(modelData.action) >= 0 && bindingsList.currentIndex === index && bindingsList.activeFocus)
+                    return Theme.focusBorder;
+                return Theme.surfaceBorder;
+            }
 
-            Keys.onReturnPressed: {
-                var binding = root.navigationBindings[currentIndex];
-                if (root.remappableActions.indexOf(binding.action) >= 0) {
-                    root.startCapture(currentIndex, binding.action, binding.label);
+            Behavior on color {
+                ColorAnimation {
+                    duration: 150
                 }
             }
 
-            delegate: Rectangle {
-                required property int index
-                required property var modelData
-                width: bindingsList.width
-                height: 80
-                radius: 16
-                color: bindingsList.currentIndex === index && bindingsList.activeFocus ? Theme.surfaceHover : Theme.surface
-                border.width: 2
-                border.color: {
-                    if (root.remappableActions.indexOf(modelData.action) >= 0 && bindingsList.currentIndex === index && bindingsList.activeFocus)
-                        return Theme.focusBorder;
-                    return Theme.surfaceBorder;
-                }
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 24
+                anchors.rightMargin: 24
+                spacing: 16
 
-                Behavior on color {
-                    ColorAnimation {
-                        duration: 150
-                    }
-                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 24
-                    anchors.rightMargin: 24
-                    spacing: 16
-
-                    // Action label
                     Text {
                         text: modelData.label
                         font.pixelSize: Theme.fontSmall
                         color: Theme.textPrimary
-                        Layout.fillWidth: true
                     }
 
-                    // Key cap badges
-                    Row {
-                        Layout.alignment: Qt.AlignRight
-                        spacing: 8
+                    Text {
+                        text: "Also wakes AV system from standby"
+                        font.pixelSize: Theme.fontHint
+                        color: Theme.textMuted
+                        visible: modelData.action === "drawer"
+                    }
+                }
 
-                        Repeater {
-                            model: modelData.keys
+                Row {
+                    Layout.alignment: Qt.AlignRight
+                    spacing: 8
 
-                            Row {
-                                spacing: 8
+                    Repeater {
+                        model: modelData.keys
 
-                                // "+" separator for combo keys (after first key)
+                        Row {
+                            spacing: 8
+
+                            Text {
+                                text: "+"
+                                font.pixelSize: Theme.fontSmall
+                                color: Theme.textMuted
+                                visible: index > 0
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Rectangle {
+                                width: capText.implicitWidth + 24
+                                height: capText.implicitHeight + 16
+                                radius: 8
+                                color: Theme.surface
+                                border.width: 2
+                                border.color: Theme.ember
+
                                 Text {
-                                    text: "+"
+                                    id: capText
+                                    anchors.centerIn: parent
+                                    text: modelData
                                     font.pixelSize: Theme.fontSmall
-                                    color: Theme.textMuted
-                                    visible: index > 0
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                Rectangle {
-                                    width: keyText.implicitWidth + 24
-                                    height: keyText.implicitHeight + 16
-                                    radius: 8
-                                    color: Theme.surface
-                                    border.width: 2
-                                    border.color: Theme.ember
-
-                                    Text {
-                                        id: keyText
-                                        anchors.centerIn: parent
-                                        text: modelData
-                                        font.pixelSize: Theme.fontSmall
-                                        color: Theme.textPrimary
-                                    }
+                                    color: Theme.textPrimary
                                 }
                             }
                         }
@@ -414,133 +416,25 @@ FocusScope {
             }
         }
 
-        // System section header
-        Text {
-            text: "System"
-            font.pixelSize: Theme.fontBody
-            font.bold: true
-            color: Theme.textPrimary
-        }
+        footer: Column {
+            width: bindingsList.width
+            spacing: 16
+            topPadding: 24
 
-        // System bindings list (read-only)
-        ListView {
-            id: systemList
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 8
-            clip: true
-            model: root.systemBindings
-            keyNavigationEnabled: true
-            onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+            SettingsButton {
+                id: resetButton
+                text: "Reset to Defaults"
+                anchors.horizontalCenter: parent.horizontalCenter
 
-            KeyNavigation.up: bindingsList
-            KeyNavigation.down: resetButton
-
-            delegate: Rectangle {
-                required property int index
-                required property var modelData
-                width: systemList.width
-                height: modelData.action === "drawer" ? 100 : 80
-                radius: 16
-                color: systemList.currentIndex === index && systemList.activeFocus ? Theme.surfaceHover : Theme.surface
-                border.width: 2
-                border.color: Theme.surfaceBorder
-
-                Behavior on color {
-                    ColorAnimation {
-                        duration: 150
-                    }
-                }
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 24
-                    anchors.rightMargin: 24
-                    spacing: 16
-
-                    // Action label + optional subtitle
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        Text {
-                            text: modelData.label
-                            font.pixelSize: Theme.fontSmall
-                            color: Theme.textPrimary
-                        }
-
-                        Text {
-                            text: "Also wakes AV system from standby"
-                            font.pixelSize: Theme.fontHint
-                            color: Theme.textMuted
-                            visible: modelData.action === "drawer"
-                        }
-                    }
-
-                    // Key cap badges
-                    Row {
-                        Layout.alignment: Qt.AlignRight
-                        spacing: 8
-
-                        Repeater {
-                            model: modelData.keys
-
-                            Row {
-                                spacing: 8
-
-                                Text {
-                                    text: "+"
-                                    font.pixelSize: Theme.fontSmall
-                                    color: Theme.textMuted
-                                    visible: index > 0
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                Rectangle {
-                                    width: sysKeyText.implicitWidth + 24
-                                    height: sysKeyText.implicitHeight + 16
-                                    radius: 8
-                                    color: Theme.surface
-                                    border.width: 2
-                                    border.color: Theme.ember
-
-                                    Text {
-                                        id: sysKeyText
-                                        anchors.centerIn: parent
-                                        text: modelData
-                                        font.pixelSize: Theme.fontSmall
-                                        color: Theme.textPrimary
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                Keys.onReturnPressed: root.resetDefaults()
             }
-        }
 
-        // Reset to Defaults button
-        SettingsButton {
-            id: resetButton
-            text: "Reset to Defaults"
-            Layout.alignment: Qt.AlignHCenter
-
-            KeyNavigation.up: systemList
-
-            Keys.onReturnPressed: {
-                root.resetDefaults();
+            Text {
+                text: "A: Edit binding  |  B: Back"
+                font.pixelSize: Theme.fontHint
+                color: Theme.textSecondary
+                anchors.horizontalCenter: parent.horizontalCenter
             }
-        }
-
-        Item {
-            Layout.fillHeight: true
-        }
-
-        Text {
-            text: "A: Edit binding  |  B: Back"
-            font.pixelSize: Theme.fontHint
-            color: Theme.textSecondary
-            Layout.alignment: Qt.AlignHCenter
         }
     }
 
