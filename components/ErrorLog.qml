@@ -11,14 +11,14 @@ Item {
     property int _nextId: 1
     property string _currentTarget: ""
 
-    function log(source, message, details) {
-        var entry = Object.create(null)
-        entry.id = _nextId++
-        entry.timestamp = new Date()
-        entry.source = source
-        entry.message = message
-        entry.details = details || ""
-        entry.target = _currentTarget
+    function log(source, message, details, target) {
+        var entry = Object.create(null);
+        entry.id = _nextId++;
+        entry.timestamp = new Date();
+        entry.source = source;
+        entry.message = message;
+        entry.details = details || "";
+        entry.target = target !== undefined ? target : _currentTarget;
 
         var list = root.entries.slice()
         list.push(entry)

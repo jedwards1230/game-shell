@@ -26,15 +26,17 @@ Item {
     onActiveListChanged: hasActiveError = _computeHasActiveError()
 
     function dismissErrors() {
-        var remaining = []
+        var remaining = [];
         for (var i = 0; i < root.activeList.length; i++) {
             if (root.activeList[i].level === "error")
-                notificationDismissed(root.activeList[i].id)
+                notificationDismissed(root.activeList[i].id);
             else
-                remaining.push(root.activeList[i])
+                remaining.push(root.activeList[i]);
         }
-        root.activeList = remaining
-        _processQueue()
+        root.activeList = remaining;
+        root._queue = root._queue.filter(function(n) { return n.level !== "error"; });
+        root._deferredQueue = root._deferredQueue.filter(function(n) { return n.level !== "error"; });
+        _processQueue();
     }
 
     function notify(title, message, options) {

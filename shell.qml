@@ -85,12 +85,6 @@ ShellRoot {
             root.state = "reconnecting";
         }
         onStreamFailed: {
-            var hostName = streamManager.currentTarget ? (streamManager.currentTarget.name || "") : "";
-            Components.NotificationManager.notify("Stream Failed", hostName, {
-                icon: "📡",
-                level: "error",
-                source: "stream"
-            });
             root.state = "idle";
             inputManager.grab();
         }

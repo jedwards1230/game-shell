@@ -20,6 +20,7 @@ Item {
     function launchDesktopApp(app) {
         runningAppClass = "";
         snapshotClients.running = true;
+        appRunner._appName = app.name || "";
         appRunner.command = ["hyprctl", "dispatch", "exec", app.exec || app.name];
         appRunner.running = true;
         detectNewWindow.restart();
@@ -73,10 +74,13 @@ Item {
 
     Process {
         id: appRunner
+        property string _appName: ""
         command: ["echo"]
         onExited: (exitCode, exitStatus) => {
-            if (exitCode !== 0)
-                ErrorLog.log("app", "Failed to launch application", "Exit code " + exitCode)
+            if (exitCode !== 0) {
+                let cmd = appRunner.command.join(" ");
+                ErrorLog.log("app", "Failed to launch " + (_appName || "application"), "Command: " + cmd + "\nExit code: " + exitCode, _appName);
+            }
         }
     }
 

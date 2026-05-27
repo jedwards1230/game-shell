@@ -69,22 +69,28 @@ Item {
         id: moonlight
         stderr: SplitParser {
             onRead: (line) => {
-                root._lastStderr = line
-                var lines = root._stderrLines.slice()
-                lines.push(line)
+                var trimmed = line.trim();
+                if (trimmed === "") return;
+                root._lastStderr = trimmed;
+                var lines = root._stderrLines.slice();
+                lines.push(trimmed);
                 if (lines.length > 50)
-                    lines = lines.slice(lines.length - 50)
-                root._stderrLines = lines
+                    lines = lines.slice(lines.length - 50);
+                root._stderrLines = lines;
             }
         }
         onExited: (exitCode, exitStatus) => {
             if (exitCode === 0) {
+                root._lastStderr = "";
+                root._stderrLines = [];
                 root.requestOverlayHide();
                 root.requestInputGrab();
                 root.streamEnded();
             } else {
                 root.crashCount++;
                 if (root.crashCount < 5) {
+                    root._lastStderr = "";
+                    root._stderrLines = [];
                     root.requestOverlayShow("Reconnecting... (" + root.crashCount + "/5)");
                     root.streamCrashed(root.crashCount);
                     reconnectTimer.start();
