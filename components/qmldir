@@ -1,6 +1,7 @@
 module components
 singleton Theme 1.0 Theme.qml
 singleton Units 1.0 Units.qml
+singleton WindowMatcher 1.0 WindowMatcher.qml
 StreamCard 1.0 StreamCard.qml
 StatusIcons 1.0 StatusIcons.qml
 StreamOverlay 1.0 StreamOverlay.qml
