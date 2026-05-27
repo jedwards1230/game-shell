@@ -41,12 +41,13 @@ FocusScope {
         }
     }
 
-    Keys.onTabPressed: event => {
-        if (NotificationManager.hasActiveError) {
+    Shortcut {
+        sequence: "Tab"
+        enabled: NotificationManager.hasActiveError && root.shellState === "idle"
+        onActivated: {
             NotificationManager.dismissErrors();
             errorLogViewer.opened = true;
             errorLogViewer.forceActiveFocus();
-            event.accepted = true;
         }
     }
 

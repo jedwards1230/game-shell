@@ -27,7 +27,7 @@ Rectangle {
         Text {
             text: root.message
             font.pixelSize: Theme.fontTitle
-            color: Theme.textPrimary
+            color: Theme.textOnDark
             Layout.alignment: Qt.AlignHCenter
         }
 
@@ -35,7 +35,7 @@ Rectangle {
             visible: root.attemptCount > 0
             text: "Attempt " + root.attemptCount + " of " + root.maxAttempts
             font.pixelSize: Theme.fontBody
-            color: Theme.warning
+            color: Theme.textOnDarkMuted
             Layout.alignment: Qt.AlignHCenter
         }
 
