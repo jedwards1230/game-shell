@@ -26,9 +26,10 @@ Item {
         let appName = (app.name || "").toLowerCase()
         if (appName !== "" && (cls === appName || initCls === appName)) return true
 
-        // 4. Substring: class within exec or exec within class
-        if (execBase !== "" && cls !== "") {
-            if (execBase.indexOf(cls) >= 0 || cls.indexOf(execBase) >= 0) return true
+        // 4. Substring: class/initialClass within exec or vice versa
+        if (execBase !== "") {
+            if (cls !== "" && (execBase.indexOf(cls) >= 0 || cls.indexOf(execBase) >= 0)) return true
+            if (initCls !== "" && (execBase.indexOf(initCls) >= 0 || initCls.indexOf(execBase) >= 0)) return true
         }
 
         return false

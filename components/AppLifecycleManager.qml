@@ -11,7 +11,7 @@ Item {
 
     property var _prelaunchClasses: []
     property var _pendingApp: null
-    property var _launchedApps: ({})
+    property var _launchedApps: Object.create(null)
     property int _maxMisses: 3
 
     signal appLaunched()
@@ -149,7 +149,7 @@ Item {
         onClientsReceived: (clients) => {
             let apps = (root.applications || [])
             let windows = []
-            let seenClasses = {}
+            let seenClasses = Object.create(null)
             for (let i = 0; i < clients.length; i++) {
                 let c = clients[i]
                 let cls = c["class"] || ""
@@ -231,9 +231,8 @@ Item {
                 if (!found) root.appClosed()
             }
         }
-        onErrorOccurred: {
-            // Don't clear runningWindows on errors — log instead
-            console.warn("AppLifecycleManager: window poll error, keeping previous state")
+        onErrorOccurred: (message) => {
+            console.warn("AppLifecycleManager: window poll error:", message)
         }
     }
 
