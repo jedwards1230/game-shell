@@ -17,6 +17,9 @@ FocusScope {
 
     property var runningWindows: []
 
+    property var streamRecents: []
+    property var _activeApps: ({})
+
     signal streamRequested(var target)
     signal streamQuitRequested(var target)
     signal appLaunchRequested(var app)
@@ -87,9 +90,123 @@ except:
         }
     }
 
+    Process {
+        id: loadStreamRecents
+        command: ["python3", "-c", `
+import json, os
+path = os.path.expanduser('~/.local/share/game-shell/stream-recents.json')
+try:
+    with open(path) as f:
+        print(json.dumps(json.load(f)[:20]))
+except:
+    print('[]')
+`]
+        stdout: SplitParser {
+            onRead: line => {
+                try {
+                    root.streamRecents = JSON.parse(line);
+                } catch (e) {
+                    root.streamRecents = [];
+                }
+            }
+        }
+    }
+
+    function saveStreamRecent(appName, host) {
+        streamRecentsSaver.command = ["python3", "-c",
+            "import json,os,time; p=os.path.expanduser('~/.local/share/game-shell/stream-recents.json'); os.makedirs(os.path.dirname(p),exist_ok=True); " +
+            "d=[]; " +
+            "try:\n with open(p) as f: d=json.load(f)\nexcept: pass\n" +
+            "entry={'app':'" + appName.replace(/'/g, "\\'") + "','host':'" + host.replace(/'/g, "\\'") + "','time':time.time()}; " +
+            "d=[e for e in d if e.get('app')!=entry['app'] or e.get('host')!=entry['host']]; d.insert(0,entry); d=d[:20]; " +
+            "open(p,'w').write(json.dumps(d,indent=2))"
+        ];
+        streamRecentsSaver.running = true;
+        streamRecentsReloadTimer.start();
+    }
+
+    Process {
+        id: streamRecentsSaver
+    }
+
+    Timer {
+        id: streamRecentsReloadTimer
+        interval: 500
+        onTriggered: loadStreamRecents.running = true
+    }
+
+    // Per-host active app check via GS serverinfo
+    Process {
+        id: activeAppCheck
+        property string _host: ""
+        property string _response: ""
+        stdout: SplitParser {
+            onRead: line => {
+                activeAppCheck._response = line.trim();
+            }
+        }
+        onExited: (exitCode, exitStatus) => {
+            let updated = root._activeApps;
+            let name = activeAppCheck._response;
+            activeAppCheck._response = "";
+            if (exitCode === 0 && name !== "" && name !== "IDLE") {
+                updated[activeAppCheck._host] = name;
+            } else {
+                delete updated[activeAppCheck._host];
+            }
+            root._activeApps = JSON.parse(JSON.stringify(updated));
+        }
+    }
+
+    function _checkActiveApps() {
+        if (activeAppCheck.running || root.targets.length === 0)
+            return;
+        let target = root.targets[root._activeCheckIndex % root.targets.length];
+        root._activeCheckIndex++;
+        let host = target.host || "";
+        if (host === "")
+            return;
+        activeAppCheck._host = host;
+        activeAppCheck._response = "";
+        activeAppCheck.command = ["python3", "-c", `
+import urllib.request, re, configparser, os, sys
+try:
+    r = urllib.request.urlopen("http://${host}:47989/serverinfo", timeout=3).read().decode()
+    state = re.search(r"<state>([^<]+)</state>", r)
+    gid = re.search(r"<currentgame>([^<]+)</currentgame>", r)
+    if not state or state.group(1) != "SUNSHINE_SERVER_BUSY" or not gid or gid.group(1) == "0":
+        print("IDLE"); sys.exit(0)
+    game_id = gid.group(1)
+    conf = os.path.expanduser("~/.config/Moonlight Game Streaming Project/Moonlight.conf")
+    if os.path.exists(conf):
+        cp = configparser.ConfigParser()
+        cp.read(conf)
+        for k, v in cp.items("hosts"):
+            if k.endswith("\\\\id") and v == game_id:
+                name_key = k.replace("\\\\id", "\\\\name")
+                if cp.has_option("hosts", name_key):
+                    print(cp.get("hosts", name_key)); sys.exit(0)
+    print("Unknown App")
+except Exception:
+    print("IDLE")
+`];
+        activeAppCheck.running = true;
+    }
+
+    property int _activeCheckIndex: 0
+
+    Timer {
+        interval: 10000
+        running: root.shellState === "idle"
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: root._checkActiveApps()
+    }
+
     Component.onCompleted: {
         loadApps.running = true;
         loadRecents.running = true;
+        loadStreamRecents.running = true;
     }
 
     onActiveFocusChanged: {
@@ -239,15 +356,31 @@ except:
         }
     }
 
-    // Computed model for app-view rows, re-evaluated when targets or hostApps change
+    // Computed model for app-view rows, re-evaluated when targets, hostApps, activeApps, or recents change
     property var _appViewRows: {
-        // Explicitly reference both properties so QML re-evaluates this binding
         let ha = root.hostApps;
         let tgts = root.targets;
+        let active = root._activeApps;
+        let recents = root.streamRecents;
         let rows = [];
         for (let i = 0; i < tgts.length; i++) {
             let t = tgts[i];
-            let apps = ha[t.host] || [];
+            let apps = (ha[t.host] || []).slice();
+            let activeApp = active[t.host] || "";
+            let recentOrder = {};
+            for (let r = 0; r < recents.length; r++) {
+                if (recents[r].host === t.host)
+                    recentOrder[recents[r].app] = r;
+            }
+            apps.sort(function (a, b) {
+                let aActive = (a === activeApp) ? 0 : 1;
+                let bActive = (b === activeApp) ? 0 : 1;
+                if (aActive !== bActive) return aActive - bActive;
+                let aRecent = (a in recentOrder) ? recentOrder[a] : 9999;
+                let bRecent = (b in recentOrder) ? recentOrder[b] : 9999;
+                if (aRecent !== bRecent) return aRecent - bRecent;
+                return a.localeCompare(b);
+            });
             rows.push({
                 host: t.host,
                 name: t.name,
@@ -487,8 +620,12 @@ except:
                     width: Theme.cardWidth
                     target: modelData
                     shellState: root.shellState
+                    hostActiveApp: root._activeApps[modelData.host] || ""
                     focus: index === moonlightRow.currentIndex
-                    onActivated: root.streamRequested(modelData)
+                    onActivated: {
+                        root.saveStreamRecent(modelData.app || modelData.name, modelData.host);
+                        root.streamRequested(modelData);
+                    }
                 }
 
                 onContextRequested: {
@@ -602,10 +739,12 @@ except:
                                 target: hostTarget
                                 appName: modelData
                                 shellState: root.shellState
+                                hostActiveApp: root._activeApps[hostTarget.host] || ""
                                 focus: index === appViewNavRow.currentIndex
                                 onActivated: {
                                     let t = JSON.parse(JSON.stringify(hostTarget));
                                     t.app = modelData;
+                                    root.saveStreamRecent(modelData, hostTarget.host);
                                     root.streamRequested(t);
                                 }
                             }
