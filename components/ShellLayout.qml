@@ -88,6 +88,8 @@ FocusScope {
         id: homeFocusTimer
         interval: 50
         onTriggered: {
+            if (notificationCenter.opened || errorLogViewer.opened)
+                return;
             homeScreen.forceActiveFocus();
         }
     }
