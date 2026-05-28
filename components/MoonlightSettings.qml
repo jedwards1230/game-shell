@@ -264,7 +264,7 @@ FocusScope {
             Layout.alignment: Qt.AlignLeft
             spacing: 24
 
-            property int focusIndex: Theme.moonlightViewMode === "apps" ? 1 : 0
+            property int focusIndex: Theme.streamingViewMode === "apps" ? 1 : 0
 
             Keys.onLeftPressed: {
                 if (focusIndex > 0)
@@ -275,7 +275,7 @@ FocusScope {
                     focusIndex++;
             }
             Keys.onReturnPressed: {
-                Theme.setMoonlightViewMode(focusIndex === 0 ? "servers" : "apps");
+                Theme.setStreamingViewMode(focusIndex === 0 ? "servers" : "apps");
             }
             Keys.onDownPressed: {
                 if (serverList.count > 0)
@@ -305,8 +305,8 @@ FocusScope {
                     height: 180
                     radius: Theme.cardRadius
                     color: Theme.surface
-                    border.width: Theme.moonlightViewMode === modelData.id ? 3 : 2
-                    border.color: Theme.moonlightViewMode === modelData.id ? Theme.focusBorder : (viewModeRow.focusIndex === index && viewModeRow.activeFocus ? Theme.focusBorder : Theme.surfaceBorder)
+                    border.width: Theme.streamingViewMode === modelData.id ? 3 : 2
+                    border.color: Theme.streamingViewMode === modelData.id ? Theme.focusBorder : (viewModeRow.focusIndex === index && viewModeRow.activeFocus ? Theme.focusBorder : Theme.surfaceBorder)
 
                     Behavior on border.color {
                         ColorAnimation {
@@ -318,7 +318,7 @@ FocusScope {
                         anchors.fill: parent
                         radius: parent.radius
                         color: Theme.surfaceHover
-                        visible: viewModeRow.focusIndex === index && viewModeRow.activeFocus && Theme.moonlightViewMode !== modelData.id
+                        visible: viewModeRow.focusIndex === index && viewModeRow.activeFocus && Theme.streamingViewMode !== modelData.id
                     }
 
                     ColumnLayout {
@@ -357,7 +357,7 @@ FocusScope {
                         onClicked: {
                             viewModeRow.focusIndex = index;
                             viewModeRow.forceActiveFocus();
-                            Theme.setMoonlightViewMode(modelData.id);
+                            Theme.setStreamingViewMode(modelData.id);
                         }
                     }
                 }

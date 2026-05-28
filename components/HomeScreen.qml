@@ -49,20 +49,20 @@ FocusScope {
     Timer {
         id: appDiscoveryTimer
         interval: 60000
-        running: Theme.moonlightViewMode === "apps"
+        running: Theme.streamingViewMode === "apps"
         repeat: true
         onTriggered: StreamProviders.active.discoverApps()
     }
 
     onTargetsChanged: {
-        if (Theme.moonlightViewMode === "apps" && root.targets.length > 0)
+        if (Theme.streamingViewMode === "apps" && root.targets.length > 0)
             StreamProviders.active.discoverApps();
     }
 
     Connections {
         target: Theme
-        function onMoonlightViewModeChanged() {
-            if (Theme.moonlightViewMode === "apps" && root.targets.length > 0)
+        function onStreamingViewModeChanged() {
+            if (Theme.streamingViewMode === "apps" && root.targets.length > 0)
                 StreamProviders.active.discoverApps();
         }
     }
@@ -283,7 +283,7 @@ FocusScope {
                     scrollView.ensureVisible(this)
                 nextRow: {
                     var _ = appViewRepeater.count;
-                    if (Theme.moonlightViewMode === "servers")
+                    if (Theme.streamingViewMode === "servers")
                         return moonlightRow;
                     return root._appViewRowItem(0) || appsRow;
                 }
@@ -306,7 +306,7 @@ FocusScope {
 
             // Server view: single "Moonlight" row with one card per server
             Text {
-                visible: Theme.moonlightViewMode === "servers"
+                visible: Theme.streamingViewMode === "servers"
                 text: "Moonlight"
                 font.pixelSize: Theme.fontTitle
                 font.bold: true
@@ -315,11 +315,11 @@ FocusScope {
 
             NavigableRow {
                 id: moonlightRow
-                visible: Theme.moonlightViewMode === "servers"
+                visible: Theme.streamingViewMode === "servers"
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Theme.rowHeight : 0
                 keyNavigationWraps: true
-                focus: Theme.moonlightViewMode === "servers" && !recentsRow.visible && !runningRow.visible
+                focus: Theme.streamingViewMode === "servers" && !recentsRow.visible && !runningRow.visible
                 previousRow: recentsRow
                 nextRow: appsRow
                 onActiveFocusChanged: if (activeFocus)
@@ -370,7 +370,7 @@ FocusScope {
             // App view: one row per host, each card is an available app
             Repeater {
                 id: appViewRepeater
-                model: Theme.moonlightViewMode === "apps" ? root._appViewRows : []
+                model: Theme.streamingViewMode === "apps" ? root._appViewRows : []
 
                 delegate: ColumnLayout {
                     id: appViewRowDelegate
@@ -430,7 +430,7 @@ FocusScope {
                             anchors.fill: parent
                             visible: hostAppList.length > 0
                             keyNavigationWraps: true
-                            focus: Theme.moonlightViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible && !runningRow.visible
+                            focus: Theme.streamingViewMode === "apps" && appViewRowDelegate.index === 0 && !recentsRow.visible && !runningRow.visible
                             onActiveFocusChanged: if (activeFocus)
                                 scrollView.ensureVisible(appViewRowDelegate)
                             model: hostAppList
@@ -506,7 +506,7 @@ FocusScope {
                 onActiveFocusChanged: if (activeFocus)
                     scrollView.ensureVisible(this)
                 previousRow: {
-                    if (Theme.moonlightViewMode === "servers")
+                    if (Theme.streamingViewMode === "servers")
                         return moonlightRow;
                     return root._appViewRowItem(appViewRepeater.count - 1) || recentsRow;
                 }

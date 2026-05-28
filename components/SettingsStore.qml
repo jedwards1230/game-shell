@@ -11,7 +11,7 @@ import QtQuick
 //
 // Ownership split (both writers do read-modify-write of disjoint keys, which is
 // acceptable for a single-user kiosk):
-//   - QML side (this store) owns: themeMode, moonlightViewMode, controllerDebug
+//   - QML side (this store) owns: themeMode, streamingViewMode, controllerDebug
 //   - Python daemon owns persistence of: keyBindings
 // This store is the SOLE QML-side writer of settings.json. `keyBindings` here is
 // a read-through mirror kept in sync with the daemon over IPC.
@@ -25,7 +25,7 @@ Item {
 
     // === Persisted settings (QML-owned) ===
     property string themeMode: "dark"             // "auto" | "light" | "dark"
-    property string moonlightViewMode: "servers"  // "servers" | "apps"
+    property string streamingViewMode: "servers"  // "servers" | "apps"
     property bool controllerDebug: false
 
     // === Daemon-owned mirror (authoritative copy lives in the daemon) ===
@@ -51,8 +51,11 @@ Item {
                     var obj = JSON.parse(line);
                     if (obj.themeMode === "auto" || obj.themeMode === "light" || obj.themeMode === "dark")
                         store.themeMode = obj.themeMode;
-                    if (obj.moonlightViewMode === "servers" || obj.moonlightViewMode === "apps")
-                        store.moonlightViewMode = obj.moonlightViewMode;
+                    // Migration: prefer streamingViewMode, fall back to the
+                    // legacy moonlightViewMode key for existing settings files.
+                    var viewMode = obj.streamingViewMode !== undefined ? obj.streamingViewMode : obj.moonlightViewMode;
+                    if (viewMode === "servers" || viewMode === "apps")
+                        store.streamingViewMode = viewMode;
                     if (typeof obj.controllerDebug === "boolean")
                         store.controllerDebug = obj.controllerDebug;
                     if (obj.keyBindings && typeof obj.keyBindings === "object")
@@ -67,7 +70,7 @@ Item {
     // --- Save: read-modify-write; preserves daemon-owned keyBindings ---
     Process {
         id: saveProc
-        command: ["python3", "-c", "import json,os,pathlib;" + "p=pathlib.Path(os.path.expanduser('" + store._settingsFile + "'));" + "p.parent.mkdir(parents=True,exist_ok=True);" + "d=json.loads(p.read_text()) if p.exists() else {};" + "d['themeMode']='" + store.themeMode + "';" + "d['moonlightViewMode']='" + store.moonlightViewMode + "';" + "d['controllerDebug']=" + (store.controllerDebug ? "True" : "False") + ";" + "p.write_text(json.dumps(d,separators=(',',':')))"]
+        command: ["python3", "-c", "import json,os,pathlib;" + "p=pathlib.Path(os.path.expanduser('" + store._settingsFile + "'));" + "p.parent.mkdir(parents=True,exist_ok=True);" + "d=json.loads(p.read_text()) if p.exists() else {};" + "d['themeMode']='" + store.themeMode + "';" + "d['streamingViewMode']='" + store.streamingViewMode + "';" + "d.pop('moonlightViewMode',None);" + "d['controllerDebug']=" + (store.controllerDebug ? "True" : "False") + ";" + "p.write_text(json.dumps(d,separators=(',',':')))"]
     }
 
     function load() {
@@ -85,11 +88,11 @@ Item {
         }
     }
 
-    function setMoonlightViewMode(mode) {
+    function setStreamingViewMode(mode) {
         if (mode === "servers" || mode === "apps") {
-            moonlightViewMode = mode;
+            streamingViewMode = mode;
             save();
-            settingsChanged("moonlightViewMode", mode);
+            settingsChanged("streamingViewMode", mode);
         }
     }
 

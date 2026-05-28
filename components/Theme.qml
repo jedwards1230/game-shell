@@ -8,7 +8,7 @@ Item {
 
     // === Moonlight View Mode (persisted via SettingsStore) ===
     // "servers" (one card per host) or "apps" (one row per host, cards = apps)
-    readonly property string moonlightViewMode: SettingsStore.moonlightViewMode
+    readonly property string streamingViewMode: SettingsStore.streamingViewMode
 
     // === Input Mode ===
     // true when mouse/right-stick is driving focus, false for controller/D-pad
@@ -33,8 +33,8 @@ Item {
         SettingsStore.setThemeMode(mode);
     }
 
-    function setMoonlightViewMode(mode) {
-        SettingsStore.setMoonlightViewMode(mode);
+    function setStreamingViewMode(mode) {
+        SettingsStore.setStreamingViewMode(mode);
     }
 
     function setControllerDebug(enabled) {
