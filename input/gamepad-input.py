@@ -5,7 +5,7 @@ Grabs a gamepad exclusively via EVIOCGRAB and emits keyboard events via uinput.
 Listens on a unix socket for grab/release/subscribe commands from the shell.
 
 IPC protocol: see docs/IPC_PROTOCOL.md
-Commands: grab, release, status, subscribe, get-bindings, set-binding, capture-next, capture-cancel, kbd-log
+Commands: grab, release, status, subscribe, get-bindings, set-binding, capture-next, capture-cancel, kbd-log, inject
 Events (to subscribers): controller-wake, controller-disconnected, home-press, combo:*, input-mode:*, buttons:*, keys:*
 """
 
@@ -150,6 +150,14 @@ def _kbd_display_name(code: int) -> str:
 HOME_HOLD_KEYS = {ecodes.BTN_MODE}
 HOME_HOLD_SECS = 2.0
 
+# Names accepted by the `inject keydown:<name>` socket command. For
+# every name in this set the daemon runs its own tap-vs-hold timer
+# mirroring BTN_MODE — broadcasts `home-press` on tap (release before
+# HOME_HOLD_SECS) and `combo:home-hold` if the timer elapses first.
+# This lets external sources (e.g. a Hyprland bind on Super_L) feed
+# the same routing the controller Home button uses.
+INJECT_HOME_NAMES = {"meta"}
+
 # Left analog stick configuration
 STICK_DEADZONE = 0.30  # 30% of half-range from center before triggering
 
@@ -238,6 +246,12 @@ class InputDaemon:
 
         # Home button hold detection
         self._home_hold_task: asyncio.Task | None = None
+
+        # Pending tap/hold timers for externally-injected keys (one per
+        # name in INJECT_HOME_NAMES), and whether each timer has already
+        # fired its hold event before the corresponding keyup arrived.
+        self._inject_hold_tasks: dict[str, asyncio.Task] = {}
+        self._inject_hold_fired: dict[str, bool] = {}
 
         # Currently held keyboard keys (across all watched keyboards),
         # used to emit `keys:<held>` debug events.
@@ -807,6 +821,41 @@ class InputDaemon:
         except asyncio.CancelledError:
             pass
 
+    def _handle_inject_keydown(self, name: str):
+        """Start tap/hold tracking for a key forwarded via `inject`.
+
+        Mirrors the BTN_MODE pattern: we just start a hold timer here;
+        whether to broadcast `home-press` (tap) or treat the matching
+        keyup as a no-op (because the timer already fired hold) is
+        decided in `_handle_inject_keyup`.
+        """
+        prev = self._inject_hold_tasks.get(name)
+        if prev and not prev.done():
+            prev.cancel()
+        self._inject_hold_fired[name] = False
+        if name in INJECT_HOME_NAMES:
+            self._inject_hold_tasks[name] = asyncio.create_task(
+                self._inject_home_hold_timer(name)
+            )
+
+    async def _handle_inject_keyup(self, name: str):
+        task = self._inject_hold_tasks.pop(name, None)
+        fired = self._inject_hold_fired.pop(name, False)
+        if task and not task.done():
+            task.cancel()
+        if name in INJECT_HOME_NAMES and not fired:
+            log.info("Injected %s tap detected", name)
+            await self._notify_subscribers("home-press")
+
+    async def _inject_home_hold_timer(self, name: str):
+        try:
+            await asyncio.sleep(HOME_HOLD_SECS)
+            self._inject_hold_fired[name] = True
+            log.info("Injected %s hold detected", name)
+            await self._notify_subscribers("combo:home-hold")
+        except asyncio.CancelledError:
+            pass
+
     def _check_combo_start(self):
         if COMBO_KEYS.issubset(self.held_keys) and self.combo_task is None:
             self.combo_task = asyncio.create_task(self._combo_timer())
@@ -998,6 +1047,16 @@ class InputDaemon:
                     self._kbd_log_enabled = False
                     log.info("keyboard logging disabled")
                     writer.write(b"ok\n")
+                elif cmd.startswith("inject "):
+                    arg = cmd[len("inject "):].strip()
+                    if arg.startswith("keydown:"):
+                        self._handle_inject_keydown(arg[len("keydown:"):].lower())
+                        writer.write(b"ok\n")
+                    elif arg.startswith("keyup:"):
+                        await self._handle_inject_keyup(arg[len("keyup:"):].lower())
+                        writer.write(b"ok\n")
+                    else:
+                        writer.write(b"error:usage: inject keydown:<name>|keyup:<name>\n")
                 elif cmd == "subscribe":
                     self.subscribers.append(writer)
                     writer.write(b"subscribed\n")

@@ -108,6 +108,31 @@ This lets us build a history of pressed keys over time and find unmapped or mis-
 
 **Response:** `ok\n`
 
+### `inject keydown:<name>` / `inject keyup:<name>`
+
+Forward an externally-detected key press/release into the daemon so it
+can run the same tap-vs-hold timer the controller Home button uses.
+
+For each `name` in `INJECT_HOME_NAMES` (currently `{meta}`):
+
+- `keydown:meta` → start a `HOME_HOLD_SECS` (2 s) timer.
+- `keyup:meta` before the timer fires → broadcast `home-press`.
+- timer fires first → broadcast `combo:home-hold`; the subsequent
+  `keyup:meta` is a no-op.
+
+Names outside `INJECT_HOME_NAMES` accept the command but produce no
+event — extra entries can be added when more keys need this routing.
+
+Typical use: a Hyprland bind on `Super_L` execs a one-liner that
+sends `inject keydown:meta` on press and `inject keyup:meta` on
+release, so the keyboard Meta key feeds the shell's `homePressed` /
+`homeHeld` flow regardless of which app has keyboard focus.
+
+| Condition | Response |
+|---|---|
+| Success | `ok\n` |
+| Malformed arg | `error:usage: inject keydown:<name>\|keyup:<name>\n` |
+
 ### Unrecognized Commands
 
 Any command not listed above receives:
