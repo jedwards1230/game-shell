@@ -88,6 +88,29 @@ Cancel a pending `capture-next` without waiting for timeout.
 
 **Response:** `ok\n`
 
+### `inject keydown:<name>` / `inject keyup:<name>`
+
+Forward an external key event (typically a Hyprland bind on the keyboard
+Meta/Super key) into the daemon's tap-vs-hold state machine. The name
+is lowercased; currently only `meta` is mapped to home-button semantics
+(other names accept the command but produce no event).
+
+For each `meta` keydown:
+
+- Daemon starts a `INJECT_HOLD_SECS` (400 ms) timer.
+- If `keyup:meta` arrives before the timer fires → broadcast `home-press`.
+- If the timer fires first → broadcast `combo:home-hold`; the subsequent
+  `keyup:meta` is a no-op.
+
+This lets Hyprland's global Super key intercept route through the same
+event surface as the controller Home button, so keyboard works even
+when another app has keyboard focus.
+
+| Condition | Response |
+|-----------|----------|
+| Success | `ok\n` |
+| Malformed arg | `error:usage: inject keydown:<name>\|keyup:<name>\n` |
+
 ### Unrecognized Commands
 
 Any command not listed above receives:
