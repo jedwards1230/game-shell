@@ -12,6 +12,7 @@ RUN pacman -Syu --noconfirm && \
       libxkbcommon libxkbcommon-x11 \
       xcb-util-cursor xcb-util-keysyms xcb-util-image xcb-util-renderutil xcb-util-wm \
       wayland wayland-protocols libdrm mesa \
+      pciutils kmod \
       dbus python-yaml \
       ttf-dejavu noto-fonts-emoji && \
     pacman -Scc --noconfirm
