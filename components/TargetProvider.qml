@@ -25,10 +25,12 @@ Item {
     property Component settingsComponent: null
 
     // Refresh the targets list (e.g. re-read targets.json).
-    function loadTargets() {}
+    function loadTargets() {
+    }
 
     // Discover available apps for every known host (populates hostApps).
-    function discoverApps() {}
+    function discoverApps() {
+    }
 
     // Build the argv the launcher Process should run for a given target.
     // StreamManager owns the generic launch state machine; the provider only
@@ -43,8 +45,10 @@ Item {
     }
 
     // Initiate pairing for a host.
-    function pair(host) {}
+    function pair(host) {
+    }
 
     // Refresh online/paired status for known hosts.
-    function checkStatus() {}
+    function checkStatus() {
+    }
 }
