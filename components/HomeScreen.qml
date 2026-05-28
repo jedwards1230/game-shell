@@ -6,7 +6,6 @@ FocusScope {
     id: root
 
     property var targets: []
-    property var recentApps: []
     property string shellState: "idle"
 
     // App-view: discovered apps per host { "host": ["App1", "App2", ...] }
@@ -23,34 +22,6 @@ FocusScope {
     signal appCloseRequested(string windowClass)
     signal settingsRequested
     signal notificationCenterRequested
-
-    // Load recent launches
-    Process {
-        id: loadRecents
-        command: ["python3", "-c", `
-import json, os
-path = os.path.expanduser('~/.local/share/game-shell/recents.json')
-try:
-    with open(path) as f:
-        data = json.load(f)
-    print(json.dumps(data[:15]))
-except:
-    print('[]')
-`]
-        stdout: SplitParser {
-            onRead: line => {
-                try {
-                    root.recentApps = JSON.parse(line);
-                } catch (e) {
-                    root.recentApps = [];
-                }
-            }
-        }
-    }
-
-    Component.onCompleted: {
-        loadRecents.running = true;
-    }
 
     onActiveFocusChanged: {
         if (activeFocus)
@@ -76,19 +47,7 @@ except:
 
     function launchApp(app) {
         root.appLaunchRequested(app);
-        recentsTracker.command = ["python3", "-c", "import json,os,time; p=os.path.expanduser('~/.local/share/game-shell/recents.json'); os.makedirs(os.path.dirname(p),exist_ok=True); " + "d=[]; " + "try:\n with open(p) as f: d=json.load(f)\nexcept: pass\n" + "entry={'name':'" + (app.name || "").replace("'", "\\'") + "','exec':'" + (app.exec || "").replace("'", "\\'") + "','comment':'" + (app.comment || "").replace("'", "\\'") + "','time':time.time()}; " + "d=[e for e in d if e.get('name')!=entry['name']]; d.insert(0,entry); d=d[:20]; " + "open(p,'w').write(json.dumps(d,indent=2))"];
-        recentsTracker.running = true;
-        recentsReloadTimer.start();
-    }
-
-    Process {
-        id: recentsTracker
-        command: ["echo"]
-    }
-    Timer {
-        id: recentsReloadTimer
-        interval: 500
-        onTriggered: loadRecents.running = true
+        RecentsTracker.recordLaunch(app);
     }
 
     // === Moonlight App Discovery ===
@@ -378,7 +337,7 @@ except:
 
             // === Recents Row ===
             Text {
-                visible: root.recentApps.length > 0
+                visible: RecentsTracker.recentApps.length > 0
                 text: "Recent"
                 font.pixelSize: Theme.fontTitle
                 font.bold: true
@@ -387,7 +346,7 @@ except:
 
             NavigableRow {
                 id: recentsRow
-                visible: root.recentApps.length > 0
+                visible: RecentsTracker.recentApps.length > 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Theme.rowHeight : 0
                 keyNavigationWraps: true
@@ -401,7 +360,7 @@ except:
                         return moonlightRow;
                     return root._appViewRowItem(0) || appsRow;
                 }
-                model: root.recentApps
+                model: RecentsTracker.recentApps
 
                 delegate: AppCard {
                     required property int index
