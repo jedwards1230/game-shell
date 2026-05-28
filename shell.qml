@@ -90,12 +90,22 @@ ShellRoot {
                 avController.wake();
         }
         onHomePressed: {
-            if (root.state === "appRunning")
+            if (root.state === "appRunning") {
                 root.overlayDrawerOpen = !root.overlayDrawerOpen;
+            } else if (root.state === "idle" && root._layout) {
+                avController.wake();
+                root._layout.handleHomeTap();
+            }
         }
         onHomeHeld: {
-            if (root.state === "appRunning")
+            if (root.state === "appRunning") {
                 root.returnToShell();
+            } else if (root.state === "idle" && root._layout) {
+                root._layout.navDrawer.opened = false;
+                root._layout.settingsPanel.visible = false;
+                root._layout.notificationCenter.opened = false;
+                root._layout.focusHome();
+            }
         }
     }
 
@@ -211,7 +221,11 @@ ShellRoot {
             }
 
             color: root.state === "appRunning" ? "transparent" : Components.Theme.background
-            focusable: true
+            // Exclusive keyboard focus so non-Hyprland-bound keys (arrows,
+            // Enter, Esc, etc.) reach focused QML widgets. Without this,
+            // the compositor gives keyboard input to whatever non-layer
+            // window happens to have focus.
+            WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
 
             Binding {
                 target: Components.NotificationManager
@@ -246,10 +260,6 @@ ShellRoot {
                 onAppLaunchRequested: app => appLifecycle.checkAndLaunchApp(app)
                 onAppFocusRequested: windowClass => appLifecycle.focusApp(windowClass)
                 onAppCloseRequested: windowClass => appLifecycle.closeAppByClass(windowClass)
-                onHomeKeyPressed: {
-                    if (root.state === "idle")
-                        avController.wake();
-                }
                 onReturnToShellRequested: root.returnToShell()
                 onOverlayDrawerClosed: {
                     root.overlayDrawerOpen = false;

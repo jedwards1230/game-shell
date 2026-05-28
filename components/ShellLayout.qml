@@ -24,7 +24,6 @@ FocusScope {
     signal appLaunchRequested(var app)
     signal appFocusRequested(string windowClass)
     signal appCloseRequested(string windowClass)
-    signal homeKeyPressed
     signal returnToShellRequested
     signal overlayDrawerClosed
 
@@ -35,20 +34,21 @@ FocusScope {
         homeFocusTimer.restart();
     }
 
-    Keys.onPressed: event => {
-        if (event.key === Qt.Key_HomePage) {
-            root.homeKeyPressed();
-            if (notificationCenter.opened) {
-                notificationCenter.opened = false;
+    // Drawer-toggle behavior for the "home tap" action, called from
+    // shell.qml's onHomePressed when in idle state. Single source of
+    // truth — controller Home (socket), keyboard Meta (Hyprland-bound
+    // and routed through the daemon), and any future "home tap" surface
+    // all converge here via the home-press socket event.
+    function handleHomeTap() {
+        if (notificationCenter.opened) {
+            notificationCenter.opened = false;
+            homeFocusTimer.restart();
+        } else {
+            navDrawer.opened = !navDrawer.opened;
+            if (navDrawer.opened)
+                navDrawer.forceActiveFocus();
+            else
                 homeFocusTimer.restart();
-            } else {
-                navDrawer.opened = !navDrawer.opened;
-                if (navDrawer.opened)
-                    navDrawer.forceActiveFocus();
-                else
-                    homeFocusTimer.restart();
-            }
-            event.accepted = true;
         }
     }
 
