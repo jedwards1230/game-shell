@@ -61,8 +61,15 @@ Item {
 
     function quitAndRelaunch() {
         _sessionCheckCancelled = false;
+        let quitCmd = StreamProviders.active.quitArgs(currentTarget);
+        if (!quitCmd || quitCmd.length === 0) {
+            // Provider has nothing to quit — launch directly.
+            requestOverlayShow("Launching " + (currentTarget.app || currentTarget.name) + "...");
+            _launchMoonlight();
+            return;
+        }
         requestOverlayShow("Quitting current session...");
-        sessionQuit.command = StreamProviders.active.quitArgs(currentTarget);
+        sessionQuit.command = quitCmd;
         sessionQuit.running = true;
     }
 
@@ -109,7 +116,16 @@ Item {
     // Generic launch: the active provider supplies backend-specific argv; this
     // manager owns the launch/timeout/reconnect state machine.
     function _launchMoonlight() {
-        moonlight.command = StreamProviders.active.buildLaunchArgs(currentTarget);
+        let cmd = StreamProviders.active.buildLaunchArgs(currentTarget);
+        if (!cmd || cmd.length === 0) {
+            // No streaming backend (or it can't build args) — fail cleanly
+            // instead of entering a bogus launching state with an empty command.
+            requestOverlayHide();
+            requestInputGrab();
+            streamFailed("No streaming backend available");
+            return;
+        }
+        moonlight.command = cmd;
         requestInputRelease();
         streamStarted();
         launchTimeout.restart();
