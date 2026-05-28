@@ -132,11 +132,15 @@ Mode events are only sent on transitions (not re-sent if already in that mode).
 
 | Event | Format |
 |-------|--------|
-| `buttons:<held>` | Space-and-plus-separated list of currently held inputs |
+| `buttons:<held>` | Space-and-plus-separated list of currently held controller inputs |
+| `keys:<held>` | Space-and-plus-separated list of currently held keyboard keys |
 
-Sent on every button down/up, trigger threshold crossing, and stick axis change. The `<held>` portion is empty when nothing is held (i.e., `buttons:\n`). Includes button friendly names, D-pad directions, stick directions, and trigger state.
+`buttons:` is sent on every controller button down/up, trigger threshold crossing, and stick axis change. The `<held>` portion is empty when nothing is held (i.e., `buttons:\n`). Includes button friendly names, D-pad directions, stick directions, and trigger state.
+
+`keys:` is sent on every keyboard key down/up from any discovered evdev keyboard device. The daemon reads these devices without `EVIOCGRAB` — keys still reach focused windows normally; this is a read-only snoop for the debug overlay. Names use a friendly display map (e.g. `KEY_LEFTMETA` → `Meta`, `KEY_UP` → `↑`) with a fallback that strips the `KEY_` prefix and titlecases the rest. Empty held set emits `keys:\n`.
 
 Example: `buttons:Home + B + LT + L→ + R↑\n`
+Example: `keys:Ctrl + Shift + A\n`
 
 Button display names used in the `buttons:` event:
 

@@ -6,7 +6,7 @@ Listens on a unix socket for grab/release/subscribe commands from the shell.
 
 IPC protocol: see docs/IPC_PROTOCOL.md
 Commands: grab, release, status, subscribe, get-bindings, set-binding, capture-next, capture-cancel
-Events (to subscribers): controller-wake, controller-disconnected, home-press, combo:*, input-mode:*, buttons:*
+Events (to subscribers): controller-wake, controller-disconnected, home-press, combo:*, input-mode:*, buttons:*, keys:*
 """
 
 import asyncio
@@ -91,6 +91,41 @@ DPAD_NAMES = {
     ecodes.KEY_LEFT: "D-Left",
     ecodes.KEY_RIGHT: "D-Right",
 }
+
+# Friendly display names for keyboard keys in the debug overlay's
+# `keys:<held>` events. Falls back to stripping `KEY_` and titlecasing.
+KEY_DISPLAY_NAMES = {
+    ecodes.KEY_LEFTMETA: "Meta",
+    ecodes.KEY_RIGHTMETA: "Meta",
+    ecodes.KEY_LEFTCTRL: "Ctrl",
+    ecodes.KEY_RIGHTCTRL: "Ctrl",
+    ecodes.KEY_LEFTSHIFT: "Shift",
+    ecodes.KEY_RIGHTSHIFT: "Shift",
+    ecodes.KEY_LEFTALT: "Alt",
+    ecodes.KEY_RIGHTALT: "Alt",
+    ecodes.KEY_UP: "↑",
+    ecodes.KEY_DOWN: "↓",
+    ecodes.KEY_LEFT: "←",
+    ecodes.KEY_RIGHT: "→",
+    ecodes.KEY_ENTER: "Enter",
+    ecodes.KEY_ESC: "Esc",
+    ecodes.KEY_BACKSPACE: "Backspace",
+    ecodes.KEY_SPACE: "Space",
+    ecodes.KEY_TAB: "Tab",
+    ecodes.KEY_HOMEPAGE: "Home",
+    ecodes.KEY_CAPSLOCK: "Caps",
+}
+
+
+def _kbd_display_name(code: int) -> str:
+    if code in KEY_DISPLAY_NAMES:
+        return KEY_DISPLAY_NAMES[code]
+    raw = ecodes.bytype.get(ecodes.EV_KEY, {}).get(code)
+    if raw:
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0]
+        return raw.replace("KEY_", "").title()
+    return f"0x{code:x}"
 
 
 # Home button hold detection
@@ -186,6 +221,10 @@ class InputDaemon:
         # Home button hold detection
         self._home_hold_task: asyncio.Task | None = None
 
+        # Currently held keyboard keys (across all watched keyboards),
+        # used to emit `keys:<held>` debug events.
+        self.kbd_held_keys: set[int] = set()
+
         # Trigger state
         self.left_trigger_held = False
         self.right_trigger_held = False
@@ -277,14 +316,26 @@ class InputDaemon:
             async for event in kb.async_read_loop():
                 if event.type != ecodes.EV_KEY:
                     continue
-                name = _button_code_to_name(event.code)
-                state = {0: "up", 1: "down", 2: "repeat"}.get(
-                    event.value, str(event.value)
-                )
-                log.info("kbd %s: %s %s", kb.name, name, state)
+                # value: 0=up, 1=down, 2=repeat. Only down/up change the
+                # held set; repeats keep the same state.
+                changed = False
+                if event.value == 1 and event.code not in self.kbd_held_keys:
+                    self.kbd_held_keys.add(event.code)
+                    changed = True
+                elif event.value == 0 and event.code in self.kbd_held_keys:
+                    self.kbd_held_keys.discard(event.code)
+                    changed = True
+                if changed:
+                    await self._notify_held_keys()
         except OSError as e:
             log.warning("Read error on %s: %s", kb.name, e)
             raise
+
+    async def _notify_held_keys(self):
+        if not self.subscribers:
+            return
+        names = [_kbd_display_name(c) for c in sorted(self.kbd_held_keys)]
+        await self._notify_subscribers("keys:" + " + ".join(names))
 
     async def _device_loop(self):
         """Find gamepad, grab it, read events. Reconnect on disconnect."""
