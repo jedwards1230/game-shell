@@ -47,6 +47,8 @@ FocusScope {
         id: saveServers
         property string json: "[]"
         command: ["bash", "-c", "echo '" + json + "' > /opt/game-shell/targets.json"]
+        // Refresh the provider's targets so the home screen reflects edits.
+        onExited: StreamProviders.active.loadTargets()
     }
 
     // Connection status checker — runs moonlight list per host

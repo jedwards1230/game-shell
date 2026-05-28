@@ -46,11 +46,6 @@ Rectangle {
     }
 
     Component {
-        id: moonlightComp
-        MoonlightSettings {}
-    }
-
-    Component {
         id: appearanceComp
         AppearanceSettings {}
     }
@@ -60,58 +55,66 @@ Rectangle {
         PowerSettings {}
     }
 
-    readonly property var sections: [
-        {
-            name: "Audio",
-            icon: "\u{1F50A}",
-            component: audioComp
-        },
-        {
-            name: "Bluetooth",
-            icon: "⚡",
-            component: bluetoothComp
-        },
-        {
-            name: "Network",
-            icon: "\u{1F310}",
-            component: networkComp
-        },
-        {
-            name: "Display",
-            icon: "\u{1F5A5}",
-            component: displayComp
-        },
-        {
-            name: "Controllers",
-            icon: "\u{1F3AE}",
-            component: controllerComp
-        },
-        {
-            name: "Key Bindings",
-            icon: "⌨",
-            component: keyBindingsComp
-        },
-        {
-            name: "AV Control",
-            icon: "\u{1F4FA}",
-            component: avControlComp
-        },
-        {
-            name: "Moonlight",
-            icon: "\u{1F319}",
-            component: moonlightComp
-        },
-        {
+    // The streaming section is contributed by the active provider's
+    // settingsComponent; with the no-streaming provider it's null and the
+    // section is omitted entirely.
+    readonly property var sections: {
+        let s = [
+            {
+                name: "Audio",
+                icon: "\u{1F50A}",
+                component: audioComp
+            },
+            {
+                name: "Bluetooth",
+                icon: "⚡",
+                component: bluetoothComp
+            },
+            {
+                name: "Network",
+                icon: "\u{1F310}",
+                component: networkComp
+            },
+            {
+                name: "Display",
+                icon: "\u{1F5A5}",
+                component: displayComp
+            },
+            {
+                name: "Controllers",
+                icon: "\u{1F3AE}",
+                component: controllerComp
+            },
+            {
+                name: "Key Bindings",
+                icon: "⌨",
+                component: keyBindingsComp
+            },
+            {
+                name: "AV Control",
+                icon: "\u{1F4FA}",
+                component: avControlComp
+            }
+        ];
+        let provider = StreamProviders.active;
+        if (provider.settingsComponent)
+            s.push({
+                name: provider.displayName,
+                icon: "\u{1F319}",
+                component: provider.settingsComponent
+            });
+        s.push({
             name: "Appearance",
             icon: "\u{1F3A8}",
             component: appearanceComp
-        },
-        {
+        });
+        s.push({
             name: "Power",
             icon: "⏻",
             component: powerComp
-        }
-    ]
+        });
+        return s;
+    }
 
     onVisibleChanged: {
         if (visible) {
