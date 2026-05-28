@@ -8,6 +8,9 @@ mkdir -p /run/user/1000
 chmod 0700 /run/user/1000
 chown -R dev:dev /run/user/1000
 
+# Open up DRI devices for the dev user (container is privileged, host perms vary)
+chmod 666 /dev/dri/card* /dev/dri/renderD* 2>/dev/null || true
+
 # Start seatd as root, allowing dev user via the video group
 seatd -g video &
 SEATD_PID=$!
