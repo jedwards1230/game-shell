@@ -4,7 +4,7 @@ FROM archlinux:base-devel
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
       hyprland wayvnc grim \
-      python python-numpy \
+      python python-pip python-numpy \
       qt6-base qt6-declarative qt6-wayland qt6-shadertools qt6-svg \
       cmake ninja git jemalloc pipewire pam cli11 \
       wayland wayland-protocols libdrm mesa \
