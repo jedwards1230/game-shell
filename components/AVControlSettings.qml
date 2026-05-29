@@ -2,7 +2,11 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell.Io
 
-Item {
+// Root MUST be a FocusScope (not Item) so SettingsPanel's
+// contentLoader.item.forceActiveFocus() delegates focus into the
+// focus:true child (wakeScope). A plain Item swallows focus and the
+// page becomes unnavigable when entered via the Right d-pad.
+FocusScope {
     id: root
 
     property bool cecAvailable: false
@@ -501,7 +505,10 @@ Item {
                     id: wakeScope
                     width: 340
                     height: 120
-                    focus: true
+                    // Only claim the root scope's focus when actually visible
+                    // (CEC available). Otherwise the root FocusScope holds
+                    // focus itself so the read-only state stays dismissable.
+                    focus: root.cecAvailable
                     activeFocusOnTab: true
 
                     KeyNavigation.up: refreshScope
