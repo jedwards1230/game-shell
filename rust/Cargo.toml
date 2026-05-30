@@ -52,9 +52,7 @@ zbus = { version = "5.16", default-features = false, features = ["tokio"] }
 # bluer is the official BlueZ binding. `bluetoothd` gates the Session/Adapter/
 # Device API we need; default-features pull in extra protocol modules we don't.
 bluer = { version = "0.17.4", default-features = false, features = ["bluetoothd"] }
-# hyprland speaks the Hyprland IPC socket (Linux compositor only). Keep default
-# features — the `data` + `listener` modules we use are defaults; `tokio` adds
-# the async data getters + AsyncEventListener. (default-features=false stripped
-# those modules and broke the imports.) Pinned exact. Replaces the QML's
-# `hyprctl clients -j` shell-out.
-hyprland = { version = "=0.3.13", features = ["tokio"] }
+# Hyprland IPC (Linux compositor only) is spoken directly over its Unix sockets
+# in `hyprland.rs` — no crate. The `hyprland` 0.3.x crate hardcoded the legacy
+# `/tmp/hypr/<sig>` socket dir and can't reach Hyprland >= 0.40 (sockets moved to
+# `$XDG_RUNTIME_DIR/hypr/<sig>`); the wire protocol is trivial to own here.
