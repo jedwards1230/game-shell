@@ -33,14 +33,6 @@ Item {
     signal intentSettings
     signal intentPower
 
-    // Multi-stroke keyboard reset: three intent:home within the window below
-    // invokes the SAME reset action the gamepad Home-hold triggers. Counted
-    // here (in QML), NOT in the daemon (per resolved OQ1).
-    signal resetRequested
-
-    readonly property int homeTapWindowMs: 1500
-    property int _homeTapCount: 0
-
     function grab() {
         inputGrab.request("grab");
     }
@@ -52,33 +44,6 @@ Item {
     }
     function endSession() {
         endSessionProc.running = true;
-    }
-
-    // intent:home arrives (keyboard Super / automation). The first tap arms a
-    // window; a single tap that survives the window is a plain global escape,
-    // three taps inside the window is the reset multi-stroke.
-    function _onIntentHome() {
-        _homeTapCount += 1;
-        if (_homeTapCount >= 3) {
-            homeTapTimer.stop();
-            _homeTapCount = 0;
-            root.resetRequested();
-            return;
-        }
-        homeTapTimer.restart();
-    }
-
-    Timer {
-        id: homeTapTimer
-        interval: root.homeTapWindowMs
-        onTriggered: {
-            // The window closed with fewer than three taps. A lone tap is the
-            // global escape; we deliberately do NOT replay buffered taps as
-            // multiple escapes — a quick double-tap collapses to one escape.
-            if (root._homeTapCount > 0)
-                root.intentHome();
-            root._homeTapCount = 0;
-        }
     }
 
     SocketClient {
@@ -126,11 +91,13 @@ Item {
     }
 
     // Map a closed-vocabulary intent name to its QML signal. `home` is the
-    // multi-tap-aware global escape; the rest fan out 1:1.
+    // global return-to-shell escape (keyboard Super+Escape / automation); the
+    // rest fan out 1:1. `menu` (bare Super) is the nav drawer; `home-hold`
+    // (Super+Backspace / gamepad Home-hold) is the reset.
     function _handleIntent(name) {
         switch (name) {
         case "home":
-            _onIntentHome();
+            root.intentHome();
             break;
         case "home-tap":
             root.intentHomeTap();

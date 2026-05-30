@@ -75,8 +75,8 @@ ShellRoot {
         }
 
         // --- Control-surface intents (de-overloaded "home") ---
-        // intent:home is the GLOBAL escape (keyboard Super / automation):
-        // always leave the running app, regardless of focus.
+        // intent:home is the GLOBAL escape (keyboard Super+Escape / automation):
+        // always leave the running app, regardless of focus. Fires instantly.
         onIntentHome: root.returnToShell()
 
         // intent:home-tap is the gamepad Home neutral (short press). The shell
@@ -92,19 +92,17 @@ ShellRoot {
             }
         }
 
-        // intent:home-hold is the gamepad Home neutral (long press) -> reset.
+        // intent:home-hold = reset. Fired by the gamepad Home long-press AND by
+        // keyboard Super+Backspace.
         onIntentHomeHold: root.resetToHome()
 
-        // The keyboard triple-Super multi-stroke fires the SAME reset path
-        // (counted in InputManager, per resolved OQ1).
-        onResetRequested: root.resetToHome()
-
-        // intent:menu toggles the nav drawer (focus-scoped; on-screen button
-        // or keyboard Tab when the shell is focused).
+        // intent:menu toggles the nav drawer. Fired by bare Super (keyboard),
+        // the gamepad Home-tap on the home screen, and the on-screen menu
+        // button. Home-screen only: a bare Super press also precedes a
+        // Super+<key> chord, so over a running app `menu` is a deliberate no-op
+        // (the chord's intent:home/home-hold does the real work, no overlay flash).
         onIntentMenu: {
-            if (root.state === "appRunning")
-                root.overlayDrawerOpen = !root.overlayDrawerOpen;
-            else if (root.state === "idle" && root._layout)
+            if (root.state === "idle" && root._layout)
                 root._layout.toggleMenu();
         }
 
@@ -221,10 +219,10 @@ ShellRoot {
         returnToShell();
     }
 
-    // Full reset to a clean home screen. Triggered by the gamepad Home-hold
-    // (intent:home-hold) and the keyboard triple-Super multi-stroke
-    // (resetRequested). Over a running app it returns to the shell; on the home
-    // screen it dismisses every overlay/drawer and refocuses Home.
+    // Full reset to a clean home screen. Triggered by intent:home-hold — the
+    // gamepad Home-hold and the keyboard Super+Backspace. Over a running app it
+    // returns to the shell; on the home screen it dismisses every
+    // overlay/drawer and refocuses Home.
     function resetToHome() {
         if (root.state === "appRunning") {
             root.returnToShell();
