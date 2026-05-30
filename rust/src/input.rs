@@ -23,7 +23,8 @@
 //! double-fire, and two pads each holding *half* a combo never trigger it. For a
 //! single connected pad this is byte-identical to the pre-fleet behavior.
 //!
-//! This is a faithful port of `input/gamepad-input.py`. The wire-facing strings
+//! This was ported from the former `input/gamepad-input.py` (since deleted —
+//! this daemon is now the sole backend). The wire-facing strings
 //! and pure decision logic live in `protocol`/`config`/`state` (and are tested
 //! on any host); this module is the evdev/uinput glue, exercised by CI on Linux
 //! and on the target device.
@@ -990,39 +991,74 @@ impl PadDevice {
 
     /// Light this pad's player-indicator LED to match its slot (#101 LED).
     ///
-    /// Cap-gated: a no-op unless the pad advertises `EV_LED` with an LED code
-    /// equal to the player slot (`LED_0..` semantics — LED code == player index).
-    /// Most wired pads expose no controllable LED, so this silently does nothing.
-    /// On success records `led_index` and publishes `pad:index:{id,index}`.
+    /// Two backends, tried in order:
+    ///   1. **EV_LED** — when the pad advertises `EV_LED` with an LED code equal
+    ///      to the player slot (`LED_0..` semantics — LED code == player index).
+    ///   2. **sysfs fallback** — xpad (Xbox 360) pads expose their player ring
+    ///      via `/sys/class/leds/xpad*`, **not** `EV_LED`, so the EV_LED write is
+    ///      a silent no-op on them. When EV_LED is unsupported we walk the pad's
+    ///      `/sys/class/input/eventN/device` tree up to a `leds/` dir and write
+    ///      the xpad brightness convention to `<ledsnode>/brightness`.
+    ///
+    /// Most other wired pads expose neither, so this still silently does nothing
+    /// for them. On either success records `led_index` and publishes
+    /// `pad:index:{id,index}`. Best-effort: a failed write never fails the pad.
     /// Idempotent for the same slot.
     fn set_player_led(&mut self, sh: &mut Shared) {
         if self.led_index == Some(self.player_slot) {
             return; // already lit for this slot
         }
         // Cap-gate: the pad must support EV_LED with an LED code == player slot.
-        let supported = self
+        let ev_led_supported = self
             .event_stream
             .device()
             .supported_leds()
             .is_some_and(|leds| leds.iter().any(|l| l.0 == self.player_slot as u16));
-        if !supported {
-            return; // no controllable player LED on this pad -> no-op
+        if ev_led_supported {
+            // Light the LED whose code == the player slot (LED_0.. convention).
+            let ev = InputEvent::new(EV_LED, self.player_slot as u16, 1);
+            match self.event_stream.device_mut().send_events(&[ev]) {
+                Ok(()) => {
+                    self.led_index = Some(self.player_slot);
+                    info!(
+                        "Lit player LED {} for slot {} ({})",
+                        self.player_slot, self.player_slot, self.wire_id
+                    );
+                    sh.publish(Event::PadIndex(crate::protocol::pad_index_json(
+                        &self.wire_id,
+                        self.player_slot,
+                    )));
+                }
+                Err(e) => warn!("Failed to set player LED on {}: {e}", self.wire_id),
+            }
+            return;
         }
-        // Light the LED whose code == the player slot (LED_0.. convention).
-        let ev = InputEvent::new(EV_LED, self.player_slot as u16, 1);
-        match self.event_stream.device_mut().send_events(&[ev]) {
-            Ok(()) => {
+
+        // EV_LED unsupported: try the sysfs xpad fallback (Xbox 360 ring).
+        match set_player_led_sysfs(&self.path, self.player_slot) {
+            Ok(Some(node)) => {
                 self.led_index = Some(self.player_slot);
                 info!(
-                    "Lit player LED {} for slot {} ({})",
-                    self.player_slot, self.player_slot, self.wire_id
+                    "player LED set via sysfs {} for slot {} ({})",
+                    node.display(),
+                    self.player_slot,
+                    self.wire_id
                 );
                 sh.publish(Event::PadIndex(crate::protocol::pad_index_json(
                     &self.wire_id,
                     self.player_slot,
                 )));
             }
-            Err(e) => warn!("Failed to set player LED on {}: {e}", self.wire_id),
+            // No leds node found for this pad: a true no-op (most pads). Quiet at
+            // debug so the common case doesn't spam logs.
+            Ok(None) => debug!(
+                "no sysfs leds node for pad slot {} ({}); player LED unset",
+                self.player_slot, self.wire_id
+            ),
+            Err(e) => warn!(
+                "Failed to set player LED via sysfs on {}: {e}",
+                self.wire_id
+            ),
         }
     }
 
@@ -1166,6 +1202,70 @@ fn read_sysfs_trimmed(path: &std::path::Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// sysfs player-LED fallback for pads that expose their player ring via
+/// `/sys/class/leds` instead of `EV_LED` (the xpad / Xbox 360 driver does this).
+///
+/// `devnode` is the pad's `/dev/input/eventN` path. We map it to
+/// `/sys/class/input/eventN/device` (a symlink into the device tree), then walk
+/// **up** the parent dirs until we find one containing a `leds/` subdir
+/// (e.g. `.../usb3/3-1/leds/`), and take the first entry under it (e.g. `xpad0`).
+///
+/// xpad LED brightness convention (kernel `xpad.c`): 0=off, 1=blink-all,
+/// 2-5=blink-then-solid P1-4, 6-9=SOLID P1-4. So we write `6 + slot.min(3)` for
+/// a steady player indicator (the leds node's `max_brightness` is 255, so these
+/// small values are in range).
+///
+/// Returns `Ok(Some(node))` (the leds node written) on success, `Ok(None)` when
+/// no `leds/` dir is found anywhere up the tree (the normal case for non-xpad
+/// pads), or `Err` if a node was found but the brightness write failed.
+fn set_player_led_sysfs(devnode: &std::path::Path, slot: u8) -> std::io::Result<Option<PathBuf>> {
+    // /dev/input/eventN -> "eventN"
+    let Some(event_name) = devnode.file_name().and_then(|n| n.to_str()) else {
+        return Ok(None);
+    };
+    if !event_name.starts_with("event") {
+        return Ok(None);
+    }
+    // /sys/class/input/eventN/device is a symlink into the device tree; resolve
+    // it so we can walk real parent dirs.
+    let device_link = PathBuf::from("/sys/class/input")
+        .join(event_name)
+        .join("device");
+    let Ok(mut dir) = std::fs::canonicalize(&device_link) else {
+        return Ok(None);
+    };
+    // Walk up to a parent containing a `leds/` subdir. Bound the climb so a
+    // surprising tree can't loop forever.
+    let leds_node = loop {
+        let leds = dir.join("leds");
+        if leds.is_dir() {
+            // First entry under leds/ (e.g. xpad0).
+            match std::fs::read_dir(&leds)
+                .ok()
+                .and_then(|mut rd| rd.next())
+                .and_then(|e| e.ok())
+            {
+                Some(entry) => break Some(entry.path()),
+                None => break None, // empty leds dir
+            }
+        }
+        match dir.parent() {
+            // Stop at the sysfs root or filesystem root.
+            Some(p) if p != std::path::Path::new("/sys") && p != std::path::Path::new("/") => {
+                dir = p.to_path_buf();
+            }
+            _ => break None,
+        }
+    };
+    let Some(node) = leds_node else {
+        return Ok(None); // no leds node up the tree -> clean no-op
+    };
+    // 6..=9 = SOLID P1..P4; cap the slot at P4.
+    let brightness = 6u8 + slot.min(3);
+    std::fs::write(node.join("brightness"), brightness.to_string())?;
+    Ok(Some(node))
+}
+
 /// Build a clean per-player virtual gamepad mirroring the physical pad's
 /// capabilities (Phase 5). The virtual device advertises the same key set,
 /// absolute axes (with the source's calibration), and `input_id` so a game
@@ -1288,6 +1388,95 @@ impl Fleet {
             .collect();
         resp_pads(&rows)
     }
+}
+
+/// Parse `/proc/bus/input/devices` into a map from event-node name (e.g.
+/// `event18`) to that device's full handler list (e.g. `["event18", "js0"]`).
+///
+/// The file is blocks separated by blank lines; the `H: Handlers=...` line lists
+/// the device's handlers (event node, `js*`, `mouseN`, `kbd`, …). We key each
+/// block by its `eventN` handler so the evdev enumeration (which yields devnodes)
+/// can recover the `js*` handlers a bare evdev `Device` doesn't expose. A missing
+/// or unreadable file yields an empty map (the enumerator still lists event-node
+/// handlers it derives directly).
+fn parse_proc_input_handlers() -> HashMap<String, Vec<String>> {
+    let mut map = HashMap::new();
+    let Ok(text) = std::fs::read_to_string("/proc/bus/input/devices") else {
+        return map;
+    };
+    for block in text.split("\n\n") {
+        let mut handlers: Vec<String> = Vec::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("H: Handlers=") {
+                handlers = rest.split_whitespace().map(|h| h.to_string()).collect();
+            }
+        }
+        if let Some(event) = handlers.iter().find(|h| h.starts_with("event")).cloned() {
+            map.insert(event, handlers);
+        }
+    }
+    map
+}
+
+/// Build the `list-input-devices` reply (#97): EVERY controller-like input
+/// device on the host — anything that advertises `BTN_SOUTH` or carries a `js*`
+/// handler — as a compact JSON array, including ungrabbed and virtual devices.
+///
+/// This is a diagnostics enumerator (it replaces `ControllerSettings`'
+/// `/proc/bus/input/devices` python reader), distinct from `get-pads` (the
+/// grabbed fleet only). `grabbed` is `true` only for devices whose devnode path
+/// the fleet currently owns. Devices are returned in ascending devnode-path
+/// order for a stable wire.
+fn list_input_devices(fleet: &Fleet) -> String {
+    let proc_handlers = parse_proc_input_handlers();
+    // Paths the fleet currently grabs (so we can flag `grabbed`).
+    let grabbed_paths: HashSet<PathBuf> = fleet
+        .pads
+        .values()
+        .filter(|p| p.grabbed)
+        .map(|p| p.path.clone())
+        .collect();
+
+    let mut devices: Vec<(PathBuf, Device)> = evdev::enumerate().collect();
+    devices.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut rows: Vec<crate::protocol::InputDeviceInfo> = Vec::new();
+    for (path, dev) in devices {
+        let event_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        // Handlers from /proc keyed by the event node; fall back to just the
+        // event node name when /proc didn't have the block.
+        let handlers = proc_handlers.get(&event_name).cloned().unwrap_or_else(|| {
+            if event_name.is_empty() {
+                Vec::new()
+            } else {
+                vec![event_name.clone()]
+            }
+        });
+        let has_btn_south = dev
+            .supported_keys()
+            .is_some_and(|keys| keys.contains(KeyCode::BTN_SOUTH));
+        let has_js = handlers.iter().any(|h| h.starts_with("js"));
+        // Controller-like: BTN_SOUTH OR a js* handler. Ungrabbed + virtual ones
+        // are intentionally included (this is a diagnostics enumerator).
+        if !has_btn_south && !has_js {
+            continue;
+        }
+        let id = dev.input_id();
+        rows.push(crate::protocol::InputDeviceInfo {
+            name: dev.name().unwrap_or("unknown").to_string(),
+            path: path.to_string_lossy().to_string(),
+            vendor: id.vendor(),
+            product: id.product(),
+            phys: dev.physical_path().unwrap_or("").to_string(),
+            handlers,
+            grabbed: grabbed_paths.contains(&path),
+        });
+    }
+    crate::protocol::resp_input_devices(&rows)
 }
 
 /// Entry point: build the daemon and run the event loop until `Shutdown`.
@@ -1476,6 +1665,12 @@ fn handle_control(sh: &mut Shared, fleet: &mut Fleet, ctrl: Control) -> bool {
         }
         Control::GetPads(r) => {
             let _ = r.send(fleet.pads_json());
+        }
+        Control::ListInputDevices(r) => {
+            // #97 diagnostics enumerator: list EVERY controller-like input device
+            // (BTN_SOUTH or a js* handler), grabbed or not, including virtual
+            // ones, marking which paths the fleet currently owns.
+            let _ = r.send(list_input_devices(fleet));
         }
         Control::GetBindings(r) => {
             let ordered: Vec<(String, String)> = sh

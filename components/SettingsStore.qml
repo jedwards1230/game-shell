@@ -10,8 +10,9 @@ import QtQuick
 // Process children to do socket I/O.
 //
 // Ownership: the input daemon is the SOLE writer of settings.json. This store
-// holds the QML-relevant keys (themeMode, streamingViewMode, controllerDebug)
-// and hands them to the daemon via `set-config`; the daemon does the
+// holds the QML-relevant keys (themeMode, streamingViewMode, controllerDebug,
+// rumbleEnabled) and hands them to the daemon via `set-config`; the daemon does
+// the
 // read-modify-write, preserving foreign keys it owns (notably keyBindings).
 // `keyBindings` here is a read-through mirror kept in sync over IPC.
 //
@@ -27,6 +28,7 @@ Item {
     property string themeMode: "dark"             // "auto" | "light" | "dark"
     property string streamingViewMode: "servers"  // "servers" | "apps"
     property bool controllerDebug: false
+    property bool rumbleEnabled: true             // gates daemon-fired rumble (#99)
 
     // === Daemon-owned mirror (authoritative copy lives in the daemon) ===
     property var keyBindings: ({})
@@ -56,6 +58,8 @@ Item {
                     store.streamingViewMode = viewMode;
                 if (typeof obj.controllerDebug === "boolean")
                     store.controllerDebug = obj.controllerDebug;
+                if (typeof obj.rumbleEnabled === "boolean")
+                    store.rumbleEnabled = obj.rumbleEnabled;
                 if (obj.keyBindings && typeof obj.keyBindings === "object")
                     store.keyBindings = obj.keyBindings;
             } catch (e) {
@@ -82,6 +86,7 @@ Item {
             "themeMode": store.themeMode,
             "streamingViewMode": store.streamingViewMode,
             "controllerDebug": store.controllerDebug,
+            "rumbleEnabled": store.rumbleEnabled,
             "moonlightViewMode": null
         });
         saveProc.request("set-config", body);
@@ -107,6 +112,12 @@ Item {
         controllerDebug = enabled;
         save();
         settingsChanged("controllerDebug", enabled);
+    }
+
+    function setRumbleEnabled(enabled) {
+        rumbleEnabled = enabled;
+        save();
+        settingsChanged("rumbleEnabled", enabled);
     }
 
     // === Binding IPC (respects GAME_SHELL_SOCK; no hardcoded socket path) ===

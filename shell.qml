@@ -132,10 +132,19 @@ ShellRoot {
         applications: root._applications
         onAppLaunched: {
             root.state = "appRunning";
+            // #99: short haptic confirmation on a successful app launch.
+            if (inputManager)
+                inputManager.rumblePulse(120);
         }
         onAppClosed: {
             appLifecycle.runningAppClass = "";
             root.returnToShell();
+        }
+        // App failed to launch (non-zero exit from the launcher process).
+        // Stronger double-ish pulse so the failure is felt, not just logged.
+        onAppLaunchFailed: {
+            if (inputManager)
+                inputManager.rumblePulse(250);
         }
     }
 
@@ -144,6 +153,9 @@ ShellRoot {
         shellState: root.state
         onStreamStarted: {
             root.state = "streaming";
+            // #99: short haptic confirmation on stream launch.
+            if (inputManager)
+                inputManager.rumblePulse(120);
         }
         onStreamEnded: {
             Components.NotificationManager.info("stream", "Stream Suspended");
@@ -155,10 +167,16 @@ ShellRoot {
         }
         onStreamCrashed: attempts => {
             root.state = "reconnecting";
+            // #99: stronger pulse to signal the stream dropped / is reconnecting.
+            if (inputManager)
+                inputManager.rumblePulse(250);
         }
         onStreamFailed: {
             root.state = "idle";
             inputManager.grab();
+            // #99: stronger pulse on terminal stream failure.
+            if (inputManager)
+                inputManager.rumblePulse(250);
         }
         onRequestOverlayShow: msg => {
             if (root._layout)

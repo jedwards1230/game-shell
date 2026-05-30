@@ -3,7 +3,8 @@
 //! The wire format is **newline-delimited bare UTF-8 text** in both directions
 //! (see `docs/IPC_PROTOCOL.md`), NOT JSON — only the `get-bindings` *response*
 //! body is a compact JSON object. The QML client talks to this exact format,
-//! so every string here is byte-for-byte compatible with `gamepad-input.py`.
+//! so every string here stayed byte-for-byte compatible with the former
+//! `gamepad-input.py` (since deleted) — the QML client is unchanged.
 //!
 //! `Command`/`Event` are typed enums so the daemon's `match` arms are
 //! compiler-checked exhaustive; the (de)serialization to/from legacy text lives
@@ -33,6 +34,14 @@ pub enum Command {
     /// (#101). Served by the input runtime (fleet state), so it round-trips the
     /// control channel like `status`.
     GetPads,
+    /// `list-input-devices` — enumerate EVERY controller-like input device on
+    /// the host (anything with `BTN_SOUTH` or a `js*` handler), including
+    /// ungrabbed and virtual ones, as a compact JSON array. A diagnostics
+    /// enumerator (replaces `ControllerSettings`' `/proc/bus/input/devices`
+    /// reader), distinct from `get-pads` (which lists only the grabbed fleet).
+    /// Served by the input runtime so it can mark which devices the fleet owns.
+    /// Reply shape: `[{name,path,vendor,product,phys,handlers,grabbed}, …]`.
+    ListInputDevices,
     /// `intent <name>` — inject a shell intent into the broadcast bus. `<name>`
     /// is validated against the closed vocabulary by the input runtime: a valid
     /// name re-broadcasts as `intent:<name>` and replies `ok`; an unknown name
@@ -202,6 +211,7 @@ impl Command {
             "capture-next" => Command::CaptureNext,
             "capture-cancel" => Command::CaptureCancel,
             "get-pads" => Command::GetPads,
+            "list-input-devices" => Command::ListInputDevices,
             "list-apps" => Command::ListApps,
             "get-config" => Command::GetConfig,
             "get-recents" => Command::GetRecents,
@@ -642,6 +652,59 @@ pub fn resp_pads(pads: &[(String, u8, String, bool)]) -> String {
     serde_json::to_string(&serde_json::Value::Array(arr)).expect("pads serialize")
 }
 
+/// One row of the `list-input-devices` diagnostics enumerator (#97). Carries the
+/// raw fields the Linux runtime read from evdev / `/proc/bus/input/devices`; the
+/// wire JSON is built by [`resp_input_devices`]. `vendor`/`product` are the raw
+/// 16-bit ids (rendered as 4-hex-digit lowercase strings on the wire).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDeviceInfo {
+    pub name: String,
+    pub path: String,
+    pub vendor: u16,
+    pub product: u16,
+    pub phys: String,
+    pub handlers: Vec<String>,
+    pub grabbed: bool,
+}
+
+/// Compact single-line JSON array body for the `list-input-devices` reply (#97).
+/// One object per controller-like input device:
+/// `{"name","path","vendor","product","phys","handlers":[..],"grabbed"}`.
+/// `vendor`/`product` are 4-hex-digit lowercase strings (e.g. `"045e"`). The
+/// caller passes the devices already ordered (by devnode path) for a stable
+/// wire; an empty list serializes to `[]`.
+pub fn resp_input_devices(devices: &[InputDeviceInfo]) -> String {
+    let arr: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|d| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".into(), serde_json::Value::String(d.name.clone()));
+            obj.insert("path".into(), serde_json::Value::String(d.path.clone()));
+            obj.insert(
+                "vendor".into(),
+                serde_json::Value::String(format!("{:04x}", d.vendor)),
+            );
+            obj.insert(
+                "product".into(),
+                serde_json::Value::String(format!("{:04x}", d.product)),
+            );
+            obj.insert("phys".into(), serde_json::Value::String(d.phys.clone()));
+            obj.insert(
+                "handlers".into(),
+                serde_json::Value::Array(
+                    d.handlers
+                        .iter()
+                        .map(|h| serde_json::Value::String(h.clone()))
+                        .collect(),
+                ),
+            );
+            obj.insert("grabbed".into(), serde_json::Value::Bool(d.grabbed));
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::to_string(&serde_json::Value::Array(arr)).expect("input-devices serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +720,14 @@ mod tests {
         assert_eq!(Command::parse("capture-cancel"), Command::CaptureCancel);
         assert_eq!(Command::parse("get-pads"), Command::GetPads);
         assert_eq!(Command::parse("  get-pads  "), Command::GetPads);
+        assert_eq!(
+            Command::parse("list-input-devices"),
+            Command::ListInputDevices
+        );
+        assert_eq!(
+            Command::parse("  list-input-devices  "),
+            Command::ListInputDevices
+        );
     }
 
     #[test]
@@ -1157,6 +1228,36 @@ mod tests {
         );
         // Empty fleet -> empty array.
         assert_eq!(resp_pads(&[]), "[]");
+    }
+
+    #[test]
+    fn resp_input_devices_is_compact_array() {
+        let devs = vec![
+            InputDeviceInfo {
+                name: "Xbox 360 Controller".into(),
+                path: "/dev/input/event18".into(),
+                vendor: 0x045e,
+                product: 0x028e,
+                phys: "usb-0000:00:14.0-1/input0".into(),
+                handlers: vec!["event18".into(), "js0".into()],
+                grabbed: true,
+            },
+            InputDeviceInfo {
+                name: "Virtual Pad".into(),
+                path: "/dev/input/event20".into(),
+                vendor: 0x0000,
+                product: 0x0000,
+                phys: "".into(),
+                handlers: vec!["event20".into()],
+                grabbed: false,
+            },
+        ];
+        assert_eq!(
+            resp_input_devices(&devs),
+            r#"[{"name":"Xbox 360 Controller","path":"/dev/input/event18","vendor":"045e","product":"028e","phys":"usb-0000:00:14.0-1/input0","handlers":["event18","js0"],"grabbed":true},{"name":"Virtual Pad","path":"/dev/input/event20","vendor":"0000","product":"0000","phys":"","handlers":["event20"],"grabbed":false}]"#
+        );
+        // Empty list -> empty array.
+        assert_eq!(resp_input_devices(&[]), "[]");
     }
 
     #[test]

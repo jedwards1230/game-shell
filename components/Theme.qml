@@ -35,6 +35,27 @@ Item {
             mouseMode = false;
     }
 
+    // Last sampled GLOBAL pointer position (-1 = no sample yet). Tracked here so
+    // every hover handler shares one delta filter instead of each MouseArea
+    // guessing whether the pointer actually moved.
+    property real _lastPointerX: -1
+    property real _lastPointerY: -1
+
+    // Called from MouseArea.onPositionChanged with the GLOBAL pointer coords.
+    // Only flips to mouse mode on a *genuine* pointer move. Why global coords:
+    // when content scrolls under a still cursor, onPositionChanged fires because
+    // the item moved under the pointer — but the pointer's GLOBAL position is
+    // UNCHANGED (the local coords shift by exactly the same delta the item moved,
+    // so mapToGlobal cancels it out). A real mouse move changes the global
+    // position. The first sample only records a baseline (never flips), so the
+    // initial hover that lands when a row scrolls into place can't trip it.
+    function pointerMoved(gx, gy) {
+        if (_lastPointerX >= 0 && (Math.abs(gx - _lastPointerX) + Math.abs(gy - _lastPointerY) > 1.0))
+            enterMouseMode();
+        _lastPointerX = gx;
+        _lastPointerY = gy;
+    }
+
     // === Controller Debug Overlay (persisted via SettingsStore) ===
     readonly property bool controllerDebug: SettingsStore.controllerDebug
     property int _currentHour: new Date().getHours()

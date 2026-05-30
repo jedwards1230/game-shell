@@ -35,12 +35,18 @@ Item {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            // Mouse-mode engages on a real click only. We deliberately do NOT
-            // flip on onEntered/onPositionChanged: when a row scrolls to center
-            // the controller-focused card, cards slide under a *stationary*
-            // cursor and fire those handlers, hijacking focus mid-nav (#45).
-            // Proper hover-to-mouse-mode needs a real global-cursor-delta check;
-            // deferred — controller nav reliability wins.
+            // Hover flips to mouse-mode only on a GENUINE pointer move, filtered
+            // by Theme.pointerMoved (global-coords delta). We deliberately do NOT
+            // re-add onEntered: containsMouse flips when a row scrolls a card
+            // under a *stationary* cursor, which would hijack controller-nav
+            // focus mid-nav (#45). Coords mapped to the scene root (null) — a
+            // stable frame that doesn't scroll, so content-scroll yields zero
+            // delta. (mapToItem(null,...) over mapToGlobal: mapToGlobal is not
+            // used anywhere in this codebase, mapToItem is — easy to swap.)
+            onPositionChanged: mouse => {
+                let p = mapToItem(null, mouse.x, mouse.y);
+                Theme.pointerMoved(p.x, p.y);
+            }
             onClicked: {
                 Theme.enterMouseMode();
                 root.forceActiveFocus();

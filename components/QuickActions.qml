@@ -202,9 +202,16 @@ FocusScope {
                     id: notifMA
                     anchors.fill: parent
                     hoverEnabled: true
-                    // Mouse-mode on real click only — not onEntered/onPositionChanged,
-                    // which fire on content-scroll under a stationary cursor (#45).
+                    // Hover flips to mouse-mode only on a GENUINE pointer move,
+                    // filtered by Theme.pointerMoved (global-coords delta). No
+                    // onEntered: content-scroll under a stationary cursor would
+                    // hijack controller-nav focus (#45). mapToItem(null,...) maps
+                    // to the scene root (used elsewhere here, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: root.notificationCenterRequested()
                 }
             }
@@ -244,9 +251,14 @@ FocusScope {
                     id: settingsMA
                     anchors.fill: parent
                     hoverEnabled: true
-                    // Mouse-mode on real click only — not onEntered/onPositionChanged,
-                    // which fire on content-scroll under a stationary cursor (#45).
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: root.settingsRequested()
                 }
             }
@@ -278,9 +290,14 @@ FocusScope {
                     id: themeMA
                     anchors.fill: parent
                     hoverEnabled: true
-                    // Mouse-mode on real click only — not onEntered/onPositionChanged,
-                    // which fire on content-scroll under a stationary cursor (#45).
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: {
                         if (Theme.themeMode === "auto")
                             Theme.setThemeMode("light");
@@ -335,7 +352,13 @@ FocusScope {
                     id: networkMA
                     anchors.fill: parent
                     hoverEnabled: true
-                    // Mouse-mode on real click only — not hover/scroll-under-cursor (#45).
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                 }
             }
 
@@ -374,7 +397,13 @@ FocusScope {
                     id: volumeMA
                     anchors.fill: parent
                     hoverEnabled: true
-                    // Mouse-mode on real click only — not hover/scroll-under-cursor (#45).
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                 }
             }
 
@@ -413,9 +442,14 @@ FocusScope {
                     id: powerMA
                     anchors.fill: parent
                     hoverEnabled: true
-                    // Mouse-mode on real click only — not onEntered/onPositionChanged,
-                    // which fire on content-scroll under a stationary cursor (#45).
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: root.powerRequested()
                 }
             }

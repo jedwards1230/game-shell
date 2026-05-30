@@ -6,9 +6,10 @@
 //! Linux input layer (`input.rs`) translates between these `u16` codes and
 //! `evdev` types.
 //!
-//! Behavior here mirrors `input/gamepad-input.py` exactly so the QML client
-//! sees an identical daemon. Where the legacy IPC doc and the Python code
-//! disagree, the Python code wins (it is what the live shell talks to).
+//! Behavior here was ported from the former `input/gamepad-input.py` (since
+//! deleted) so the QML client sees an identical daemon. Where the legacy IPC
+//! doc and that Python code disagreed, the Python code won (it was what the
+//! live shell talked to).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,7 +83,7 @@ pub const ABS_HAT0X: u16 = 0x10;
 pub const ABS_HAT0Y: u16 = 0x11;
 
 // ---------------------------------------------------------------------------
-// Combos and tuning constants (mirror gamepad-input.py)
+// Combos and tuning constants (ported from the former gamepad-input.py)
 // ---------------------------------------------------------------------------
 
 /// Home + B held for COMBO_HOLD_SECS -> `combo:end-session`.

@@ -33,6 +33,12 @@ pub enum Control {
     /// `get-pads`: reply with the gamepad fleet as a compact JSON array
     /// (`[{id,index,name,grabbed}, …]`) in ascending player-index order.
     GetPads(Reply),
+    /// `list-input-devices`: reply with EVERY controller-like input device on the
+    /// host (anything with `BTN_SOUTH` or a `js*` handler) as a compact JSON
+    /// array (`[{name,path,vendor,product,phys,handlers,grabbed}, …]`), including
+    /// ungrabbed and virtual ones. A diagnostics enumerator (#97); the runtime
+    /// marks `grabbed=true` for devices the fleet currently owns.
+    ListInputDevices(Reply),
     /// `intent <name>`: validate `<name>` against the closed vocabulary and, if
     /// valid, broadcast `intent:<name>` to all subscribers. Pure broadcast —
     /// touches no device. The reply is `ok` or `error:unknown intent '<name>'`.

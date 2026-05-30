@@ -14,7 +14,7 @@ The input/backend daemon (`game-shell-input`, Rust source in `rust/`) communicat
 
 The daemon removes any existing socket file on startup and creates a new one. Clients connect, send one command per line, and read the response. The `subscribe` command is the exception — it holds the connection open and streams events.
 
-Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, and `power-battery`, and the Phase 4 query replies `hypr-active`, `hypr-clients`, and `sunshine-status`. JSON only ever appears as such a body — never as the framing itself.
+Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, and `power-battery`, and the Phase 4 query replies `hypr-active`, `hypr-clients`, and `sunshine-status`. JSON only ever appears as such a body — never as the framing itself.
 
 ## Client-to-Daemon Commands
 
@@ -67,6 +67,34 @@ survives another pad reconnecting (P1 stays slot 0 across a P2 unplug/replug).
 Example: `[{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wireless Controller","grabbed":true}]\n`
 
 Empty fleet → `[]\n`.
+
+### `list-input-devices`
+
+Enumerate **every controller-like input device** on the host — anything that
+advertises `BTN_SOUTH` **or** carries a `js*` handler — as a compact JSON array.
+A **diagnostics enumerator** (it replaces `ControllerSettings`' old
+`/proc/bus/input/devices` python reader), distinct from `get-pads`: it lists
+ungrabbed and virtual devices too, not just the grabbed fleet. The runtime marks
+`grabbed=true` only for devices whose devnode path the fleet currently owns.
+
+**Response:** Single-line JSON array of device objects, one per device, in
+ascending devnode-path order:
+
+```json
+[{"name":"Xbox 360 Controller","path":"/dev/input/event18","vendor":"045e","product":"028e","phys":"usb-0000:00:14.0-1/input0","handlers":["event18","js0"],"grabbed":true}]
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `name` | string | Device display name (evdev name) |
+| `path` | string | The `/dev/input/eventN` devnode |
+| `vendor` | string | 4-hex-digit lowercase vendor id (e.g. `"045e"`) |
+| `product` | string | 4-hex-digit lowercase product id (e.g. `"028e"`) |
+| `phys` | string | evdev physical path (`""` if none) |
+| `handlers` | array | Handler names from `/proc/bus/input/devices` (e.g. `["event18","js0"]`); falls back to just the event-node name when `/proc` is unavailable |
+| `grabbed` | bool | True only for devices the fleet currently owns |
+
+An empty result is `[]`.
 
 ### `subscribe`
 
@@ -602,7 +630,7 @@ Subscribers (registered via `subscribe`) receive these events as newline-termina
 | `controller-disconnected` | A gamepad stream errored during event read (USB disconnect; fires per leaving pad) |
 | `pad:connected:<json>` | A pad joined the fleet and was assigned a player slot. Payload: compact `{id,index,name}` object (#101) |
 | `pad:disconnected:<id>` | A pad left the fleet; its slot is freed for reuse. Payload: the pad's stable wire `id` |
-| `pad:index:<json>` | A pad's player-indicator LED was lit to match its slot at assignment (#101 LED). Payload: compact `{id,index}` object. Only emitted for pads with a controllable LED (`EV_LED`); a no-op for pads (most wired pads) without one |
+| `pad:index:<json>` | A pad's player-indicator LED was lit to match its slot at assignment (#101 LED). Payload: compact `{id,index}` object. Emitted for pads with a controllable LED — via `EV_LED`, or via the `/sys/class/leds` xpad fallback (Xbox 360 pads expose their ring through sysfs, not `EV_LED`); a no-op for pads with neither |
 | `pad:battery:<json>` | A pad's battery level/charging state changed (#100). Payload: compact `{id,level,charging}` object (`level` 0–100, `charging` bool). Only emitted for pads that report a battery (wireless); wired pads emit none |
 
 `controller-wake` / `controller-disconnected` are the legacy single-pad signals
@@ -614,9 +642,11 @@ index). Example: `pad:connected:{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wi
 drives three per-pad *outputs*, each cap-gated and degrading to a clean no-op
 when the pad lacks the hardware:
 
-- **LED (#101):** at slot assignment the daemon lights the pad's player LED
-  (`EV_LED`, LED code == player slot) and emits `pad:index:{id,index}`. No LED →
-  no event.
+- **LED (#101):** at slot assignment the daemon lights the pad's player LED and
+  emits `pad:index:{id,index}`. It tries `EV_LED` (LED code == player slot)
+  first, then falls back to the `/sys/class/leds` xpad node (Xbox 360 pads expose
+  their player ring through sysfs, not `EV_LED`). No controllable LED → no
+  event.
 - **Battery (#100):** the daemon polls the pad's `power_supply` sysfs and emits
   `pad:battery:{id,level,charging}` on change (and once at connect). Wired pads
   report no battery → no event.

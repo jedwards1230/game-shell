@@ -23,6 +23,9 @@ Item {
 
     signal appLaunched
     signal appClosed
+    // Emitted when the launcher process exits non-zero (app failed to start).
+    // shell.qml uses this for an error haptic (#99); the failure is also logged.
+    signal appLaunchFailed
 
     function launchDesktopApp(app) {
         runningAppClass = "";
@@ -94,6 +97,7 @@ Item {
             if (exitCode !== 0) {
                 let cmd = appRunner.command.join(" ");
                 ErrorLog.log("app", "Failed to launch " + (_appName || "application"), "Command: " + cmd + "\nExit code: " + exitCode, _appName);
+                root.appLaunchFailed();
             }
         }
     }

@@ -240,6 +240,9 @@ async fn dispatch(control_tx: &mpsc::Sender<Control>, dbus: &DbusSenders, cmd: C
         Command::CaptureNext => request(control_tx, Control::CaptureNext).await,
         Command::CaptureCancel => request(control_tx, Control::CaptureCancel).await,
         Command::GetPads => request(control_tx, Control::GetPads).await,
+        Command::ListInputDevices => {
+            request(control_tx, Control::ListInputDevices).await
+        }
         Command::Intent(name) => {
             request(control_tx, move |reply| Control::Intent { name, reply }).await
         }
@@ -438,6 +441,17 @@ mod tests {
                         true,
                     )]));
                 }
+                Control::ListInputDevices(r) => {
+                    let _ = r.send(protocol::resp_input_devices(&[protocol::InputDeviceInfo {
+                        name: "Test Pad".into(),
+                        path: "/dev/input/event0".into(),
+                        vendor: 0x045e,
+                        product: 0x028e,
+                        phys: "usb-test/input0".into(),
+                        handlers: vec!["event0".into(), "js0".into()],
+                        grabbed: true,
+                    }]));
+                }
                 Control::Intent { name, reply } => {
                     // Mirror the runtime: accept the closed vocabulary, reject
                     // anything else. The fake doesn't actually broadcast.
@@ -597,6 +611,13 @@ mod tests {
         assert_eq!(
             send_line(&mut s, "get-pads").await,
             r#"[{"id":"uniq:test","index":0,"name":"Test Pad","grabbed":true}]"#
+        );
+
+        // list-input-devices round-trips the runtime and returns the diagnostics
+        // enumerator array (one object per controller-like input device).
+        assert_eq!(
+            send_line(&mut s, "list-input-devices").await,
+            r#"[{"name":"Test Pad","path":"/dev/input/event0","vendor":"045e","product":"028e","phys":"usb-test/input0","handlers":["event0","js0"],"grabbed":true}]"#
         );
         drop(s);
 
