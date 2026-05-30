@@ -14,13 +14,13 @@
 
 use crate::config as cfg;
 use crate::config::{self, Binding};
-use crate::device::{self, ControllerDb};
+use crate::device::{self, ControllerDb, GamepadHandle};
 use crate::protocol::{
     resp_cancelled, resp_captured, resp_invalid_button, resp_ok, resp_status, resp_timeout,
     resp_unknown_action, Event, InputMode,
 };
 use crate::state::{self, Control, Reply};
-use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
+use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventStream, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
@@ -243,7 +243,7 @@ fn build_uinput(button_map: &HashMap<u16, u16>) -> std::io::Result<(VirtualDevic
         .chain(extra.iter())
         .map(|&k| KeyCode::new(k))
         .collect();
-    let kb = VirtualDeviceBuilder::new()?
+    let kb = VirtualDevice::builder()?
         .name("game-shell-virtual-kb")
         .with_keys(&keys)?
         .build()?;
@@ -259,7 +259,7 @@ fn build_uinput(button_map: &HashMap<u16, u16>) -> std::io::Result<(VirtualDevic
             .into_iter()
             .map(RelativeAxisCode)
             .collect();
-    let mouse = VirtualDeviceBuilder::new()?
+    let mouse = VirtualDevice::builder()?
         .name("game-shell-virtual-mouse")
         .with_keys(&mkeys)?
         .with_relative_axes(&axes)?
@@ -1016,14 +1016,14 @@ impl Daemon {
 
     fn handle_kbd(&mut self, code: u16, value: i32, raw_name: Option<String>) {
         if self.kbd_log_enabled && value == 1 {
-            let (raw, display, source) = config::kbd_key_info(code, raw_name.as_deref());
-            // Positional args: an inline `display={display:?}` capture collides
-            // with tracing's `display = ...` field shorthand.
+            let (raw, disp, source) = config::kbd_key_info(code, raw_name.as_deref());
+            // The local is `disp`, not `display`: a `display` identifier collides
+            // with `tracing::field::display` inside the `info!` macro expansion.
             info!(
                 "kbd-key code={} raw={} display={:?} source={}",
                 code,
                 raw,
-                display,
+                disp,
                 source.as_str()
             );
         }
@@ -1097,7 +1097,7 @@ enum Axis {
 /// all and rediscover.
 async fn keyboard_supervisor(tx: mpsc::Sender<Internal>) {
     loop {
-        let keyboards = device::find_keyboards();
+        let keyboards: Vec<GamepadHandle> = device::find_keyboards();
         if keyboards.is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;

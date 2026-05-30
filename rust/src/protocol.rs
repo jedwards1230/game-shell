@@ -52,14 +52,25 @@ impl Command {
                 // Python keys `set-binding` off the `"set-binding "` prefix
                 // (with trailing space), so a bare `set-binding` is `unknown`.
                 if let Some(rest) = cmd.strip_prefix("set-binding ") {
-                    let parts: Vec<&str> = rest.split_whitespace().collect();
-                    if parts.len() == 2 {
-                        return Command::SetBinding {
-                            action: parts[0].to_string(),
-                            button: parts[1].to_string(),
-                        };
+                    // Mirror Python `cmd.split(None, 2)`: at most two splits, so
+                    // the button is everything after the action (e.g.
+                    // "select BTN_SOUTH EXTRA" -> button "BTN_SOUTH EXTRA",
+                    // which then fails as an invalid button — matching Python,
+                    // not a usage error).
+                    match rest.trim_start().split_once(char::is_whitespace) {
+                        Some((action, button)) => {
+                            let button = button.trim_start();
+                            if action.is_empty() || button.is_empty() {
+                                return Command::SetBindingUsage;
+                            }
+                            return Command::SetBinding {
+                                action: action.to_string(),
+                                button: button.to_string(),
+                            };
+                        }
+                        // Only one token after the prefix -> wrong arg count.
+                        None => return Command::SetBindingUsage,
                     }
-                    return Command::SetBindingUsage;
                 }
                 Command::Unknown
             }
@@ -214,17 +225,34 @@ mod tests {
 
     #[test]
     fn set_binding_arg_errors() {
-        // Wrong arg count -> usage.
+        // One token after the prefix -> usage.
         assert_eq!(
             Command::parse("set-binding select"),
             Command::SetBindingUsage
         );
-        assert_eq!(
-            Command::parse("set-binding a b c"),
-            Command::SetBindingUsage
-        );
         // Bare `set-binding` (no trailing space/args) -> unknown, matching Python.
         assert_eq!(Command::parse("set-binding"), Command::Unknown);
+    }
+
+    #[test]
+    fn set_binding_extra_tokens_match_python_split() {
+        // Python `split(None, 2)` keeps the remainder as the button name, so
+        // extra tokens become part of an (invalid) button, not a usage error.
+        // Leading/internal whitespace runs collapse like Python's split.
+        assert_eq!(
+            Command::parse("set-binding select BTN_SOUTH EXTRA"),
+            Command::SetBinding {
+                action: "select".into(),
+                button: "BTN_SOUTH EXTRA".into()
+            }
+        );
+        assert_eq!(
+            Command::parse("set-binding   select    BTN_SOUTH"),
+            Command::SetBinding {
+                action: "select".into(),
+                button: "BTN_SOUTH".into()
+            }
+        );
     }
 
     #[test]
