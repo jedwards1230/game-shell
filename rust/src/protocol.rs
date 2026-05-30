@@ -319,8 +319,6 @@ pub enum Event {
     /// pad's stable wire id. Wire: `pad:disconnected:<id>`. Complements
     /// `controller-disconnected`.
     PadDisconnected(String),
-    HomePress,
-    ComboHomeHold,
     ComboEndSession,
     ComboForceQuit,
     ComboSuspendStream,
@@ -389,8 +387,6 @@ impl fmt::Display for Event {
             Event::ControllerDisconnected => f.write_str("controller-disconnected"),
             Event::PadConnected(json) => write!(f, "pad:connected:{json}"),
             Event::PadDisconnected(id) => write!(f, "pad:disconnected:{id}"),
-            Event::HomePress => f.write_str("home-press"),
-            Event::ComboHomeHold => f.write_str("combo:home-hold"),
             Event::ComboEndSession => f.write_str("combo:end-session"),
             Event::ComboForceQuit => f.write_str("combo:force-quit"),
             Event::ComboSuspendStream => f.write_str("combo:suspend-stream"),
@@ -764,8 +760,6 @@ mod tests {
             Event::ControllerDisconnected.to_string(),
             "controller-disconnected"
         );
-        assert_eq!(Event::HomePress.to_string(), "home-press");
-        assert_eq!(Event::ComboHomeHold.to_string(), "combo:home-hold");
         assert_eq!(Event::ComboEndSession.to_string(), "combo:end-session");
         assert_eq!(Event::ComboForceQuit.to_string(), "combo:force-quit");
         assert_eq!(

@@ -120,7 +120,7 @@ pub struct Binding {
 }
 
 /// Default bindings, in canonical order. `BTN_MODE` (Home) is intentionally
-/// absent: it is handled directly to broadcast `home-press`/`combo:home-hold`
+/// absent: it is handled directly to broadcast `intent:home-tap`/`intent:home-hold`
 /// rather than mapped to a key (mapping `KEY_HOMEPAGE` would leak to focused
 /// apps). The legacy IPC doc lists a `drawer` action — that is stale; the
 /// Python daemon and the QML `remappableActions` both use exactly these four.

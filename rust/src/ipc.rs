@@ -586,11 +586,14 @@ mod tests {
         // Subscribe receives broadcast events.
         let mut sub = UnixStream::connect(&sock).await.unwrap();
         assert_eq!(send_line(&mut sub, "subscribe").await, "subscribed");
-        events_tx.send(Event::HomePress).unwrap();
+        events_tx.send(Event::ControllerWake).unwrap();
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 64];
         let n = sub.read(&mut buf).await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&buf[..n]).trim_end(), "home-press");
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]).trim_end(),
+            "controller-wake"
+        );
 
         // A broadcast `intent:*` event reaches the subscriber on the wire.
         events_tx.send(Event::Intent("home-tap".into())).unwrap();

@@ -4,9 +4,9 @@ import QtQuick
 // IPC protocol: see docs/IPC_PROTOCOL.md
 // Commands used: grab, release, subscribe
 // Events handled: combo:force-quit, combo:end-session, combo:suspend-stream,
-//   input-mode:*, controller-wake, controller-disconnected, intent:* (the
-//   control-surface stream), and — TEMPORARILY — the legacy gamepad
-//   home-press / combo:home-hold events (see the Phase 5 bridge below).
+//   input-mode:*, controller-wake, controller-disconnected, and intent:* (the
+//   control-surface stream — the SOLE shell-intent vocabulary; the legacy
+//   gamepad home-press / combo:home-hold bridge was deleted in Phase 5).
 Item {
     id: root
 
@@ -119,16 +119,6 @@ Item {
                 } else if (line.startsWith("intent:")) {
                     root._handleIntent(line.substring(7));
                 }
-                // --- TEMPORARY dual-source bridge (DELETE in Phase 5) ---
-                // The daemon still emits the legacy gamepad home-press /
-                // combo:home-hold events alongside the new intent:* stream.
-                // Route them to the same neutral signals so the rest of the
-                // shell already speaks the intent vocabulary. Phase 5 deletes
-                // the daemon producers and these two arms together.
-                else if (line === "home-press")
-                    root.intentHomeTap();
-                else if (line === "combo:home-hold")
-                    root.intentHomeHold();
             }
         }
         onExited: {

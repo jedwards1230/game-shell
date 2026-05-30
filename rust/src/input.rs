@@ -19,7 +19,7 @@
 //! Combo / Home-hold detection is **per-pad-complete** (`[critic P1]`): a combo
 //! fires only when a *single* pad holds the full key set. The fleet-level timers
 //! check, at fire time, whether *any* pad still holds the complete combo, so two
-//! pads pressing Home simultaneously produce one `combo:home-hold`, never a
+//! pads pressing Home simultaneously produce one `intent:home-hold`, never a
 //! double-fire, and two pads each holding *half* a combo never trigger it. For a
 //! single connected pad this is byte-identical to the pre-fleet behavior.
 //!
@@ -38,7 +38,10 @@ use crate::protocol::{
 };
 use crate::state::{self, Control, Reply};
 use evdev::uinput::VirtualDevice;
-use evdev::{AttributeSet, EventStream, EventType, InputEvent, KeyCode, RelativeAxisCode};
+use evdev::{
+    AbsoluteAxisCode, AttributeSet, Device, EventStream, EventType, InputEvent, KeyCode,
+    RelativeAxisCode, UinputAbsSetup,
+};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
@@ -78,6 +81,27 @@ enum Internal {
     CaptureTimeout(u64),
 }
 
+/// Which presenter the fleet is currently driving (Phase 5). Mode is toggled by
+/// the `grab`/`release` IPC; the daemon **keeps the physical EVIOCGRAB in both
+/// modes** so no controller input ever leaks to the compositor.
+///
+/// * [`Presenter::Shell`] — the shell home screen owns input. Each pad's
+///   buttons/d-pad/left-stick map to keyboard nav keys on the shared virtual
+///   keyboard; the right stick drives the shared virtual mouse; gamepad Home
+///   becomes `intent:home-tap`/`intent:home-hold`. This is the menu-navigation
+///   presenter (#7: all pads share one focus).
+/// * [`Presenter::Game`] — a streamed/launched app owns input. Each pad is
+///   re-presented as one clean per-player virtual gamepad (`PadDevice.virtual_pad`,
+///   #6) carrying the physical pad's events verbatim **except Home**, which is
+///   always intercepted into `intent:home-*` so the shell overlay can come up
+///   over a running game (substrate for #75). The gamepad-only safety combos
+///   (force-quit / suspend / end-session) still run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presenter {
+    Shell,
+    Game,
+}
+
 /// Resources shared across every pad in the fleet: the virtual output devices,
 /// the broadcast bus, identity tables, the remap map, and the fleet-level
 /// capture/input-mode/generation state. Per-pad input state lives in
@@ -108,12 +132,17 @@ struct Shared {
     capture_gen: u64,
 
     /// Fleet-level Home-hold dedup latch. Set when any pad's Home-hold timer
-    /// fires; `ComboHomeHold` is published only on the 0->1 edge, so two pads
-    /// holding Home simultaneously emit the single `combo:home-hold` once
+    /// fires; `intent:home-hold` is published only on the 0->1 edge, so two pads
+    /// holding Home simultaneously emit the single `intent:home-hold` once
     /// (followup: "simultaneous Home-hold fires once"). Cleared when no pad
     /// holds `BTN_MODE` anymore. Single-pad: the latch toggles exactly with the
     /// one pad, so behavior is identical to the pre-fleet single fire.
     home_hold_active: bool,
+
+    /// The active presenter (Phase 5). Starts in [`Presenter::Shell`] (the shell
+    /// boots focused). `release`/`grab` flip it; per-pad event routing
+    /// (`handle_event`) branches on it.
+    presenter: Presenter,
 }
 
 impl Shared {
@@ -450,14 +479,17 @@ impl PadDevice {
     // --- event handling --------------------------------------------------
 
     fn handle_event(&mut self, sh: &mut Shared, ev: InputEvent) {
-        if self.grabbed {
-            self.handle_grabbed(sh, ev);
-        } else {
-            self.handle_ungrabbed(sh, ev);
+        // Route by the active presenter, not the physical grab: the pad stays
+        // grabbed in both modes (Phase 5), so `grabbed` no longer discriminates.
+        match sh.presenter {
+            Presenter::Shell => self.handle_shell(sh, ev),
+            Presenter::Game => self.handle_game(sh, ev),
         }
     }
 
-    fn handle_grabbed(&mut self, sh: &mut Shared, ev: InputEvent) {
+    /// Shell presenter: map the pad to keyboard nav + mouse on the shared virtual
+    /// devices, and turn gamepad Home into `intent:home-tap`/`intent:home-hold`.
+    fn handle_shell(&mut self, sh: &mut Shared, ev: InputEvent) {
         let et = ev.event_type();
         let code = ev.code();
         let value = ev.value();
@@ -488,7 +520,7 @@ impl PadDevice {
                 self.notify_held_buttons(sh);
             }
 
-            // Home button hold detection.
+            // Home button hold detection -> neutral `intent:home-*` (Phase 5).
             if code == cfg::BTN_MODE {
                 if value == 1 {
                     self.start_home_hold(sh);
@@ -496,9 +528,9 @@ impl PadDevice {
                     if let Some(t) = self.home_hold_task.take() {
                         t.abort();
                         // Invalidate a possibly-queued HomeHoldFired so the tap
-                        // doesn't also produce combo:home-hold.
+                        // doesn't also produce `intent:home-hold`.
                         self.home_hold_gen = sh.next_generation();
-                        sh.publish(Event::HomePress);
+                        sh.publish(Event::Intent("home-tap".into()));
                     }
                 }
             }
@@ -519,46 +551,68 @@ impl PadDevice {
         }
     }
 
-    fn handle_ungrabbed(&mut self, sh: &mut Shared, ev: InputEvent) {
+    /// Game presenter (Phase 5): re-present this physical pad as the clean
+    /// per-player virtual gamepad, forwarding its events verbatim **except Home**.
+    ///
+    /// The physical pad stays grabbed, so nothing leaks to the compositor; the
+    /// game reads `game-shell-virtual-pad-<slot>` instead. Home (`BTN_MODE`) is
+    /// always intercepted into `intent:home-tap`/`intent:home-hold` (never
+    /// forwarded) so the shell overlay can come up over a running game. The
+    /// gamepad-only safety combos (force-quit / suspend / end-session) still run
+    /// off `held_keys`, exactly as before.
+    fn handle_game(&mut self, sh: &mut Shared, ev: InputEvent) {
         let et = ev.event_type();
         let code = ev.code();
         let value = ev.value();
 
-        if et == EventType::ABSOLUTE {
-            // Right-stick mouse cursor stays active when ungrabbed.
-            if code == cfg::ABS_RX {
-                self.handle_rstick_axis(sh, value, Axis::X);
-            } else if code == cfg::ABS_RY {
-                self.handle_rstick_axis(sh, value, Axis::Y);
+        if et == EventType::KEY {
+            // Track held keys for the gamepad-only safety combos (force-quit /
+            // suspend / end-session). These watch raw button state — including
+            // `BTN_MODE` — and must keep working over a running game. Ordering
+            // mirrors `handle_shell` so a combo arms identically regardless of
+            // which button (Home or the other) is pressed last.
+            if value == 1 {
+                self.held_keys.insert(code);
+                self.check_combo_start(sh);
+                self.check_quit_combo(sh);
+                self.check_suspend_combo(sh);
+            } else if value == 0 {
+                self.held_keys.remove(&code);
+                self.cancel_combo(sh);
             }
-            return;
-        }
-        if et != EventType::KEY {
-            return;
-        }
 
-        // LB/RB clicks stay active when ungrabbed.
-        if code == cfg::BTN_TL {
-            sh.emit_mouse_button(cfg::BTN_LEFT, value);
-        } else if code == cfg::BTN_TR {
-            sh.emit_mouse_button(cfg::BTN_RIGHT, value);
-        }
-
-        if value == 1 {
-            self.held_keys.insert(code);
-            self.check_combo_start(sh);
-            self.check_quit_combo(sh);
-            self.check_suspend_combo(sh);
-            self.notify_held_buttons(sh);
-            if code == cfg::BTN_TL || code == cfg::BTN_TR {
-                sh.set_input_mode(InputMode::Mouse);
-            } else if config::is_remappable(code) || code == cfg::BTN_SELECT {
-                sh.set_input_mode(InputMode::Controller);
+            // Home is always intercepted -> `intent:home-*`, never forwarded to
+            // the game's virtual pad, so the shell overlay can come up over a
+            // running game (#75 substrate).
+            if code == cfg::BTN_MODE {
+                if value == 1 {
+                    self.start_home_hold(sh);
+                } else if value == 0 {
+                    if let Some(t) = self.home_hold_task.take() {
+                        t.abort();
+                        // Invalidate a possibly-queued HomeHoldFired so the tap
+                        // doesn't also produce `intent:home-hold`.
+                        self.home_hold_gen = sh.next_generation();
+                        sh.publish(Event::Intent("home-tap".into()));
+                    }
+                }
+                return; // never forward Home to the game
             }
-        } else if value == 0 {
-            self.held_keys.remove(&code);
-            self.cancel_combo(sh);
-            self.notify_held_buttons(sh);
+
+            // Forward the raw button to the clean virtual pad (the game's input).
+            self.forward_to_virtual_pad(ev);
+        } else if et == EventType::ABSOLUTE {
+            // Forward sticks/triggers/d-pad verbatim — the game wants raw axes.
+            self.forward_to_virtual_pad(ev);
+        }
+    }
+
+    /// Emit one event onto this pad's clean virtual gamepad, if it has one.
+    /// A no-op when `virtual_pad` is `None` (e.g. a transient race during a
+    /// presenter flip); the event is simply dropped rather than leaked.
+    fn forward_to_virtual_pad(&mut self, ev: InputEvent) {
+        if let Some(vpad) = self.virtual_pad.as_mut() {
+            let _ = vpad.emit(&[ev]);
         }
     }
 
@@ -824,7 +878,12 @@ impl PadDevice {
     fn check_quit_combo(&mut self, sh: &mut Shared) {
         if state::subset_held(&config::QUIT_COMBO_KEYS, &self.held_keys) {
             info!("Force-quit combo detected (Back+Home+LB+RB)");
-            if !self.grabbed {
+            // In the game presenter a stream/app owns the screen, so also send
+            // the Moonlight force-quit chord on the shared virtual keyboard. The
+            // shell presenter has no app to quit. (Pre-Phase-5 this keyed off the
+            // grab; the pad now stays grabbed in both modes, so it keys off the
+            // presenter instead.)
+            if sh.presenter == Presenter::Game {
                 sh.send_moonlight_quit();
             }
             sh.publish(Event::ComboForceQuit);
@@ -853,6 +912,81 @@ impl PadDevice {
             let _ = tx.send(Internal::HomeHoldFired { fd, generation }).await;
         }));
     }
+
+    // --- presenter entry/exit (Phase 5) ----------------------------------
+
+    /// Enter the game presenter: create this pad's clean virtual gamepad (if it
+    /// doesn't already have one) and register its fd so discovery never grabs it.
+    /// The physical pad stays grabbed; subsequent events route through
+    /// [`PadDevice::handle_game`] onto the virtual pad. Idempotent.
+    fn enter_game(&mut self, sh: &mut Shared) {
+        if self.virtual_pad.is_some() {
+            return;
+        }
+        match build_virtual_pad(self.event_stream.device(), self.player_slot) {
+            Ok(vpad) => {
+                sh.reg.register(vpad.as_raw_fd());
+                info!(
+                    "Created virtual pad game-shell-virtual-pad-{} for slot {} ({})",
+                    self.player_slot, self.player_slot, self.wire_id
+                );
+                self.virtual_pad = Some(vpad);
+            }
+            Err(e) => error!(
+                "Failed to create virtual pad for slot {} ({}): {e}",
+                self.player_slot, self.wire_id
+            ),
+        }
+    }
+
+    /// Leave the game presenter: drop this pad's virtual gamepad and forget its
+    /// fd. The physical pad stays grabbed; events route back through the shell
+    /// presenter ([`PadDevice::handle_shell`]). Idempotent.
+    fn enter_shell(&mut self, sh: &mut Shared) {
+        if let Some(vpad) = self.virtual_pad.take() {
+            sh.reg.unregister(vpad.as_raw_fd());
+            info!(
+                "Dropped virtual pad for slot {} ({})",
+                self.player_slot, self.wire_id
+            );
+        }
+    }
+}
+
+/// Build a clean per-player virtual gamepad mirroring the physical pad's
+/// capabilities (Phase 5). The virtual device advertises the same key set,
+/// absolute axes (with the source's calibration), and `input_id` so a game
+/// recognizes `game-shell-virtual-pad-<slot>` as the same controller model —
+/// minus the daemon's internal Home/combo synthesis, which never reaches it.
+///
+/// We deliberately copy Home (`BTN_MODE`) into the *capability* set so the
+/// virtual pad's profile matches the physical one, but `handle_game` never
+/// forwards a Home event, so the game still never sees a Home press.
+fn build_virtual_pad(src: &Device, slot: u8) -> std::io::Result<VirtualDevice> {
+    let name = format!("game-shell-virtual-pad-{slot}");
+
+    let keys: AttributeSet<KeyCode> = src
+        .supported_keys()
+        .into_iter()
+        .flat_map(|set| set.iter())
+        .collect();
+
+    let mut builder = VirtualDevice::builder()?
+        .name(&name)
+        .input_id(src.input_id())
+        .with_keys(&keys)?;
+
+    // Copy each absolute axis with the source's absinfo (calibration), so the
+    // virtual pad reports identical ranges/deadzones to the game.
+    if let Ok(absinfo) = src.get_absinfo() {
+        for (code, info) in absinfo {
+            let setup = UinputAbsSetup::new(AbsoluteAxisCode(code.0), info);
+            builder = builder.with_absolute_axis(&setup)?;
+        }
+    }
+
+    let vpad = builder.build()?;
+    Ok(vpad)
 }
 
 /// The gamepad fleet: physical pads keyed by raw fd, plus the stable player-slot
@@ -870,12 +1004,16 @@ impl Fleet {
         }
     }
 
-    /// Fleet aggregate for the `status` reply: connected if any pad is present,
-    /// grabbed if any pad is grabbed. For a single pad this is byte-identical to
-    /// the pre-fleet `resp_status(connected, grabbed)`.
-    fn status_string(&self) -> String {
+    /// Fleet aggregate for the `status` reply: connected if any pad is present;
+    /// the second field reflects the **presenter** (`grab`→shell→`grabbed`,
+    /// `release`→game→`released`), NOT the physical EVIOCGRAB — the pad now stays
+    /// grabbed in both modes (Phase 5), so keying `status` off the physical grab
+    /// would always report `grabbed` and break the `release` UI semantics that
+    /// `ControllerSettings.qml` reads. For a single pad in the shell presenter
+    /// this is byte-identical to the pre-fleet `connected:grabbed`.
+    fn status_string(&self, presenter: Presenter) -> String {
         let connected = !self.pads.is_empty();
-        let grabbed = self.pads.values().any(|p| p.grabbed);
+        let grabbed = presenter == Presenter::Shell;
         resp_status(connected, grabbed)
     }
 
@@ -947,6 +1085,7 @@ pub async fn run(mut control_rx: mpsc::Receiver<Control>, events: broadcast::Sen
         capture_timeout_task: None,
         capture_gen: 0,
         home_hold_active: false,
+        presenter: Presenter::Shell,
     };
     let mut fleet = Fleet::new();
 
@@ -986,11 +1125,13 @@ pub async fn run(mut control_rx: mpsc::Receiver<Control>, events: broadcast::Sen
         }
     }
 
-    // Reset every pad's stick state and abort tasks on shutdown.
+    // On shutdown release each pad's kernel grab (kept in both presenters during
+    // normal operation), reset stick state, and abort tasks. Releasing the grab
+    // lets the next daemon/compositor own the pad cleanly.
     let fds: Vec<RawFd> = fleet.pads.keys().copied().collect();
     for fd in fds {
         if let Some(mut pad) = fleet.pads.remove(&fd) {
-            pad.reset_stick_state(&mut sh);
+            pad.ungrab(&mut sh); // also resets stick state
             pad.abort_all_tasks();
         }
     }
@@ -1074,7 +1215,7 @@ fn handle_control(sh: &mut Shared, fleet: &mut Fleet, ctrl: Control) -> bool {
             let _ = r.send(resp_ok());
         }
         Control::Status(r) => {
-            let _ = r.send(fleet.status_string());
+            let _ = r.send(fleet.status_string(sh.presenter));
         }
         Control::GetPads(r) => {
             let _ = r.send(fleet.pads_json());
@@ -1117,18 +1258,29 @@ fn handle_control(sh: &mut Shared, fleet: &mut Fleet, ctrl: Control) -> bool {
     true
 }
 
-/// Grab every connected pad (shell-presenter entry point). Per-fleet mode
-/// toggle: the existing `grab` IPC now applies to the whole fleet.
+/// Switch the fleet to the **shell presenter** (the `grab` IPC). Per-fleet mode
+/// toggle (Phase 5): set the mode, ensure every pad is physically grabbed, and
+/// tear down any per-player virtual gamepads. The physical grab is *kept* — the
+/// shell presenter routes pad input to nav keys + `intent:*` on the shared
+/// virtual keyboard/mouse.
 fn grab_all(sh: &mut Shared, fleet: &mut Fleet) {
+    sh.presenter = Presenter::Shell;
     for pad in fleet.pads.values_mut() {
-        pad.grab(sh);
+        pad.grab(sh); // no-op if already grabbed; re-grabs if somehow released
+        pad.enter_shell(sh);
     }
 }
 
-/// Release every connected pad's grab (game-presenter entry point, Phase 5).
+/// Switch the fleet to the **game presenter** (the `release` IPC). Per-fleet
+/// mode toggle (Phase 5): set the mode, **keep** the physical grab (so nothing
+/// leaks to the compositor), and create one clean virtual gamepad per pad. The
+/// game reads the virtual pads; Home is intercepted into `intent:home-*`.
 fn release_all(sh: &mut Shared, fleet: &mut Fleet) {
+    sh.presenter = Presenter::Game;
     for pad in fleet.pads.values_mut() {
-        pad.ungrab(sh);
+        // Keep the physical grab; only ensure it's grabbed (it is, post-join).
+        pad.grab(sh);
+        pad.enter_game(sh);
     }
 }
 
@@ -1242,8 +1394,14 @@ fn try_join(sh: &mut Shared, fleet: &mut Fleet) {
         );
         let mut pad = PadDevice::new(fd, stream, wire_id.clone(), name.clone(), path, slot);
         pad.calibrate();
-        // Auto-grab on connect (shell presenter; matches the Python device loop).
+        // Auto-grab on connect (matches the Python device loop). The grab is held
+        // in both presenters; if the fleet is mid-game (a second player joining a
+        // running stream), give the new pad its clean virtual gamepad too so it
+        // joins the same presenter the rest of the fleet is in (Phase 5).
         pad.grab(sh);
+        if sh.presenter == Presenter::Game {
+            pad.enter_game(sh);
+        }
         fleet.pads.insert(fd, pad);
 
         // Legacy single-pad signal (any pad still drives `controller-wake` so the
@@ -1321,13 +1479,13 @@ fn handle_internal(sh: &mut Shared, fleet: &mut Fleet, internal: Internal) {
             }
             pad.home_hold_task = None;
             info!("Home hold detected (slot {})", pad.player_slot);
-            // Fleet-level dedup: publish `combo:home-hold` only on the 0->1 edge
+            // Fleet-level dedup: publish `intent:home-hold` only on the 0->1 edge
             // of the latch, so two pads holding Home at once fire it once. The
             // latch clears (loop event arm) when no pad holds Home. Single-pad:
             // the latch toggles with the one pad, identical to the old behavior.
             if !sh.home_hold_active {
                 sh.home_hold_active = true;
-                sh.publish(Event::ComboHomeHold);
+                sh.publish(Event::Intent("home-hold".into()));
             }
         }
         Internal::ComboEndSessionFired { fd, generation } => {

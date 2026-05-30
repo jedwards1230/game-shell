@@ -577,10 +577,18 @@ index). Example: `pad:connected:{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wi
 
 ### Home Button
 
+The gamepad Home button (`BTN_MODE`) is **always intercepted** by the daemon and
+surfaced as a neutral [intent](#intents) on the broadcast stream — in **both**
+the shell and game presenters (so the shell overlay can come up over a running
+game). It is never mapped to a key and never forwarded to a game's virtual pad.
+
 | Event | Trigger |
 |-------|---------|
-| `home-press` | `BTN_MODE` released before the 2-second hold threshold |
-| `combo:home-hold` | `BTN_MODE` held for 2 seconds |
+| `intent:home-tap` | `BTN_MODE` released before the 2-second hold threshold |
+| `intent:home-hold` | `BTN_MODE` held for 2 seconds |
+
+The legacy `home-press` / `combo:home-hold` events were removed in Phase 5 — QML
+now consumes only the `intent:*` vocabulary.
 
 ### Intents
 
@@ -595,8 +603,9 @@ all surface through it, so QML consumes **one** vocabulary regardless of source.
 
 `intent:home` is the global return-to-shell escape; `intent:home-tap` /
 `intent:home-hold` are the neutral gamepad Home signals (QML maps them by the
-focus it owns). `intent:menu` toggles the navigation drawer. The existing
-gamepad `home-press` / `combo:home-hold` events are unchanged in this phase.
+focus it owns). `intent:menu` toggles the navigation drawer. The daemon's own
+gamepad Home handling publishes `intent:home-tap` / `intent:home-hold` directly,
+so QML has exactly one shell-intent vocabulary regardless of source.
 
 ### Combo Events
 
@@ -711,9 +720,10 @@ hypr:fullscreen:0
 | `confirm` | `BTN_START` (Start) | `KEY_ENTER` | Yes |
 
 `BTN_MODE` (Home) is **not** a mapped action. It is handled directly to broadcast
-`home-press` (tap) / `combo:home-hold` (hold) on the socket — mapping it to a key
-would leak `KEY_HOMEPAGE` to whatever app has keyboard focus. It is still a valid
-*target* for `set-binding` (it is in the remappable set), but no action defaults to it.
+`intent:home-tap` (tap) / `intent:home-hold` (hold) on the socket — mapping it to a
+key would leak `KEY_HOMEPAGE` to whatever app has keyboard focus. It is still a
+valid *target* for `set-binding` (it is in the remappable set), but no action
+defaults to it.
 
 ### Remappable Buttons
 
@@ -753,25 +763,34 @@ LB and RB emit mouse left-click and right-click respectively (both in grabbed an
 
 Left and right triggers (`ABS_Z`, `ABS_RZ`) are treated as digital: held when analog value > 100, released otherwise. They appear in the `buttons:` debug event as `LT`/`RT` but do not emit any keyboard or mouse events.
 
-## Grabbed vs Ungrabbed Behavior
+## Presenters: Shell vs Game
 
-| Feature | Grabbed | Ungrabbed |
-|---------|---------|-----------|
-| Button-to-keyboard mapping | Active | Inactive |
-| D-pad → arrow keys | Active | Inactive |
-| Left stick → arrow keys | Active | Inactive |
-| Right stick → mouse cursor | Active | Active |
-| LB/RB → mouse clicks | Active | Active |
-| Combo detection (end-session, force-quit) | Active | Active |
-| Home button hold detection | Active | Inactive |
-| `home-press` event | Active | Inactive |
-| `buttons:` debug events | Active | Active |
-| Input mode tracking | Active | Active |
-| Capture mode | Active | Inactive |
+The daemon **keeps the physical `EVIOCGRAB` in both modes** (Phase 5) — no
+controller input ever leaks to the compositor. The `grab` IPC selects the
+**shell presenter**, `release` selects the **game presenter**; the two differ
+only in where the pad's input goes.
+
+| Feature | Shell presenter (`grab`) | Game presenter (`release`) |
+|---------|--------------------------|----------------------------|
+| Physical pad grabbed | Yes | Yes |
+| Per-player clean virtual gamepad | — | One per pad (`game-shell-virtual-pad-<slot>`) |
+| Button-to-keyboard mapping | Active | — (raw buttons forwarded to the virtual pad) |
+| D-pad / left stick → arrow keys | Active | — (forwarded as raw axes) |
+| Right stick → mouse cursor | Active | — (forwarded as raw axis) |
+| LB/RB → mouse clicks | Active | — (forwarded as raw buttons) |
+| Combo detection (end-session, force-quit, suspend) | Active | Active |
+| Home → `intent:home-tap` / `intent:home-hold` | Active (intercepted) | Active (intercepted, never forwarded) |
+| `buttons:` debug events | Active | — |
+| Input mode tracking | Active | — |
+| Capture mode | Active | — |
 | Force-quit `Ctrl+Alt+Shift+Q` emission | No (not needed) | Yes |
 
-On grab: clears held keys, resets triggers, cancels combos, sets input mode to `controller`.
-On release: resets all stick state (releases held keys, cancels repeat tasks), clears held keys, resets triggers, cancels combos.
+On entering the shell presenter: each pad's clean virtual gamepad is torn down;
+held keys/triggers reset and combos cancel on the underlying grab.
+On entering the game presenter: each pad gets a clean virtual gamepad mirroring
+its capabilities (keys, axes with calibration, `input_id`). The game reads the
+virtual pad; the daemon still intercepts Home so the shell can come up over a
+running game.
 
 ## Settings Persistence
 
@@ -817,4 +836,4 @@ On disconnect (`OSError` during event read), the daemon sends `controller-discon
 
 ## Known Issues
 
-- **`BTN_MODE` is socket-only**: The Home button is not mapped to a keyboard key. It drives `home-press` (tap) and `combo:home-hold` (hold) subscriber events directly. Mapping it to `KEY_HOMEPAGE` was intentionally avoided because that keycode leaks to focused apps (browsers treat it as "go to home page"). `BTN_MODE` is still a valid `set-binding` *target*, but no action defaults to it.
+- **`BTN_MODE` is socket-only**: The Home button is not mapped to a keyboard key. It drives `intent:home-tap` (tap) and `intent:home-hold` (hold) subscriber events directly, intercepted in both presenters. Mapping it to `KEY_HOMEPAGE` was intentionally avoided because that keycode leaks to focused apps (browsers treat it as "go to home page"). `BTN_MODE` is still a valid `set-binding` *target*, but no action defaults to it.
