@@ -358,26 +358,21 @@ FocusScope {
             return currentCombo !== "" ? currentCombo : currentKeys;
         }
 
-        Process {
+        SocketClient {
             id: debugSubscribe
-            // Subscribe to the daemon's controller `buttons:` stream. The
-            // keyboard half of the pane no longer comes from the daemon — the
-            // daemon stopped snooping the keyboard (Phase 2). Keyboard keys are
-            // captured QML-side from Wayland `Keys` on the layout root and fed
-            // into `debugOverlay.currentKeys`.
-            command: ["python3", "-c", "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'subscribe\\n');[print(l,flush=True) for d in iter(lambda:s.recv(1024),b'') for l in d.decode().splitlines()]"]
-            stdout: SplitParser {
-                onRead: line => {
-                    if (line === "subscribed")
-                        return;
-                    if (line.startsWith("buttons:")) {
-                        debugOverlay.currentCombo = line.substring(8).trim();
-                    }
+            // Subscribe to the daemon's controller `buttons:` stream over a
+            // native Quickshell socket (SocketClient, #97). The keyboard half of
+            // the pane no longer comes from the daemon — the daemon stopped
+            // snooping the keyboard (Phase 2). Keyboard keys are captured
+            // QML-side from Wayland `Keys` on the layout root and fed into
+            // `debugOverlay.currentKeys`. Auto-reconnects on drop.
+            subscribe: true
+            onLineReceived: line => {
+                if (line === "subscribed")
+                    return;
+                if (line.startsWith("buttons:")) {
+                    debugOverlay.currentCombo = line.substring(8).trim();
                 }
-            }
-            onExited: {
-                if (debugOverlay.visible)
-                    reconnectDebug.start();
             }
         }
 
@@ -392,15 +387,6 @@ FocusScope {
         }
 
         Timer {
-            id: reconnectDebug
-            interval: 2000
-            onTriggered: {
-                if (debugOverlay.visible)
-                    debugSubscribe.running = true;
-            }
-        }
-
-        Timer {
             id: inputFadeTimer
             interval: 1500
             onTriggered: {
@@ -411,15 +397,14 @@ FocusScope {
 
         onVisibleChanged: {
             if (!visible) {
-                debugSubscribe.running = false;
-                reconnectDebug.running = false;
+                debugSubscribe.stop();
                 showingInput = false;
                 currentCombo = "";
                 currentKeys = "";
                 displayInput = "";
                 root._debugKeyNames = [];
             } else {
-                debugSubscribe.running = true;
+                debugSubscribe.start();
             }
         }
 

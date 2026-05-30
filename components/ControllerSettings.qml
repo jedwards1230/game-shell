@@ -13,7 +13,14 @@ FocusScope {
     property bool daemonGrabbed: false
 
     // --- Device Discovery ---
-
+    //
+    // NOTE: this is an evdev/`/proc/bus/input/devices` enumerator, NOT a daemon
+    // Unix-socket shim, so it was intentionally left as a `python3 -c` Process by
+    // the Phase 8 (#97) socket cutover. The daemon's `get-pads` IPC only reports
+    // the grabbed fleet ({id,index,name,grabbed}); this diagnostic page lists ALL
+    // controller-like input devices the system sees (incl. ungrabbed/virtual),
+    // with vendor/product/path/phys detail `get-pads` does not carry. Converting
+    // it to a socket call would change what the page shows. See followups.
     Process {
         id: scanControllers
         command: ["python3", "-c", `
@@ -58,44 +65,35 @@ except ImportError:
 
     // --- Daemon Status ---
 
-    Process {
+    SocketClient {
         id: daemonStatus
-        command: ["python3", "-c", "import socket,os; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock')); s.sendall(b'status\\n'); print(s.recv(64).decode().strip()); s.close()"]
-        stdout: SplitParser {
-            onRead: line => {
-                // Format: "connected:grabbed" or "disconnected:released"
-                let parts = line.split(":");
-                root.daemonConnected = parts[0] === "connected";
-                root.daemonGrabbed = parts.length > 1 && parts[1] === "grabbed";
-            }
+        onResponseReceived: line => {
+            // Format: "connected:grabbed" or "disconnected:released"
+            let parts = line.split(":");
+            root.daemonConnected = parts[0] === "connected";
+            root.daemonGrabbed = parts.length > 1 && parts[1] === "grabbed";
+            root.daemonRunning = true;
         }
-        onExited: (exitCode, exitStatus) => {
-            if (exitCode === 0) {
-                root.daemonRunning = true;
-            } else {
-                root.daemonRunning = false;
-                root.daemonConnected = false;
-                root.daemonGrabbed = false;
-            }
+        onRequestFailed: {
+            // Socket connect failed -> the daemon isn't reachable.
+            root.daemonRunning = false;
+            root.daemonConnected = false;
+            root.daemonGrabbed = false;
         }
     }
 
     // --- Grab / Release ---
 
-    Process {
+    SocketClient {
         id: grabCmd
-        command: ["python3", "-c", "import socket,os; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock')); s.sendall(b'grab\\n'); print(s.recv(64).decode().strip()); s.close()"]
-        onExited: {
-            daemonStatus.running = true;
-        }
+        onResponseReceived: response => daemonStatus.request("status")
+        onRequestFailed: daemonStatus.request("status")
     }
 
-    Process {
+    SocketClient {
         id: releaseCmd
-        command: ["python3", "-c", "import socket,os; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock')); s.sendall(b'release\\n'); print(s.recv(64).decode().strip()); s.close()"]
-        onExited: {
-            daemonStatus.running = true;
-        }
+        onResponseReceived: response => daemonStatus.request("status")
+        onRequestFailed: daemonStatus.request("status")
     }
 
     // --- Auto-refresh ---
@@ -107,19 +105,19 @@ except ImportError:
         repeat: true
         onTriggered: {
             scanControllers.running = true;
-            daemonStatus.running = true;
+            daemonStatus.request("status");
         }
     }
 
     Component.onCompleted: {
         scanControllers.running = true;
-        daemonStatus.running = true;
+        daemonStatus.request("status");
     }
 
     onVisibleChanged: {
         if (visible) {
             scanControllers.running = true;
-            daemonStatus.running = true;
+            daemonStatus.request("status");
         }
     }
 
@@ -172,14 +170,14 @@ except ImportError:
                         onClicked: {
                             refreshScope.forceActiveFocus();
                             scanControllers.running = true;
-                            daemonStatus.running = true;
+                            daemonStatus.request("status");
                         }
                     }
                 }
 
                 Keys.onReturnPressed: {
                     scanControllers.running = true;
-                    daemonStatus.running = true;
+                    daemonStatus.request("status");
                 }
             }
         }
@@ -323,9 +321,9 @@ except ImportError:
                         onClicked: {
                             grabScope.forceActiveFocus();
                             if (root.daemonGrabbed) {
-                                releaseCmd.running = true;
+                                releaseCmd.request("release");
                             } else {
-                                grabCmd.running = true;
+                                grabCmd.request("grab");
                             }
                         }
                     }
@@ -333,9 +331,9 @@ except ImportError:
 
                 Keys.onReturnPressed: {
                     if (root.daemonGrabbed) {
-                        releaseCmd.running = true;
+                        releaseCmd.request("release");
                     } else {
-                        grabCmd.running = true;
+                        grabCmd.request("grab");
                     }
                 }
             }

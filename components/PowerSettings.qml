@@ -14,11 +14,8 @@ FocusScope {
     // (Phase 3). Reboot/poweroff remain one-shot `systemctl` actions — they are
     // not system-state reads and have no daemon equivalent in scope.
     //
-    // Socket helper: read until the FIRST newline (the daemon keeps the
-    // connection open after replying). Mirrors the Phase 2 SettingsStore pattern.
-    function _ipc(cmd) {
-        return "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'" + cmd + "\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
-    }
+    // Suspend/CanSuspend go through the daemon over a native Quickshell socket
+    // (SocketClient, #97) — the python3 socket shim was retired in Phase 8.
 
     Process {
         id: powerOff
@@ -29,32 +26,28 @@ FocusScope {
         command: ["systemctl", "reboot"]
     }
     // logind Suspend (false = no interactive polkit prompt) via the daemon.
-    Process {
+    SocketClient {
         id: suspendCmd
-        command: ["python3", "-c", root._ipc("power-suspend")]
     }
     // Query logind CanSuspend so the Sleep button reflects availability.
-    Process {
+    SocketClient {
         id: canSuspendProc
-        command: ["python3", "-c", root._ipc("power-can-suspend")]
-        stdout: SplitParser {
-            onRead: line => {
-                let t = line.trim();
-                if (t === "yes")
-                    root.canSuspend = true;
-                else if (t === "no")
-                    root.canSuspend = false;
-                // "error" leaves the optimistic default untouched.
-            }
+        onResponseReceived: response => {
+            let t = response.trim();
+            if (t === "yes")
+                root.canSuspend = true;
+            else if (t === "no")
+                root.canSuspend = false;
+            // "error" leaves the optimistic default untouched.
         }
     }
 
-    Component.onCompleted: canSuspendProc.running = true
+    Component.onCompleted: canSuspendProc.request("power-can-suspend")
 
     onVisibleChanged: {
         if (visible) {
             root.confirmAction = "";
-            canSuspendProc.running = true;
+            canSuspendProc.request("power-can-suspend");
         }
     }
 
@@ -392,7 +385,7 @@ FocusScope {
     function executeAction() {
         switch (root.confirmAction) {
         case "suspend":
-            suspendCmd.running = true;
+            suspendCmd.request("power-suspend");
             break;
         case "restart":
             rebootCmd.running = true;

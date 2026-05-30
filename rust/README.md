@@ -26,8 +26,9 @@ shell's inline `python3` one-liners and into the daemon:
   `settings.json` (read-modify-write, compact JSON).
 - `record-launch` / `get-recents` — maintains the recents file.
 
-The QML side still opens the socket from a thin `python3` client but no longer
-parses `.desktop` files or hand-formats config JSON.
+The QML side opens the socket natively via `Quickshell.Io.Socket`
+(`components/SocketClient.qml`, #97) and no longer parses `.desktop` files or
+hand-formats config JSON; the old per-call `python3 -c` socket shims are gone.
 
 ## Layout
 

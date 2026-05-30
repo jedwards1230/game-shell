@@ -22,16 +22,10 @@ FocusScope {
 
     // === Power commands (copied from PowerSettings) ===
     // Suspend routes through the input daemon's logind-over-zbus backbone
-    // (Phase 3). Read until the FIRST newline — the daemon holds the socket
-    // open after replying (mirrors the SettingsStore Phase 2 pattern). Reboot/
+    // (Phase 3) over a native Quickshell socket (SocketClient, #97). Reboot/
     // poweroff stay one-shot `systemctl`; logout stays `hyprctl dispatch exit`.
-    function _ipc(cmd) {
-        return "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'" + cmd + "\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
-    }
-
-    Process {
+    SocketClient {
         id: suspendCmd
-        command: ["python3", "-c", root._ipc("power-suspend")]
     }
     Process {
         id: rebootCmd
@@ -85,7 +79,7 @@ FocusScope {
     function _activate(index) {
         switch (index) {
         case 0:
-            suspendCmd.running = true;
+            suspendCmd.request("power-suspend");
             break;
         case 1:
             rebootCmd.running = true;

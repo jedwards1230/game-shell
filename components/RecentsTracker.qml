@@ -23,7 +23,7 @@ Item {
     readonly property int maxEntries: 20
 
     function load() {
-        loadRecents.running = true;
+        loadRecents.request("get-recents");
     }
 
     function recordLaunch(app) {
@@ -32,49 +32,36 @@ Item {
             "exec": app.exec || "",
             "comment": app.comment || ""
         });
-        writer.command = ["python3", "-c", tracker._ipcArg("record-launch"), body];
-        writer.running = true;
+        // The JSON body is passed verbatim as the command argument (SocketClient
+        // appends it after a space, like the old `_ipcArg` argv form), so app
+        // names with quotes/spaces can't break the wire command.
+        writer.request("record-launch", body);
         reloadTimer.start();
     }
 
-    // One-shot Unix-socket request to the input daemon (respects GAME_SHELL_SOCK,
-    // falls back to the default per-UID path). The daemon keeps the connection
-    // open after replying, so read until the first newline (the response
-    // terminator) rather than until EOF, which would block until the timeout.
-    function _ipc(cmd) {
-        return "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'" + cmd + "\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
-    }
+    // Daemon IPC over a native Quickshell socket (SocketClient, #97) — the
+    // python3 socket shims were retired in Phase 8.
 
-    // Like _ipc, but the request body is sys.argv[1] (a JSON string), keeping
-    // arbitrary JSON out of the python source literal.
-    function _ipcArg(cmd) {
-        return "import socket,os,sys;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(('" + cmd + " '+sys.argv[1]+'\\n').encode());buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
-    }
-
-    Process {
+    SocketClient {
         id: loadRecents
-        command: ["python3", "-c", tracker._ipc("get-recents")]
-        stdout: SplitParser {
-            onRead: line => {
-                try {
-                    tracker.recentApps = JSON.parse(line);
-                } catch (e) {
-                    tracker.recentApps = [];
-                }
+        onResponseReceived: line => {
+            try {
+                tracker.recentApps = JSON.parse(line);
+            } catch (e) {
+                tracker.recentApps = [];
             }
         }
     }
 
-    Process {
+    SocketClient {
         id: writer
-        // command set dynamically in recordLaunch(); body passed via argv.
-        command: ["true"]
+        // command issued dynamically in recordLaunch(); body passed via request().
     }
 
     Timer {
         id: reloadTimer
         interval: 500
-        onTriggered: loadRecents.running = true
+        onTriggered: loadRecents.request("get-recents")
     }
 
     Component.onCompleted: load()
