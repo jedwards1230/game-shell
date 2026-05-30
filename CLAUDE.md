@@ -125,6 +125,12 @@ pip install evdev  # or: pip install -r input/requirements.txt
 
 Requires Linux with evdev and uinput access. Auto-discovers gamepad by vendor/product ID (defaults: Xbox controller `045e:028e`, configurable via `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT` env vars).
 
+### QA Screenshots
+
+Catalog of views/overlays/states to capture for visual QA (and how to reach each):
+
+@docs/qa-screenshot-views.md
+
 ## Design Constraints
 
 - **10-foot UI at 4K**: All font sizes and layout constants in Theme.qml are sized for couch-distance reading. Don't shrink them.
