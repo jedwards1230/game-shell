@@ -23,10 +23,20 @@ export GAME_SHELL_SOCK="/run/user/$(id -u)/game-shell-input.sock"
 # rollback (delete/rename the binary to fall back).
 if [ -x "$SHELL_DIR/bin/game-shell-input" ]; then
     "$SHELL_DIR/bin/game-shell-input" &
+    INPUT_PID=$!
+    # If the Rust daemon dies immediately (startup/config error), fall back to
+    # the Python daemon — otherwise the session would run with no input daemon
+    # at all, the most likely cutover failure mode.
+    sleep 1
+    if ! kill -0 "$INPUT_PID" 2>/dev/null; then
+        echo "game-shell-session: Rust daemon exited at startup; falling back to gamepad-input.py" >&2
+        python3 "$SHELL_DIR/input/gamepad-input.py" &
+        INPUT_PID=$!
+    fi
 else
     python3 "$SHELL_DIR/input/gamepad-input.py" &
+    INPUT_PID=$!
 fi
-INPUT_PID=$!
 
 cleanup() {
     kill "$INPUT_PID" 2>/dev/null

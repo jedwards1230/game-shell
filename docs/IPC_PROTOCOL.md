@@ -415,16 +415,16 @@ the QML.
 The **Sunshine** command (`sunshine-status`) is **stateless and cross-platform**
 — served directly by the daemon's IPC layer (no actor round-trip, like
 `list-apps`), since `reqwest` runs everywhere. It replaces the inline Sunshine
-HTTP polls in `components/StreamManager.qml`, `StreamCard.qml`, and
-`MoonlightSettings.qml`. The streamed Phase 4 events are documented under
+HTTP polls in `components/StreamManager.qml` and `StreamCard.qml`. The streamed
+Phase 4 events are documented under
 [Phase 4 Events](#phase-4-events).
 
-### Hyprland (`hyprland` crate)
+### Hyprland (direct IPC sockets)
 
 #### `hypr-active`
 
-Query the active window. Uses the crate's `Client::get_active_async` (no
-`hyprctl` shell-out).
+Query the active window. Sends `j/activewindow` to Hyprland's request socket
+(`.socket.sock`) — no `hyprctl` shell-out.
 
 **Response:** A compact single-line JSON **object** describing the active window,
 or `{}` when no window is focused (or on any IPC failure, e.g. the Hyprland
@@ -444,8 +444,8 @@ On a non-Linux build: `error:unsupported on this platform\n`.
 
 #### `hypr-clients`
 
-List all Hyprland clients, mirroring what `hyprctl clients -j` gave the QML. Uses
-the crate's `Clients::get_async` (no `hyprctl` shell-out).
+List all Hyprland clients, mirroring what `hyprctl clients -j` gave the QML.
+Sends `j/clients` to Hyprland's request socket (no `hyprctl` shell-out).
 
 **Response:** A compact single-line JSON **array** of client objects:
 

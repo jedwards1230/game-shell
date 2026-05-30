@@ -75,11 +75,11 @@ scripts/
 The daemon's `bt-*` (BlueZ/`bluer`), `net-*` (NetworkManager/`zbus`, read-only),
 and `power-*` (logind + UPower/`zbus`) IPC commands are the **D-Bus backbone**
 (Phase 3, #28). **Phase 4** adds Hyprland reads (`hypr-active`/`hypr-clients` +
-`hypr:activewindow`/`hypr:fullscreen` events via the `hyprland` crate, replacing
-the `hyprctl clients -j` shell-out and feeding `AppLifecycleManager.qml`) and
+`hypr:activewindow`/`hypr:fullscreen` events via direct Hyprland IPC sockets,
+replacing the `hyprctl clients -j` shell-out and feeding `AppLifecycleManager.qml`) and
 Sunshine session detection (`sunshine-status <host> <port>` via `reqwest`/rustls
 against Sunshine's self-signed `/serverinfo`, replacing the inline HTTP polls in
-`StreamManager.qml`/`StreamCard.qml`/`MoonlightSettings.qml`). These replace the
+`StreamManager.qml`/`StreamCard.qml`). These replace the
 QML shell-outs/HTTP polls that *read* system state. The Linux-only modules
 (D-Bus, Hyprland) are unverifiable on macOS/CI and need on-device verification on
 game-client-1; `sunshine-status` runs cross-platform but its live fetch needs a

@@ -29,6 +29,6 @@ pub mod network;
 #[cfg(target_os = "linux")]
 pub mod power;
 
-// Hyprland IPC socket via the `hyprland` crate (Linux-only).
+// Hyprland IPC over its Unix sockets directly (no crate; Linux-only).
 #[cfg(target_os = "linux")]
 pub mod hyprland;

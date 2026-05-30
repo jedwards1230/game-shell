@@ -43,7 +43,7 @@ parses `.desktop` files or hand-formats config JSON.
 | `bluetooth.rs` | **Linux-only.** BlueZ actor via `bluer` — scan/pair/connect/trust + `bt:*` events |
 | `network.rs` | **Linux-only.** NetworkManager **read** actor via `zbus` — connectivity / AP list / `net:*` events |
 | `power.rs` | **Linux-only.** logind suspend + UPower battery via `zbus` — `power:*` events |
-| `hyprland.rs` | **Linux-only.** Hyprland actor via `hyprland` crate — active-window/clients queries + `hypr:*` events |
+| `hyprland.rs` | **Linux-only.** Hyprland actor over direct IPC sockets (no crate) — active-window/clients queries + `hypr:*` events |
 | `health.rs` | Sunshine session detection via `reqwest`/rustls (cross-platform) — `sunshine-status` |
 | `ipc.rs` | Unix-socket server, `broadcast` event fan-out, D-Bus command routing |
 | `main.rs` | Runtime wiring + signals + D-Bus actor spawn |
@@ -79,13 +79,16 @@ daemon. See `docs/IPC_PROTOCOL.md` for the full command/event reference.
 Two more subsystems replace the remaining QML *reads*:
 
 - **Hyprland** (`hyprland.rs`): a `#[cfg(target_os = "linux")]` async actor (same
-  single-owner shape as Phase 3) over the `hyprland` crate. It answers
+  single-owner shape as Phase 3) speaking Hyprland's IPC sockets directly (no
+  crate — the `hyprland` 0.3.x crate hardcodes the legacy `/tmp/hypr` socket dir
+  and can't reach Hyprland >= 0.40; see the module docs). It answers
   `hypr-active` (active window `{class,title,address}`) and `hypr-clients`
-  (`hyprctl clients -j`-equivalent `{class,title,address,workspace}` array) via
-  the crate's async data getters, and streams `hypr:activewindow:<class>` /
-  `hypr:fullscreen:<0|1>` events from the async event listener. This replaces the
-  `hyprctl clients -j` shell-out in `components/HyprctlClients.qml` and feeds
-  `AppLifecycleManager.qml`. One-shot `hyprctl dispatch` *actions* stay in QML.
+  (`hyprctl clients -j`-equivalent `{class,title,address,workspace}` array) by
+  sending `j/activewindow` / `j/clients` to the request socket, and streams
+  `hypr:activewindow:<class>` / `hypr:fullscreen:<0|1>` events read from the
+  `.socket2.sock` event stream. This replaces the `hyprctl clients -j` shell-out
+  in `components/HyprctlClients.qml` and feeds `AppLifecycleManager.qml`. One-shot
+  `hyprctl dispatch` *actions* stay in QML.
 - **Sunshine** (`health.rs`): the `sunshine-status <host> <port>` pre-flight check
   the shell runs before a Moonlight stream. It's **stateless and cross-platform**
   (a plain `ipc.rs` handler, not a Linux-only actor) over `reqwest` with
@@ -93,7 +96,7 @@ Two more subsystems replace the remaining QML *reads*:
   The `/serverinfo` response **parser is a pure function unit-tested on macOS**;
   only the fetch needs the runtime. Returns
   `{online,paired,currentApp,httpsPort}`, replacing the inline Sunshine HTTP polls
-  in `StreamManager.qml` / `StreamCard.qml` / `MoonlightSettings.qml`.
+  in `StreamManager.qml` / `StreamCard.qml`.
 
 `hyprland.rs` is Linux-only (the Hyprland IPC socket); it's excluded from the
 macOS build and verifiable only on-device. `health.rs` runs everywhere, but its
@@ -117,14 +120,18 @@ cargo build --release # Linux only -> target/release/game-shell-input
 **Linux build deps:** the Phase 3 Bluetooth module uses `bluer`, which pulls in
 `libdbus-sys`, so a Linux build needs the D-Bus headers + pkg-config:
 `apt-get install libdbus-1-dev pkg-config` (Debian/CI) — on Arch / game-client-1
-these come with the core `dbus`/`base-devel`. `zbus` (network/power),
-`hyprland`, and `reqwest`/`rustls-tls` (health) are pure Rust and need nothing.
+these come with the core `dbus`/`base-devel`. `zbus` (network/power) and
+`reqwest`/`rustls-tls` (health) are pure Rust and need nothing; Hyprland IPC uses
+raw Unix sockets (no crate, no system deps).
 
-## Deploy (later, on game-client-1)
+## Deploy
 
 1. `cargo build --release`
 2. Install `target/release/game-shell-input` to `/opt/game-shell/bin/`
-3. Switch the launch line in `scripts/game-shell-session.sh` (see the comment there)
+
+No launch-line edit is needed: `scripts/game-shell-session.sh` auto-prefers the
+binary on the next session when it's present, and falls back to the Python daemon
+if the binary is absent or exits immediately at startup.
 
 Honors `GAME_SHELL_SOCK`, `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT` (exact-pin override),
 and `GAME_SHELL_GAMECONTROLLERDB` (fuller controller DB).

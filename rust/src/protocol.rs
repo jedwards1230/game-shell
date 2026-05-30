@@ -89,9 +89,9 @@ pub enum Command {
     /// Battery state as a compact JSON object (`{"present":false}` on a desktop).
     PowerBattery,
 
-    // --- Phase 4: Hyprland (hyprland crate) ---
+    // --- Phase 4: Hyprland (direct IPC sockets) ---
     /// Active window as a compact JSON object `{class,title,address}` (`{}` if
-    /// none). Replaces `Client::get_active_async`-style reads in QML.
+    /// none). Replaces the `hyprctl`-based active-window read in QML.
     HyprActive,
     /// All Hyprland clients as a compact JSON array (mirrors `hyprctl clients -j`:
     /// at least `class,title,address,workspace`). Replaces the QML
