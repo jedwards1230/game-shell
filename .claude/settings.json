@@ -1,6 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "enabledPlugins": {},
+  "enabledPlugins": {
+    "qml-quality@jedwards1230-plugins": true,
+    "rust-quality@jedwards1230-plugins": true
+  },
   "extraKnownMarketplaces": {
     "jedwards1230-plugins": {
       "source": {
