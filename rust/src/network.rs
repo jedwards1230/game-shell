@@ -168,6 +168,7 @@ fn connectivity_word(c: u32) -> &'static str {
 /// - `KEY_MGMT_802_1X`= 0x200 (enterprise)
 /// - `KEY_MGMT_SAE`   = 0x400 (WPA3 personal)
 /// - `KEY_MGMT_OWE`   = 0x800 / 0x1000 (enhanced open)
+///
 /// `rsn_flags` are WPA2/WPA3, `wpa_flags` are legacy WPA1; AP `flags` bit 0 is
 /// WEP/privacy. We pick the strongest indicated scheme.
 fn security_label(ap_flags: u32, wpa_flags: u32, rsn_flags: u32) -> &'static str {
@@ -407,16 +408,29 @@ async fn wifi_list_inner(conn: &Connection) -> Result<String> {
                 "inUse": in_use,
             });
 
-            match best.get(&ssid) {
-                Some(existing)
-                    if existing.get("signal").and_then(|v| v.as_i64()).unwrap_or(0) >= signal
-                        && !in_use =>
-                {
-                    // Keep the stronger entry, unless this one is the active AP.
+            // Dedup by SSID. The active (in-use) AP always wins so the UI keeps
+            // its `inUse:true` marker even if a same-SSID AP has a stronger
+            // signal; among non-active APs the stronger signal wins.
+            let replace = match best.get(&ssid) {
+                None => true,
+                Some(existing) => {
+                    let existing_in_use = existing
+                        .get("inUse")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let existing_signal =
+                        existing.get("signal").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if existing_in_use {
+                        false // never overwrite the active AP
+                    } else if in_use {
+                        true // a non-active entry yields to the active one
+                    } else {
+                        signal > existing_signal // both non-active: stronger wins
+                    }
                 }
-                _ => {
-                    best.insert(ssid, entry);
-                }
+            };
+            if replace {
+                best.insert(ssid, entry);
             }
         }
     }

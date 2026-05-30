@@ -142,16 +142,19 @@ FocusScope {
     Process {
         id: btScanOn
         command: ["python3", "-c", root._ipc("bt-scan-on")]
-        onStarted: {
-            root.scanning = true;
-        }
-        onExited: exitCode => {
-            // Scan runs in the daemon; results stream as bt:device events.
-            // Auto-stop after a fixed window to match the previous UX.
-            if (exitCode !== 0)
-                root.scanning = false;
-            else
-                scanStopTimer.restart();
+        // `python3` exits 0 even when the daemon replies `error:*`, so gate the
+        // scanning state on the parsed reply line, not the exit code. Results
+        // stream as bt:device events; auto-stop after a fixed window.
+        stdout: SplitParser {
+            onRead: line => {
+                if (line.trim() === "ok") {
+                    root.scanning = true;
+                    scanStopTimer.restart();
+                } else {
+                    root.scanning = false;
+                    root.statusMessage = "Bluetooth unavailable";
+                }
+            }
         }
     }
 
