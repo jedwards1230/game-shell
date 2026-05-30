@@ -11,8 +11,29 @@ Item {
     readonly property string streamingViewMode: SettingsStore.streamingViewMode
 
     // === Input Mode ===
-    // true when mouse/right-stick is driving focus, false for controller/D-pad
+    // true when mouse/right-stick is driving focus, false for controller/D-pad.
+    //
+    // Multi-source (#45): this UI flag is owned by QML, which observes its own
+    // Wayland pointer and key/gamepad-nav events directly — a physical K400
+    // mouse never reaches the daemon, so hover/move must flip mouse-mode WITHOUT
+    // any daemon round-trip. The daemon's `input-mode:*` event (InputManager)
+    // is now just ONE more source, covering only its right-stick->cursor case.
+    // Funnel writes through enterMouseMode()/exitMouseMode() so redundant sets
+    // don't emit spurious mouseModeChanged() (every consumer re-syncs focus on
+    // that signal).
     property bool mouseMode: false
+
+    // A real Wayland pointer event (hover/move/click) — switch to mouse mode.
+    function enterMouseMode() {
+        if (!mouseMode)
+            mouseMode = true;
+    }
+
+    // A key or gamepad-nav event — switch back to controller mode.
+    function exitMouseMode() {
+        if (mouseMode)
+            mouseMode = false;
+    }
 
     // === Controller Debug Overlay (persisted via SettingsStore) ===
     readonly property bool controllerDebug: SettingsStore.controllerDebug

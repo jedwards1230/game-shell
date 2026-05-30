@@ -105,10 +105,13 @@ Item {
                 else if (line === "combo:suspend-stream")
                     root.suspendStreamRequested();
                 else if (line === "input-mode:mouse") {
-                    Theme.mouseMode = true;
+                    // Daemon right-stick->cursor hint. Post-#45 this is just ONE
+                    // source for mouse-mode among QML's own pointer/key events;
+                    // route it through the same helper so it can't fight them.
+                    Theme.enterMouseMode();
                     root.inputModeChanged("mouse");
                 } else if (line === "input-mode:controller") {
-                    Theme.mouseMode = false;
+                    Theme.exitMouseMode();
                     root.inputModeChanged("controller");
                 } else if (line === "controller-wake") {
                     root.controllerWake();

@@ -44,22 +44,36 @@ FocusScope {
     onCurrentIndexChanged: _ensureVisible()
     onWidthChanged: _ensureVisible()
 
-    // Keyboard navigation (LTR: Left lowers index, Right raises it).
+    // Keyboard navigation (LTR: Left lowers index, Right raises it). Any nav
+    // key means controller/keyboard is driving — flip out of mouse-mode (#45),
+    // no daemon round-trip.
     Keys.onLeftPressed: {
+        Theme.exitMouseMode();
         if (currentIndex > 0)
             currentIndex--;
     }
     Keys.onRightPressed: {
+        Theme.exitMouseMode();
         if (currentIndex < _iconCount - 1)
             currentIndex++;
     }
-    Keys.onDownPressed: root.focusDownRequested()
-    Keys.onUpPressed: root.focusUpRequested()
+    Keys.onDownPressed: {
+        Theme.exitMouseMode();
+        root.focusDownRequested();
+    }
+    Keys.onUpPressed: {
+        Theme.exitMouseMode();
+        root.focusUpRequested();
+    }
     Keys.onEscapePressed: {
+        Theme.exitMouseMode();
         if (root.escapeRequestsSettings)
             root.settingsRequested();
     }
-    Keys.onReturnPressed: root._activate(currentIndex)
+    Keys.onReturnPressed: {
+        Theme.exitMouseMode();
+        root._activate(currentIndex);
+    }
 
     function _activate(index) {
         switch (index) {
@@ -188,6 +202,9 @@ FocusScope {
                     id: notifMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Real pointer events flip mouse-mode on (#45) — no daemon hop.
+                    onEntered: Theme.enterMouseMode()
+                    onPositionChanged: Theme.enterMouseMode()
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.notificationCenterRequested()
                 }
@@ -228,6 +245,9 @@ FocusScope {
                     id: settingsMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Real pointer events flip mouse-mode on (#45) — no daemon hop.
+                    onEntered: Theme.enterMouseMode()
+                    onPositionChanged: Theme.enterMouseMode()
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.settingsRequested()
                 }
@@ -260,6 +280,9 @@ FocusScope {
                     id: themeMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Real pointer events flip mouse-mode on (#45) — no daemon hop.
+                    onEntered: Theme.enterMouseMode()
+                    onPositionChanged: Theme.enterMouseMode()
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                         if (Theme.themeMode === "auto")
@@ -315,6 +338,9 @@ FocusScope {
                     id: networkMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Real pointer events flip mouse-mode on (#45) — no daemon hop.
+                    onEntered: Theme.enterMouseMode()
+                    onPositionChanged: Theme.enterMouseMode()
                 }
             }
 
@@ -353,6 +379,9 @@ FocusScope {
                     id: volumeMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Real pointer events flip mouse-mode on (#45) — no daemon hop.
+                    onEntered: Theme.enterMouseMode()
+                    onPositionChanged: Theme.enterMouseMode()
                 }
             }
 
@@ -391,6 +420,9 @@ FocusScope {
                     id: powerMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Real pointer events flip mouse-mode on (#45) — no daemon hop.
+                    onEntered: Theme.enterMouseMode()
+                    onPositionChanged: Theme.enterMouseMode()
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.powerRequested()
                 }

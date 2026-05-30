@@ -35,7 +35,14 @@ Item {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            // A real Wayland pointer event flips mouse-mode on directly — the
+            // K400 mouse never reaches the daemon, so there is no input-mode
+            // event for it (#45). Hover + movement both count as "the mouse is
+            // driving" so a stationary-then-wiggle motion is caught.
+            onEntered: Theme.enterMouseMode()
+            onPositionChanged: Theme.enterMouseMode()
             onClicked: {
+                Theme.enterMouseMode();
                 root.forceActiveFocus();
                 root.activated();
             }

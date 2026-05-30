@@ -37,7 +37,11 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
+        // Real pointer events flip mouse-mode directly (#45) — no daemon hop.
+        onEntered: Theme.enterMouseMode()
+        onPositionChanged: Theme.enterMouseMode()
         onClicked: {
+            Theme.enterMouseMode();
             root.forceActiveFocus();
             root.Keys.returnPressed(null);
         }
