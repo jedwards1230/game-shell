@@ -214,6 +214,66 @@ pub fn derive_wire_id(
     format!("vp:{vendor:04x}:{product:04x}:{path}")
 }
 
+/// Stable player-slot allocator for the gamepad fleet (#101).
+///
+/// Each connected physical pad gets a small stable player index (`0` = P1,
+/// `1` = P2, …). The allocator hands out the **lowest free index** on join and
+/// returns it to the free pool on leave, so a freed index is reused by the next
+/// connecting pad. This keeps P1 = P1 across a P2 reconnect: if P1 (slot 0) and
+/// P2 (slot 1) are connected and P2 unplugs+replugs, P1 keeps slot 0 and the
+/// reconnecting P2 takes the lowest free slot (0 is taken, so it gets 1 again).
+///
+/// Indices are allocated densely from 0 with no fixed upper bound; the caller
+/// (the fleet) is responsible for any cap on simultaneous players. The allocator
+/// is pure (no I/O) and unit-tested on every platform.
+#[derive(Debug, Default, Clone)]
+pub struct SlotAllocator {
+    /// Indices currently handed out.
+    used: HashSet<u8>,
+}
+
+impl SlotAllocator {
+    pub fn new() -> SlotAllocator {
+        SlotAllocator {
+            used: HashSet::new(),
+        }
+    }
+
+    /// Allocate and return the lowest free slot index, marking it used.
+    pub fn alloc(&mut self) -> u8 {
+        let mut i = 0u8;
+        while self.used.contains(&i) {
+            // u8 cannot realistically overflow here (player counts are tiny),
+            // but guard against it rather than wrapping silently.
+            i = i
+                .checked_add(1)
+                .expect("slot index overflow (too many pads)");
+        }
+        self.used.insert(i);
+        i
+    }
+
+    /// Return a slot index to the free pool. Idempotent: freeing an index that
+    /// isn't allocated is a no-op.
+    pub fn free(&mut self, idx: u8) {
+        self.used.remove(&idx);
+    }
+
+    /// True if `idx` is currently allocated.
+    pub fn is_used(&self, idx: u8) -> bool {
+        self.used.contains(&idx)
+    }
+
+    /// Number of slots currently allocated.
+    pub fn len(&self) -> usize {
+        self.used.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.used.is_empty()
+    }
+}
+
 /// Parse a `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT`-style override (supports `0x`
 /// hex, like Python's `int(x, 0)`). Returns `None` if unset/unparseable.
 pub fn parse_id_env(var: &str) -> Option<u16> {
@@ -232,7 +292,7 @@ pub fn parse_id_env(var: &str) -> Option<u16> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-pub use linux::{find_gamepad, GamepadHandle};
+pub use linux::{find_gamepad, find_gamepads, GamepadHandle};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -255,7 +315,8 @@ mod linux {
             .is_some_and(|keys| keys.contains(KeyCode::BTN_SOUTH))
     }
 
-    /// Find a gamepad. Selection order:
+    /// Find **all** connected gamepads (fleet discovery, Phase 4). Selection
+    /// gate per candidate:
     /// 1. If both `GAMEPAD_VENDOR` and `GAMEPAD_PRODUCT` are set -> exact match
     ///    (legacy operator pin). The pin is an explicit operator decision, so it
     ///    bypasses the DB gate.
@@ -272,7 +333,13 @@ mod linux {
     /// with a controller the bundled DB doesn't know can either pin it via
     /// `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT` or extend the DB via
     /// `GAME_SHELL_GAMECONTROLLERDB`.
-    pub fn find_gamepad(db: &ControllerDb, reg: &VirtualRegistry) -> Option<GamepadHandle> {
+    ///
+    /// Returns one handle per matching device, in ascending `/dev/input/eventN`
+    /// path order (deterministic). The fleet caller dedups against pads it
+    /// already owns by **device path** — an already-grabbed pad re-enumerates at
+    /// the same path but a fresh fd, so fd-ownership alone can't dedup the
+    /// physical pad; the path is the stable enumeration key.
+    pub fn find_gamepads(db: &ControllerDb, reg: &VirtualRegistry) -> Vec<GamepadHandle> {
         let pin_vendor = parse_id_env("GAMEPAD_VENDOR");
         let pin_product = parse_id_env("GAMEPAD_PRODUCT");
         let pinned = matches!((pin_vendor, pin_product), (Some(_), Some(_)));
@@ -281,6 +348,7 @@ mod linux {
         // Deterministic order (mirrors Python's sorted(list_devices())).
         devices.sort_by(|a, b| a.0.cmp(&b.0));
 
+        let mut handles = Vec::new();
         for (path, dev) in devices {
             if !has_btn_south(&dev) {
                 continue;
@@ -310,13 +378,14 @@ mod linux {
 
             if pinned {
                 if Some(vendor) == pin_vendor && Some(product) == pin_product {
-                    return Some(make_handle(dev, path));
+                    handles.push(make_handle(dev, path));
                 }
                 continue;
             }
 
             if db.is_known(vendor, product) {
-                return Some(make_handle(dev, path));
+                handles.push(make_handle(dev, path));
+                continue;
             }
             // Unknown vendor/product and not pinned: reject (foreign injector or
             // an unrecognized pad the operator must pin / teach to the DB).
@@ -326,7 +395,14 @@ mod linux {
                 dev.name().unwrap_or("unknown"),
             );
         }
-        None
+        handles
+    }
+
+    /// First matching gamepad (single-pad convenience over [`find_gamepads`]).
+    /// Retained for callers that only want one pad; the fleet uses the plural
+    /// form. Same DB-match-or-reject gate.
+    pub fn find_gamepad(db: &ControllerDb, reg: &VirtualRegistry) -> Option<GamepadHandle> {
+        find_gamepads(db, reg).into_iter().next()
     }
 
     fn make_handle(dev: Device, path: PathBuf) -> GamepadHandle {
@@ -488,5 +564,70 @@ mod tests {
         assert_eq!(parse_id_env("TEST_GP_UNSET_XYZ"), None);
         std::env::remove_var("TEST_GP_VENDOR_HEX");
         std::env::remove_var("TEST_GP_VENDOR_DEC");
+    }
+
+    #[test]
+    fn slot_allocator_hands_out_dense_indices_from_zero() {
+        let mut s = SlotAllocator::new();
+        assert!(s.is_empty());
+        assert_eq!(s.alloc(), 0);
+        assert_eq!(s.alloc(), 1);
+        assert_eq!(s.alloc(), 2);
+        assert_eq!(s.len(), 3);
+        assert!(s.is_used(0));
+        assert!(s.is_used(1));
+        assert!(s.is_used(2));
+        assert!(!s.is_used(3));
+    }
+
+    #[test]
+    fn slot_allocator_reuses_lowest_freed_index() {
+        // P1=0, P2=1, P3=2. Free P2 (slot 1); the next alloc must reuse 1, not 3.
+        let mut s = SlotAllocator::new();
+        assert_eq!(s.alloc(), 0);
+        assert_eq!(s.alloc(), 1);
+        assert_eq!(s.alloc(), 2);
+        s.free(1);
+        assert!(!s.is_used(1));
+        assert_eq!(s.alloc(), 1);
+        assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn slot_allocator_keeps_p1_stable_across_p2_reconnect() {
+        // The #101 invariant: P1 keeps slot 0 while P2 unplugs+replugs.
+        let mut s = SlotAllocator::new();
+        let p1 = s.alloc(); // 0
+        let p2 = s.alloc(); // 1
+        assert_eq!((p1, p2), (0, 1));
+        // P2 leaves.
+        s.free(p2);
+        assert!(s.is_used(0));
+        assert!(!s.is_used(1));
+        // P2 reconnects: slot 0 is still P1's, so the lowest free is 1 again.
+        let p2_again = s.alloc();
+        assert_eq!(p2_again, 1);
+        // P1 never moved.
+        assert!(s.is_used(0));
+    }
+
+    #[test]
+    fn slot_allocator_free_is_idempotent_and_order_independent() {
+        let mut s = SlotAllocator::new();
+        let a = s.alloc(); // 0
+        let b = s.alloc(); // 1
+        let c = s.alloc(); // 2
+        assert_eq!((a, b, c), (0, 1, 2));
+        // Free the middle then the lowest; allocation order is by index, not
+        // free order: next two allocs are 0 then 1.
+        s.free(b);
+        s.free(a);
+        // Freeing an already-free / never-allocated index is a no-op.
+        s.free(b);
+        s.free(99);
+        assert_eq!(s.alloc(), 0);
+        assert_eq!(s.alloc(), 1);
+        // 2 was never freed; next is 3.
+        assert_eq!(s.alloc(), 3);
     }
 }

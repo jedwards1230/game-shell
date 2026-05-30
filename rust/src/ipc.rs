@@ -239,6 +239,7 @@ async fn dispatch(control_tx: &mpsc::Sender<Control>, dbus: &DbusSenders, cmd: C
         }
         Command::CaptureNext => request(control_tx, Control::CaptureNext).await,
         Command::CaptureCancel => request(control_tx, Control::CaptureCancel).await,
+        Command::GetPads => request(control_tx, Control::GetPads).await,
         Command::Intent(name) => {
             request(control_tx, move |reply| Control::Intent { name, reply }).await
         }
@@ -425,6 +426,14 @@ mod tests {
                 Control::CaptureNext(r) => {
                     let _ = r.send(protocol::resp_captured("BTN_SOUTH"));
                 }
+                Control::GetPads(r) => {
+                    let _ = r.send(protocol::resp_pads(&[(
+                        "uniq:test".into(),
+                        0,
+                        "Test Pad".into(),
+                        true,
+                    )]));
+                }
                 Control::Intent { name, reply } => {
                     // Mirror the runtime: accept the closed vocabulary, reject
                     // anything else. The fake doesn't actually broadcast.
@@ -565,6 +574,12 @@ mod tests {
         assert_eq!(
             send_line(&mut s, "intent").await,
             "error:usage: intent <name>"
+        );
+
+        // get-pads round-trips the runtime and returns the fleet JSON array.
+        assert_eq!(
+            send_line(&mut s, "get-pads").await,
+            r#"[{"id":"uniq:test","index":0,"name":"Test Pad","grabbed":true}]"#
         );
         drop(s);
 

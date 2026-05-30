@@ -30,6 +30,9 @@ pub enum Control {
     /// `cancelled`).
     CaptureNext(Reply),
     CaptureCancel(Reply),
+    /// `get-pads`: reply with the gamepad fleet as a compact JSON array
+    /// (`[{id,index,name,grabbed}, …]`) in ascending player-index order.
+    GetPads(Reply),
     /// `intent <name>`: validate `<name>` against the closed vocabulary and, if
     /// valid, broadcast `intent:<name>` to all subscribers. Pure broadcast —
     /// touches no device. The reply is `ok` or `error:unknown intent '<name>'`.

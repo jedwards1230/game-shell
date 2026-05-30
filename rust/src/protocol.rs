@@ -28,6 +28,11 @@ pub enum Command {
     SetBindingUsage,
     CaptureNext,
     CaptureCancel,
+    /// `get-pads` — return the gamepad fleet as a compact JSON array, one object
+    /// per connected pad (`{id,index,name,grabbed}`). Stable player indices
+    /// (#101). Served by the input runtime (fleet state), so it round-trips the
+    /// control channel like `status`.
+    GetPads,
     /// `intent <name>` — inject a shell intent into the broadcast bus. `<name>`
     /// is validated against the closed vocabulary by the input runtime: a valid
     /// name re-broadcasts as `intent:<name>` and replies `ok`; an unknown name
@@ -183,6 +188,7 @@ impl Command {
             "get-bindings" => Command::GetBindings,
             "capture-next" => Command::CaptureNext,
             "capture-cancel" => Command::CaptureCancel,
+            "get-pads" => Command::GetPads,
             "list-apps" => Command::ListApps,
             "get-config" => Command::GetConfig,
             "get-recents" => Command::GetRecents,
@@ -303,6 +309,16 @@ impl Command {
 pub enum Event {
     ControllerWake,
     ControllerDisconnected,
+    /// A physical pad joined the fleet and was assigned a stable player slot
+    /// (#101). Payload is a compact JSON object `{id,index,name}`: `id` is the
+    /// stable wire id, `index` the player slot (0 = P1), `name` the device name.
+    /// Wire: `pad:connected:<json>`. Complements `controller-wake` (the
+    /// single-pad legacy signal still fires for the first pad).
+    PadConnected(String),
+    /// A physical pad left the fleet; its slot is freed for reuse. Payload is the
+    /// pad's stable wire id. Wire: `pad:disconnected:<id>`. Complements
+    /// `controller-disconnected`.
+    PadDisconnected(String),
     HomePress,
     ComboHomeHold,
     ComboEndSession,
@@ -371,6 +387,8 @@ impl fmt::Display for Event {
         match self {
             Event::ControllerWake => f.write_str("controller-wake"),
             Event::ControllerDisconnected => f.write_str("controller-disconnected"),
+            Event::PadConnected(json) => write!(f, "pad:connected:{json}"),
+            Event::PadDisconnected(id) => write!(f, "pad:disconnected:{id}"),
             Event::HomePress => f.write_str("home-press"),
             Event::ComboHomeHold => f.write_str("combo:home-hold"),
             Event::ComboEndSession => f.write_str("combo:end-session"),
@@ -526,6 +544,38 @@ pub fn resp_bindings(ordered: &[(String, String)]) -> String {
     serde_json::to_string(&serde_json::Value::Object(map)).expect("bindings serialize")
 }
 
+/// One pad's compact-JSON object `{id,index,name,grabbed}`. Shared shape for the
+/// `pad:connected:<json>` event body (sans `grabbed`) and the `get-pads` array
+/// elements. `grabbed` is omitted from the connect event (the slot is always
+/// grabbed at connect) and present in `get-pads` so the UI can show per-pad grab
+/// state.
+fn pad_value(id: &str, index: u8, name: &str, grabbed: Option<bool>) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), serde_json::Value::String(id.to_string()));
+    obj.insert("index".into(), serde_json::Value::Number(index.into()));
+    obj.insert("name".into(), serde_json::Value::String(name.to_string()));
+    if let Some(g) = grabbed {
+        obj.insert("grabbed".into(), serde_json::Value::Bool(g));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Compact single-line JSON object for a `pad:connected:<json>` event body.
+pub fn pad_connected_json(id: &str, index: u8, name: &str) -> String {
+    serde_json::to_string(&pad_value(id, index, name, None)).expect("pad serialize")
+}
+
+/// Compact single-line JSON array body for the `get-pads` reply. `pads` is
+/// `(id, index, name, grabbed)` per connected pad; the caller should pass them
+/// in ascending player-index order for a stable wire.
+pub fn resp_pads(pads: &[(String, u8, String, bool)]) -> String {
+    let arr: Vec<serde_json::Value> = pads
+        .iter()
+        .map(|(id, index, name, grabbed)| pad_value(id, *index, name, Some(*grabbed)))
+        .collect();
+    serde_json::to_string(&serde_json::Value::Array(arr)).expect("pads serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +589,8 @@ mod tests {
         assert_eq!(Command::parse("get-bindings"), Command::GetBindings);
         assert_eq!(Command::parse("capture-next"), Command::CaptureNext);
         assert_eq!(Command::parse("capture-cancel"), Command::CaptureCancel);
+        assert_eq!(Command::parse("get-pads"), Command::GetPads);
+        assert_eq!(Command::parse("  get-pads  "), Command::GetPads);
     }
 
     #[test]
@@ -932,6 +984,42 @@ mod tests {
             "error:usage: bt-connect <mac>"
         );
         assert_eq!(resp_bt_mac_usage("bt-pair"), "error:usage: bt-pair <mac>");
+    }
+
+    #[test]
+    fn pad_event_wire_strings() {
+        // `pad:connected:<json>` carries a compact `{id,index,name}` object.
+        assert_eq!(
+            Event::PadConnected(r#"{"id":"uniq:aa","index":0,"name":"Xbox"}"#.into()).to_string(),
+            r#"pad:connected:{"id":"uniq:aa","index":0,"name":"Xbox"}"#
+        );
+        // `pad:disconnected:<id>` carries the bare wire id.
+        assert_eq!(
+            Event::PadDisconnected("uniq:aa".into()).to_string(),
+            "pad:disconnected:uniq:aa"
+        );
+    }
+
+    #[test]
+    fn pad_connected_json_is_compact_object() {
+        assert_eq!(
+            pad_connected_json("uniq:aa:bb", 1, "DualSense"),
+            r#"{"id":"uniq:aa:bb","index":1,"name":"DualSense"}"#
+        );
+    }
+
+    #[test]
+    fn resp_pads_is_compact_array_with_grabbed() {
+        let pads = vec![
+            ("uniq:p1".to_string(), 0u8, "Xbox".to_string(), true),
+            ("uniq:p2".to_string(), 1u8, "PS5".to_string(), false),
+        ];
+        assert_eq!(
+            resp_pads(&pads),
+            r#"[{"id":"uniq:p1","index":0,"name":"Xbox","grabbed":true},{"id":"uniq:p2","index":1,"name":"PS5","grabbed":false}]"#
+        );
+        // Empty fleet -> empty array.
+        assert_eq!(resp_pads(&[]), "[]");
     }
 
     #[test]

@@ -43,6 +43,31 @@ Query current connection and grab state.
 
 Example: `connected:grabbed\n`
 
+> **Fleet aggregate (Phase 4).** With multi-pad support the daemon tracks a
+> *fleet* of pads. `status` is the fleet aggregate: `connected` if **any** pad is
+> present, `grabbed` if **any** pad is grabbed. For a single connected pad this
+> is byte-identical to the pre-fleet reply (`connected:grabbed` /
+> `disconnected:released`). Use `get-pads` for per-pad detail.
+
+### `get-pads`
+
+Return the connected gamepad fleet as a compact JSON array, one object per pad in
+ascending player-slot order. Each pad has a stable player `index` (#101) that
+survives another pad reconnecting (P1 stays slot 0 across a P2 unplug/replug).
+
+**Response:** Single-line JSON array of `{id,index,name,grabbed}` objects.
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Stable wire id (from evdev `uniq`/`phys`, else `vp:vendor:product:path`) — follows a physical pad across reconnects |
+| `index` | Player slot (0 = P1, 1 = P2, …); lowest free slot reused on reconnect |
+| `name` | Device display name |
+| `grabbed` | Whether the daemon currently holds the exclusive grab |
+
+Example: `[{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wireless Controller","grabbed":true}]\n`
+
+Empty fleet → `[]\n`.
+
 ### `subscribe`
 
 Register as an event subscriber. The daemon sends `subscribed\n`, then streams events (one per line) for the lifetime of the connection. The connection stays open — the server reads until EOF, then removes the subscriber.
@@ -540,8 +565,15 @@ Subscribers (registered via `subscribe`) receive these events as newline-termina
 
 | Event | Trigger |
 |-------|---------|
-| `controller-wake` | Gamepad discovered and grabbed on (re)connect |
-| `controller-disconnected` | Gamepad `OSError` during event read (USB disconnect) |
+| `controller-wake` | A gamepad was discovered and grabbed on (re)connect (fires per joining pad) |
+| `controller-disconnected` | A gamepad stream errored during event read (USB disconnect; fires per leaving pad) |
+| `pad:connected:<json>` | A pad joined the fleet and was assigned a player slot. Payload: compact `{id,index,name}` object (#101) |
+| `pad:disconnected:<id>` | A pad left the fleet; its slot is freed for reuse. Payload: the pad's stable wire `id` |
+
+`controller-wake` / `controller-disconnected` are the legacy single-pad signals
+and still fire for every join/leave (so existing QML wake handling is unchanged).
+The `pad:*` events carry the fleet-aware per-pad detail (stable id + player
+index). Example: `pad:connected:{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wireless Controller"}\n`.
 
 ### Home Button
 

@@ -37,9 +37,9 @@ parses `.desktop` files or hand-formats config JSON.
 | `config.rs` | Kernel codes, name tables, bindings, `settings.json` I/O |
 | `apps.rs` | `.desktop` scan/parse → `list-apps` JSON (cross-platform) |
 | `recents.rs` | Recents file I/O → `record-launch` / `get-recents` (cross-platform) |
-| `device.rs` | SDL GUID + DB matching, device/keyboard discovery |
+| `device.rs` | SDL GUID + DB matching, fleet discovery, fd-ownership registry, stable wire ids, player-slot allocator |
 | `state.rs` | Control messages + pure input logic (velocity, deadzone, combos) |
-| `input.rs` | Linux input runtime (evdev/uinput) — single state owner |
+| `input.rs` | Linux input runtime (evdev/uinput) — single state owner; multi-pad `Fleet` |
 | `bluetooth.rs` | **Linux-only.** BlueZ actor via `bluer` — scan/pair/connect/trust + `bt:*` events |
 | `network.rs` | **Linux-only.** NetworkManager **read** actor via `zbus` — connectivity / AP list / `net:*` events |
 | `power.rs` | **Linux-only.** logind suspend + UPower battery via `zbus` — `power:*` events |
@@ -50,6 +50,38 @@ parses `.desktop` files or hand-formats config JSON.
 
 `apps.rs`, `recents.rs`, and `health.rs`'s response parser are pure Rust —
 fully unit-tested on macOS.
+
+## Gamepad fleet (input-unification Phase 4, #98/#101)
+
+`input.rs` owns a `Fleet { pads: HashMap<RawFd, PadDevice>, slots: SlotAllocator }`.
+Each physical pad is a `PadDevice` keyed by its event-stream fd, carrying its own
+held buttons, stick calibration, per-pad timers, and a stable player slot. Shared
+output resources (the virtual uinput keyboard/mouse, the broadcast bus, the remap
+table, the capture state) live in a `Shared` struct borrowed by every per-pad
+method, so there is still a single state owner and no `Arc<Mutex>` across `.await`.
+
+- **Discovery** (`device::find_gamepads`) returns *all* DB-matched pads; the fleet
+  dedups against pads it already holds by **device path** (an already-grabbed pad
+  re-enumerates at the same path but a fresh fd, so fd-ownership alone can't dedup
+  the physical pad). Foreign injectors (ydotoold) are rejected by the
+  DB-match-or-reject gate; our own uinput devices are skipped by fd.
+- **Hot-join/leave + stable slots (#101):** join → lowest-free slot
+  (`SlotAllocator`) → grab → calibrate → `controller-wake` + `pad:connected`.
+  Leave → free slot (reused in connection order) → drop virtual pad →
+  `controller-disconnected` + `pad:disconnected`. P1 keeps slot 0 across a P2
+  reconnect. `SlotAllocator` is pure and unit-tested.
+- **Shared focus (shell mode):** combos / Home-hold are detected
+  **per-pad-complete** — a single pad must hold the whole key set, so two pads
+  each holding *half* a combo never trigger it. A fleet-level latch publishes
+  `combo:home-hold` once even when two pads hold Home simultaneously. For a
+  single connected pad this is byte-identical to the pre-fleet behavior.
+- **Wire compat:** `status` reports the fleet aggregate (`connected` = any pad,
+  `grabbed` = any pad) — identical to the old reply for one pad. `get-pads`
+  exposes per-pad `{id,index,name,grabbed}` for the UI.
+
+The per-pad `virtual_pad` / `battery` / `led_index` fields are reserved here and
+wired by the Phase 5 game presenter and the Phase 5.5 rumble/battery/LED
+ride-alongs.
 
 ## Phase 3 — D-Bus backbone (`bluetooth.rs` / `network.rs` / `power.rs`)
 
