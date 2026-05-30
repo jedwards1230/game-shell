@@ -182,6 +182,20 @@ mod linux {
             let id = dev.input_id();
             let (vendor, product) = (id.vendor(), id.product());
 
+            // Compute the SDL joystick GUID for diagnostics: an operator can
+            // copy it from the log straight into a `gamecontrollerdb.txt` entry
+            // to teach the daemon a controller it didn't recognize.
+            let guid = super::guid_to_string(&super::sdl_guid(
+                id.bus_type().0,
+                vendor,
+                product,
+                id.version(),
+            ));
+            tracing::debug!(
+                "gamepad candidate {} guid={guid} vendor={vendor:04x} product={product:04x}",
+                dev.name().unwrap_or("unknown"),
+            );
+
             if pinned {
                 if Some(vendor) == pin_vendor && Some(product) == pin_product {
                     return Some(make_handle(dev, path));

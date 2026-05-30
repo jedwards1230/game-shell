@@ -29,24 +29,34 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 const EV_KEY: u16 = config::EV_KEY;
-const EV_ABS: u16 = config::EV_ABS;
 const EV_REL: u16 = config::EV_REL;
 
 /// Messages posted back into the select loop by timer/reader tasks.
+///
+/// Each timer message carries a `gen` (generation) token. A timer task may
+/// already have sent its message into the channel by the time it is aborted
+/// (e.g. a hold fires the same instant the button is released); the handler
+/// ignores any message whose `gen` no longer matches the live generation for
+/// that timer slot, so a stale tick can't double-fire or mis-attribute to a
+/// later press.
 #[derive(Debug)]
 enum Internal {
     /// The given left-stick arrow key is repeating: emit up+down.
-    StickRepeat(u16),
+    StickRepeat {
+        axis: Axis,
+        key: u16,
+        generation: u64,
+    },
     /// 60 Hz mouse poll tick.
     MouseTick,
     /// Home button held past the threshold.
-    HomeHoldFired,
+    HomeHoldFired(u64),
     /// Home + B held past the threshold.
-    ComboEndSessionFired,
+    ComboEndSessionFired(u64),
     /// A routed keyboard key (e.g. Meta) held past the threshold.
-    RoutedHoldFired(&'static str),
+    RoutedHoldFired(&'static str, u64),
     /// A pending `capture-next` timed out.
-    CaptureTimeout,
+    CaptureTimeout(u64),
     /// A keyboard key event from a snooped (un-grabbed) keyboard.
     Kbd {
         code: u16,
@@ -73,11 +83,16 @@ struct Daemon {
     right_trigger_held: bool,
     input_mode: InputMode,
 
+    // Monotonic generation allocator for timer messages (see `Internal`).
+    gen_seq: u64,
+
     // Left stick
     stick_x_key: Option<u16>,
     stick_y_key: Option<u16>,
     stick_x_repeat: Option<JoinHandle<()>>,
     stick_y_repeat: Option<JoinHandle<()>>,
+    stick_x_gen: u64,
+    stick_y_gen: u64,
     stick_center_x: i32,
     stick_threshold_x: i32,
     stick_center_y: i32,
@@ -98,10 +113,13 @@ struct Daemon {
 
     // Hold/combo timers
     home_hold_task: Option<JoinHandle<()>>,
+    home_hold_gen: u64,
     combo_task: Option<JoinHandle<()>>,
+    combo_gen: u64,
     routed_hold_tasks: HashMap<&'static str, JoinHandle<()>>,
     routed_hold_fired: HashMap<&'static str, bool>,
     routed_chord_seen: HashMap<&'static str, bool>,
+    routed_hold_gen: HashMap<&'static str, u64>,
 
     // Keyboard snoop
     kbd_held_keys: BTreeSet<u16>,
@@ -110,6 +128,7 @@ struct Daemon {
     // Capture (keybinding reassignment)
     pending_capture: Option<Reply>,
     capture_timeout_task: Option<JoinHandle<()>>,
+    capture_gen: u64,
 }
 
 /// Entry point: build the daemon and run the event loop until `Shutdown`.
@@ -131,7 +150,11 @@ pub async fn run(mut control_rx: mpsc::Receiver<Control>, events: broadcast::Sen
     };
 
     let db = device::load_db();
-    info!("controller DB loaded: {} known models", db.len());
+    if db.is_empty() {
+        warn!("controller DB is empty; relying on the BTN_SOUTH fallback for discovery");
+    } else {
+        info!("controller DB loaded: {} known models", db.len());
+    }
 
     let mut d = Daemon {
         events,
@@ -147,10 +170,13 @@ pub async fn run(mut control_rx: mpsc::Receiver<Control>, events: broadcast::Sen
         left_trigger_held: false,
         right_trigger_held: false,
         input_mode: InputMode::Controller,
+        gen_seq: 0,
         stick_x_key: None,
         stick_y_key: None,
         stick_x_repeat: None,
         stick_y_repeat: None,
+        stick_x_gen: 0,
+        stick_y_gen: 0,
         stick_center_x: 0,
         stick_threshold_x: 0,
         stick_center_y: 0,
@@ -167,14 +193,18 @@ pub async fn run(mut control_rx: mpsc::Receiver<Control>, events: broadcast::Sen
         rstick_y_dir: None,
         mouse_task: None,
         home_hold_task: None,
+        home_hold_gen: 0,
         combo_task: None,
+        combo_gen: 0,
         routed_hold_tasks: HashMap::new(),
         routed_hold_fired: HashMap::new(),
         routed_chord_seen: HashMap::new(),
+        routed_hold_gen: HashMap::new(),
         kbd_held_keys: BTreeSet::new(),
         kbd_log_enabled: false,
         pending_capture: None,
         capture_timeout_task: None,
+        capture_gen: 0,
     };
 
     // Read-only keyboard snoop for the debug overlay.
@@ -437,6 +467,14 @@ impl Daemon {
         }
     }
 
+    // --- generation tokens ------------------------------------------------
+
+    /// Allocate the next monotonic generation token for a timer.
+    fn next_generation(&mut self) -> u64 {
+        self.gen_seq += 1;
+        self.gen_seq
+    }
+
     // --- capture ----------------------------------------------------------
 
     fn arm_capture(&mut self, reply: Reply) {
@@ -447,11 +485,13 @@ impl Daemon {
         if let Some(t) = self.capture_timeout_task.take() {
             t.abort();
         }
+        let generation = self.next_generation();
+        self.capture_gen = generation;
         self.pending_capture = Some(reply);
         let tx = self.internal_tx.clone();
         self.capture_timeout_task = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(config::CAPTURE_TIMEOUT_SECS)).await;
-            let _ = tx.send(Internal::CaptureTimeout).await;
+            let _ = tx.send(Internal::CaptureTimeout(generation)).await;
         }));
     }
 
@@ -462,6 +502,8 @@ impl Daemon {
         if let Some(t) = self.capture_timeout_task.take() {
             t.abort();
         }
+        // Invalidate any already-queued timeout from the resolved capture.
+        self.capture_gen = self.next_generation();
     }
 
     fn cancel_capture(&mut self) {
@@ -471,6 +513,7 @@ impl Daemon {
         if let Some(t) = self.capture_timeout_task.take() {
             t.abort();
         }
+        self.capture_gen = self.next_generation();
     }
 
     // --- grab lifecycle ---------------------------------------------------
@@ -609,9 +652,19 @@ impl Daemon {
 
     fn handle_internal(&mut self, internal: Internal) {
         match internal {
-            Internal::StickRepeat(key) => {
-                // Ignore stale ticks from a repeat task we have since replaced.
-                if self.stick_x_key == Some(key) || self.stick_y_key == Some(key) {
+            Internal::StickRepeat {
+                axis,
+                key,
+                generation,
+            } => {
+                // Ignore stale ticks: a tick whose generation no longer matches
+                // the axis's live repeat (e.g. the stick re-deflected the same
+                // direction) would otherwise repeat without the initial delay.
+                let (live_gen, live_key) = match axis {
+                    Axis::X => (self.stick_x_gen, self.stick_x_key),
+                    Axis::Y => (self.stick_y_gen, self.stick_y_key),
+                };
+                if generation == live_gen && live_key == Some(key) {
                     self.emit_key(key, 0);
                     self.emit_key(key, 1);
                 }
@@ -637,24 +690,36 @@ impl Daemon {
                 );
                 self.emit_mouse_move(dx, dy);
             }
-            Internal::HomeHoldFired => {
+            Internal::HomeHoldFired(generation) => {
+                if generation != self.home_hold_gen {
+                    return; // stale: the button was already released/re-pressed
+                }
                 self.home_hold_task = None;
                 info!("Home hold detected");
                 self.publish(Event::ComboHomeHold);
             }
-            Internal::ComboEndSessionFired => {
+            Internal::ComboEndSessionFired(generation) => {
+                if generation != self.combo_gen {
+                    return; // stale: a prior combo timer that was cancelled
+                }
                 self.combo_task = None;
                 if state::subset_held(&config::COMBO_KEYS, &self.held_keys) {
                     info!("End-session combo detected");
                     self.publish(Event::ComboEndSession);
                 }
             }
-            Internal::RoutedHoldFired(name) => {
+            Internal::RoutedHoldFired(name, generation) => {
+                if self.routed_hold_gen.get(name) != Some(&generation) {
+                    return; // stale: a prior routed-hold that was released/replaced
+                }
                 self.routed_hold_fired.insert(name, true);
                 info!("Routed {name} hold detected");
                 self.publish(Event::ComboHomeHold);
             }
-            Internal::CaptureTimeout => {
+            Internal::CaptureTimeout(generation) => {
+                if generation != self.capture_gen {
+                    return; // stale: the capture was already resolved/cancelled
+                }
                 self.capture_timeout_task = None;
                 if let Some(r) = self.pending_capture.take() {
                     let _ = r.send(resp_timeout());
@@ -716,6 +781,9 @@ impl Daemon {
                 } else if value == 0 {
                     if let Some(t) = self.home_hold_task.take() {
                         t.abort();
+                        // Invalidate a possibly-queued HomeHoldFired so the tap
+                        // doesn't also produce combo:home-hold.
+                        self.home_hold_gen = self.next_generation();
                         self.publish(Event::HomePress);
                     }
                 }
@@ -921,11 +989,24 @@ impl Daemon {
 
     fn start_stick_repeat(&mut self, axis: Axis, key: u16) {
         self.cancel_stick_repeat(axis);
+        let generation = self.next_generation();
+        match axis {
+            Axis::X => self.stick_x_gen = generation,
+            Axis::Y => self.stick_y_gen = generation,
+        }
         let tx = self.internal_tx.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(config::STICK_INITIAL_DELAY_MS)).await;
             loop {
-                if tx.send(Internal::StickRepeat(key)).await.is_err() {
+                if tx
+                    .send(Internal::StickRepeat {
+                        axis,
+                        key,
+                        generation,
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(config::STICK_REPEAT_INTERVAL_MS)).await;
@@ -947,12 +1028,14 @@ impl Daemon {
     fn cancel_stick_repeat_x(&mut self) {
         if let Some(t) = self.stick_x_repeat.take() {
             t.abort();
+            self.stick_x_gen = self.next_generation();
         }
     }
 
     fn cancel_stick_repeat_y(&mut self) {
         if let Some(t) = self.stick_y_repeat.take() {
             t.abort();
+            self.stick_y_gen = self.next_generation();
         }
     }
 
@@ -960,10 +1043,12 @@ impl Daemon {
 
     fn check_combo_start(&mut self) {
         if state::subset_held(&config::COMBO_KEYS, &self.held_keys) && self.combo_task.is_none() {
+            let generation = self.next_generation();
+            self.combo_gen = generation;
             let tx = self.internal_tx.clone();
             self.combo_task = Some(tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs_f64(config::COMBO_HOLD_SECS)).await;
-                let _ = tx.send(Internal::ComboEndSessionFired).await;
+                let _ = tx.send(Internal::ComboEndSessionFired(generation)).await;
             }));
         }
     }
@@ -972,6 +1057,7 @@ impl Daemon {
         if self.combo_task.is_some() && !state::subset_held(&config::COMBO_KEYS, &self.held_keys) {
             if let Some(t) = self.combo_task.take() {
                 t.abort();
+                self.combo_gen = self.next_generation();
             }
         }
     }
@@ -979,6 +1065,7 @@ impl Daemon {
     fn cancel_combo_unconditional(&mut self) {
         if let Some(t) = self.combo_task.take() {
             t.abort();
+            self.combo_gen = self.next_generation();
         }
     }
 
@@ -1005,10 +1092,12 @@ impl Daemon {
         if let Some(t) = self.home_hold_task.take() {
             t.abort();
         }
+        let generation = self.next_generation();
+        self.home_hold_gen = generation;
         let tx = self.internal_tx.clone();
         self.home_hold_task = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs_f64(config::HOME_HOLD_SECS)).await;
-            let _ = tx.send(Internal::HomeHoldFired).await;
+            let _ = tx.send(Internal::HomeHoldFired(generation)).await;
         }));
     }
 
@@ -1063,10 +1152,12 @@ impl Daemon {
         self.routed_chord_seen.insert(name, false);
         // ROUTED_HOME_KEYS is currently just {"meta"}.
         if name == "meta" {
+            let generation = self.next_generation();
+            self.routed_hold_gen.insert(name, generation);
             let tx = self.internal_tx.clone();
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs_f64(config::HOME_HOLD_SECS)).await;
-                let _ = tx.send(Internal::RoutedHoldFired(name)).await;
+                let _ = tx.send(Internal::RoutedHoldFired(name, generation)).await;
             });
             self.routed_hold_tasks.insert(name, handle);
         }
@@ -1076,6 +1167,9 @@ impl Daemon {
         if let Some(task) = self.routed_hold_tasks.remove(name) {
             task.abort();
         }
+        // Invalidate a possibly-queued RoutedHoldFired for this key.
+        let generation = self.next_generation();
+        self.routed_hold_gen.insert(name, generation);
         let fired = self.routed_hold_fired.remove(name).unwrap_or(false);
         let chord = self.routed_chord_seen.remove(name).unwrap_or(false);
         if name == "meta" && !fired && !chord {
@@ -1085,7 +1179,7 @@ impl Daemon {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Axis {
     X,
     Y,

@@ -18,10 +18,9 @@ use std::path::{Path, PathBuf};
 // this module never depends on the (Linux-only) evdev crate.
 // ---------------------------------------------------------------------------
 
-// EV types
+// EV types (EV_ABS is matched via evdev's typed `EventType::ABSOLUTE`).
 pub const EV_KEY: u16 = 0x01;
 pub const EV_REL: u16 = 0x02;
-pub const EV_ABS: u16 = 0x03;
 
 // Gamepad buttons
 pub const BTN_SOUTH: u16 = 0x130; // BTN_A
