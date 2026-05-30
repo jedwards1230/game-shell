@@ -1,0 +1,69 @@
+# Rust CI for the game-shell input daemon (rust/).
+#
+# Builds, formats, lints, and tests the Rust crate on a Linux runner — the only
+# place the evdev/uinput code compiles (it is excluded on non-Linux dev hosts).
+# Scoped to rust/** so QML-only PRs don't trigger it.
+
+name: Rust
+
+run-name: "Rust CI — ${{ github.event_name }} on ${{ github.ref_name }} by @${{ github.actor }}"
+
+on:
+  push:
+    branches: [main]
+    paths: ['rust/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', '.github/workflows/rust.yml']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Format check
+        id: fmt
+        run: cargo fmt --check
+
+      - name: Clippy
+        id: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        id: build
+        run: cargo build --release
+
+      - name: Test
+        id: test
+        run: cargo test
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Rust CI — \`rust/\`"
+            echo ""
+            echo "| Step | Result |"
+            echo "|------|--------|"
+            echo "| Format | ${{ steps.fmt.outcome }} |"
+            echo "| Clippy | ${{ steps.clippy.outcome }} |"
+            echo "| Build (release) | ${{ steps.build.outcome }} |"
+            echo "| Test | ${{ steps.test.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

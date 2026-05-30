@@ -1,0 +1,29 @@
+[package]
+name = "game-shell-input"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0"
+description = "game-shell input daemon: grabs a gamepad via EVIOCGRAB and emits keyboard/mouse via uinput, with a Unix-socket IPC protocol"
+
+[[bin]]
+name = "game-shell-input"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+
+# evdev/uinput are Linux kernel interfaces. Keep them off non-Linux hosts so
+# the pure-logic modules (protocol, config, device GUID math) still compile and
+# `cargo test` runs on a macOS/dev box. The full binary only links on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { version = "0.13", features = ["tokio"] }

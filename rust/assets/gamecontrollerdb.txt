@@ -1,0 +1,41 @@
+# Baseline controller database for game-shell-input (SDL_GameControllerDB format).
+#
+# Only the GUID (field 0) is consumed: the daemon extracts vendor/product from
+# it to recognize known controllers. Mapping fields are ignored — the daemon
+# reads raw evdev codes directly, it does not remap per-controller layouts.
+#
+# This is a small baseline of common pads. Unknown controllers still work: any
+# device exposing BTN_SOUTH is grabbed as a fallback. To recognize more models,
+# point GAME_SHELL_GAMECONTROLLERDB at a full upstream copy:
+#   https://github.com/mdqinc/SDL_GameControllerDB/raw/master/gamecontrollerdb.txt
+#
+# Format per line: <32-hex-char guid>,<name>,<mappings...>
+# GUID byte layout: bus(LE16) crc(LE16) vendor(LE16) 0000 product(LE16) 0000 version(LE16) 0000
+
+# --- Microsoft Xbox ---
+030000005e0400008e02000010010000,Xbox 360 Controller,platform:Linux,
+030000005e040000ea02000000000000,Xbox One Controller,platform:Linux,
+030000005e040000fd02000000000000,Xbox One S Controller,platform:Linux,
+030000005e040000120b000000000000,Xbox Series Controller,platform:Linux,
+
+# --- Sony PlayStation ---
+030000004c050000680200000000000a,PS3 Controller,platform:Linux,
+030000004c050000c405000000000000,PS4 Controller (v1),platform:Linux,
+030000004c050000cc09000000000000,PS4 Controller (v2),platform:Linux,
+030000004c050000e60c000000000000,DualSense PS5 Controller,platform:Linux,
+030000004c050000f20d000000000000,DualSense Edge Controller,platform:Linux,
+
+# --- Nintendo Switch ---
+030000007e0500000920000000000000,Switch Pro Controller,platform:Linux,
+030000007e0500000620000000000000,Joy-Con (L),platform:Linux,
+030000007e0500000720000000000000,Joy-Con (R),platform:Linux,
+
+# --- Valve ---
+0300000028de00004211000000000000,Steam Controller,platform:Linux,
+
+# --- Logitech (DirectInput mode) ---
+030000006d04000016c2000000000000,Logitech F310,platform:Linux,
+030000006d04000019c2000000000000,Logitech F710,platform:Linux,
+
+# --- 8BitDo ---
+03000000c82d00000660000000000000,8BitDo Pro 2,platform:Linux,
