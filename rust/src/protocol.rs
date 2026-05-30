@@ -29,8 +29,40 @@ pub enum Command {
     CaptureNext,
     CaptureCancel,
     KbdLog(bool),
+    /// Scan installed `.desktop` apps; reply is a compact JSON array.
+    /// Stateless (no input-runtime round-trip).
+    ListApps,
+    /// Return the full settings document as a compact JSON object.
+    GetConfig,
+    /// Merge a compact-JSON object of settings updates (read-modify-write,
+    /// preserving foreign keys). The body is the raw JSON text after the
+    /// command word.
+    SetConfig(String),
+    /// `set-config` with a missing/empty body.
+    SetConfigUsage,
+    /// Record an app launch into recents.json. The body is the raw JSON text
+    /// (a `{name,exec,comment}` object) after the command word.
+    RecordLaunch(String),
+    /// `record-launch` with a missing/empty body.
+    RecordLaunchUsage,
+    /// Return recent launches as a compact JSON array.
+    GetRecents,
     /// Anything unrecognized -> the daemon replies `unknown`.
     Unknown,
+}
+
+/// If `cmd` is `word` (exact) or `word` followed by whitespace, return the
+/// trimmed remainder (the body). `Some("")` means the bare command with no body;
+/// `None` means `cmd` isn't this command at all (e.g. `set-configX`).
+fn command_body<'a>(cmd: &'a str, word: &str) -> Option<&'a str> {
+    let rest = cmd.strip_prefix(word)?;
+    if rest.is_empty() {
+        Some("")
+    } else if rest.starts_with(char::is_whitespace) {
+        Some(rest.trim())
+    } else {
+        None
+    }
 }
 
 impl Command {
@@ -48,7 +80,29 @@ impl Command {
             "capture-cancel" => Command::CaptureCancel,
             "kbd-log on" => Command::KbdLog(true),
             "kbd-log off" => Command::KbdLog(false),
+            "list-apps" => Command::ListApps,
+            "get-config" => Command::GetConfig,
+            "get-recents" => Command::GetRecents,
             _ => {
+                // `set-config <json>` / `record-launch <json>`: the rest of the
+                // line is a compact single-line JSON body. The command word must
+                // be followed by whitespace (or be bare); a bare command with no
+                // body is a usage error. `command_body` enforces the word
+                // boundary so e.g. `set-configX` is not mistaken for set-config.
+                if let Some(body) = command_body(cmd, "set-config") {
+                    return if body.is_empty() {
+                        Command::SetConfigUsage
+                    } else {
+                        Command::SetConfig(body.to_string())
+                    };
+                }
+                if let Some(body) = command_body(cmd, "record-launch") {
+                    return if body.is_empty() {
+                        Command::RecordLaunchUsage
+                    } else {
+                        Command::RecordLaunch(body.to_string())
+                    };
+                }
                 // Python keys `set-binding` off the `"set-binding "` prefix
                 // (with trailing space), so a bare `set-binding` is `unknown`.
                 if let Some(rest) = cmd.strip_prefix("set-binding ") {
@@ -171,6 +225,19 @@ pub fn resp_captured(button_name: &str) -> String {
     format!("captured:{button_name}")
 }
 
+pub fn resp_set_config_usage() -> String {
+    "error:usage: set-config <json-object>".to_string()
+}
+
+pub fn resp_record_launch_usage() -> String {
+    "error:usage: record-launch <json-object>".to_string()
+}
+
+/// Generic error reply for a malformed config/recents body.
+pub fn resp_error(msg: &str) -> String {
+    format!("error:{msg}")
+}
+
 pub fn resp_timeout() -> String {
     "timeout".to_string()
 }
@@ -260,6 +327,55 @@ mod tests {
         assert_eq!(Command::parse("frobnicate"), Command::Unknown);
         assert_eq!(Command::parse("kbd-log maybe"), Command::Unknown);
         assert_eq!(Command::parse(""), Command::Unknown);
+    }
+
+    #[test]
+    fn parses_phase2_simple_commands() {
+        assert_eq!(Command::parse("list-apps"), Command::ListApps);
+        assert_eq!(Command::parse("get-config"), Command::GetConfig);
+        assert_eq!(Command::parse("get-recents"), Command::GetRecents);
+        assert_eq!(Command::parse("  list-apps  "), Command::ListApps);
+    }
+
+    #[test]
+    fn parses_set_config_body() {
+        assert_eq!(
+            Command::parse(r#"set-config {"themeMode":"dark"}"#),
+            Command::SetConfig(r#"{"themeMode":"dark"}"#.into())
+        );
+        // Body is trimmed of surrounding whitespace.
+        assert_eq!(
+            Command::parse("set-config   {\"a\":1}  "),
+            Command::SetConfig(r#"{"a":1}"#.into())
+        );
+        // Bare command (no body) -> usage.
+        assert_eq!(Command::parse("set-config"), Command::SetConfigUsage);
+        assert_eq!(Command::parse("set-config   "), Command::SetConfigUsage);
+        // Word boundary: `set-configX` is NOT set-config.
+        assert_eq!(Command::parse("set-configX"), Command::Unknown);
+    }
+
+    #[test]
+    fn parses_record_launch_body() {
+        assert_eq!(
+            Command::parse(r#"record-launch {"name":"Firefox","exec":"firefox"}"#),
+            Command::RecordLaunch(r#"{"name":"Firefox","exec":"firefox"}"#.into())
+        );
+        assert_eq!(Command::parse("record-launch"), Command::RecordLaunchUsage);
+        assert_eq!(Command::parse("record-launchX"), Command::Unknown);
+    }
+
+    #[test]
+    fn phase2_usage_strings() {
+        assert_eq!(
+            resp_set_config_usage(),
+            "error:usage: set-config <json-object>"
+        );
+        assert_eq!(
+            resp_record_launch_usage(),
+            "error:usage: record-launch <json-object>"
+        );
+        assert_eq!(resp_error("bad body"), "error:bad body");
     }
 
     #[test]

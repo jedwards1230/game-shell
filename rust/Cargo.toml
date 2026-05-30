@@ -16,6 +16,12 @@ tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# Pure-Rust .desktop parser (cross-platform): drives app discovery (apps.rs).
+# Deliberately NOT Linux-gated so the parse/filter logic unit-tests on macOS.
+# default-features = false drops the optional `gettext` feature (and its C
+# gettext-rs dependency) — we scan with empty locales, so no translation is
+# needed and CI/macOS stay free of a system gettext requirement.
+freedesktop-desktop-entry = { version = "0.8", default-features = false }
 anyhow = "1"
 thiserror = "1"
 tracing = "0.1"

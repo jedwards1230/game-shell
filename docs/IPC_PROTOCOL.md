@@ -14,6 +14,8 @@ The gamepad input daemon (`input/gamepad-input.py`) communicates with QML compon
 
 The daemon removes any existing socket file on startup and creates a new one. Clients connect, send one command per line, and read the response. The `subscribe` command is the exception — it holds the connection open and streams events.
 
+Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `list-apps`, `get-config`, `set-config`, `record-launch`, and `get-recents`. JSON only ever appears as such a body — never as the framing itself.
+
 ## Client-to-Daemon Commands
 
 ### `grab`
@@ -87,6 +89,92 @@ Wait for the next remappable button press on the gamepad (10-second timeout). If
 Cancel a pending `capture-next` without waiting for timeout.
 
 **Response:** `ok\n`
+
+### `list-apps`
+
+Scan installed XDG `.desktop` entries and return the launchable applications.
+Stateless — served directly by the daemon's IPC layer (no input-runtime
+round-trip) via the cross-platform `freedesktop-desktop-entry` parser.
+
+Scans `/usr/share/applications` then `~/.local/share/applications` (in that
+order). Skips entries with `NoDisplay=true`, `Hidden=true`, `Type != Application`,
+or an empty `Name`. De-duplicates by `Name` (first occurrence wins, in
+directory-then-filename order) and sorts the result by `name` case-insensitively.
+The `Exec` field has the freedesktop field codes `%u %U %f %F %i %c %k` stripped
+and is trimmed.
+
+**Response:** A compact single-line JSON **array** of app objects:
+
+```json
+[{"name":"Firefox","exec":"firefox","icon":"firefox","comment":"Browse the web","wmClass":"firefox"}]
+```
+
+Each object has `name`, `exec`, `icon`, `comment`, `wmClass` (all strings;
+missing optional fields are `""`). An empty result is `[]`.
+
+### `get-config`
+
+Return the full settings document (`~/.config/game-shell/settings.json`).
+Stateless. A missing or unparseable file yields `{}`.
+
+**Response:** The settings document as a compact single-line JSON **object**:
+
+```json
+{"themeMode":"dark","streamingViewMode":"servers","keyBindings":{"select":"BTN_SOUTH"}}
+```
+
+### `set-config <json-object>`
+
+Merge a compact single-line JSON object of settings updates into
+`settings.json` (read-modify-write). The daemon is the sole writer of
+`settings.json`; foreign keys not present in the body are preserved untouched
+(notably the daemon-owned `keyBindings`). A key whose value is JSON `null` is
+**removed** from the document (used to drop the legacy `moonlightViewMode` key).
+Stateless. Written single-line compact JSON.
+
+**Response:**
+
+| Condition | Response |
+|-----------|----------|
+| Success | The new document as compact single-line JSON (same shape as `get-config`) |
+| Missing body | `error:usage: set-config <json-object>\n` |
+| Body isn't valid JSON | `error:invalid JSON: <detail>\n` |
+| Body is valid JSON but not an object | `error:set-config body must be a JSON object\n` |
+| Write failed | `error:set-config failed: <detail>\n` |
+
+Example request: `set-config {"themeMode":"dark","controllerDebug":false,"moonlightViewMode":null}\n`
+
+### `record-launch <json-object>`
+
+Record an app launch into the recents file
+(`~/.local/share/game-shell/recents.json`). The body is a compact single-line
+JSON object `{"name":...,"exec":...,"comment":...}` (all optional, default
+`""`). The daemon prepends a `{name,exec,comment,time}` entry (where `time` is
+unix seconds set by the daemon), removing any existing entry with the same
+`name` (most-recent-wins), and caps the file at 20 entries. Stateless. Written
+single-line compact JSON.
+
+**Response:**
+
+| Condition | Response |
+|-----------|----------|
+| Success | `ok\n` |
+| Missing body | `error:usage: record-launch <json-object>\n` |
+| Body isn't valid JSON | `error:invalid JSON: <detail>\n` |
+| Write failed | `error:record-launch failed: <detail>\n` |
+
+Example request: `record-launch {"name":"Firefox","exec":"firefox","comment":"Browse the web"}\n`
+
+### `get-recents`
+
+Return the recently launched apps, newest first. Stateless. A missing or
+unparseable file yields `[]`. Returns at most 15 entries.
+
+**Response:** A compact single-line JSON **array** of recents objects:
+
+```json
+[{"name":"Firefox","exec":"firefox","comment":"Browse the web","time":1716950400.0}]
+```
 
 ### `kbd-log on` / `kbd-log off`
 

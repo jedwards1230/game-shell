@@ -11,10 +11,12 @@
 //! scheduler. The two communicate over an `mpsc` control channel and a
 //! `broadcast` event bus.
 
+mod apps;
 mod config;
 mod device;
 mod ipc;
 mod protocol;
+mod recents;
 mod state;
 
 #[cfg(target_os = "linux")]

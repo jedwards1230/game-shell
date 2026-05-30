@@ -55,7 +55,8 @@ scripts/
 ## Key Data Flows
 
 - **Streaming targets**: Loaded from `/opt/game-shell/targets.json` at startup (single-line JSON — see gotchas). Managed in-UI via MoonlightSettings. Optional `sunshineUser`/`sunshinePass`/`sunshinePort` fields enable pre-flight session detection via the Sunshine API — when present, the shell checks for active sessions before streaming and offers Resume/Quit/Cancel if a different app is running. Credentials should be injected by the deployment system, not committed.
-- **Settings persistence**: `~/.config/game-shell/settings.json` stores `themeMode`, `moonlightViewMode`, `controllerDebug` (QML-owned) and `keyBindings` (daemon-owned). All QML-side I/O is centralized in the `SettingsStore` singleton — add new settings there (a property + load/save handling), not in Theme.qml. Theme delegates to SettingsStore.
+- **Settings persistence**: `~/.config/game-shell/settings.json` stores `themeMode`, `streamingViewMode`, `controllerDebug` (QML-owned) and `keyBindings` (daemon-owned). The **daemon is the sole writer** — `SettingsStore` reads via `get-config` and hands QML-owned keys to `set-config` (read-modify-write), so QML never formats config JSON itself. All QML-side I/O is centralized in the `SettingsStore` singleton — add new settings there (a property + load/save handling), not in Theme.qml. Theme delegates to SettingsStore.
+- **App discovery & recents**: `AppDiscoveryManager` (apps via `list-apps`) and `RecentsTracker` (`get-recents` / `record-launch`) read JSON straight from the daemon, which owns the `.desktop` scanning (`freedesktop-desktop-entry` crate) and recents file. QML no longer parses `.desktop` files. The QML side still uses a thin `python3` one-liner only as a Unix-socket client.
 - **Input daemon IPC**: See [docs/IPC_PROTOCOL.md](docs/IPC_PROTOCOL.md) for the full protocol specification. QML sends commands via Unix socket; the daemon streams events to subscribers.
 - **Settings panels**: SettingsPanel uses a Loader to swap between section components. Each section manages its own system calls via `Quickshell.Io.Process`.
 
@@ -63,6 +64,7 @@ scripts/
 
 | Tool | Used For |
 |------|----------|
+| input daemon (IPC) | Gamepad grab/release, settings I/O (`get/set-config`), app discovery (`list-apps`), recents (`get/record`) — see [docs/IPC_PROTOCOL.md](docs/IPC_PROTOCOL.md) |
 | `wpctl` | Audio volume/mute/sink switching (WirePlumber/PipeWire) |
 | `bluetoothctl` | Bluetooth device scanning and pairing |
 | `nmcli` | Network connection management |

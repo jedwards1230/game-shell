@@ -427,6 +427,75 @@ pub fn save_bindings(path: &Path, bindings: &[Binding]) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
+// ---------------------------------------------------------------------------
+// Generic config read-modify-write (the `get-config` / `set-config` commands).
+//
+// These let the QML shell stop shelling out to inline python for its own
+// settings (themeMode, streamingViewMode, controllerDebug, ...). The daemon is
+// the sole writer of settings.json; QML sends the keys it owns and the daemon
+// merges them in, preserving foreign keys (notably the daemon-owned
+// `keyBindings`). The wire body is a compact single-line JSON object in both
+// directions; see docs/IPC_PROTOCOL.md.
+// ---------------------------------------------------------------------------
+
+/// Merge a compact-JSON object of updates into the existing settings document,
+/// preserving every other key, and return the new compact single-line JSON.
+///
+/// - `existing` is the current settings.json text (or `None`/garbage -> treated
+///   as an empty object), matching `build_settings_json`'s tolerance.
+/// - `updates` must be a JSON object; any key whose value is JSON `null` is
+///   *removed* from the document (this is how the shell drops the legacy
+///   `moonlightViewMode` key). Non-null values overwrite/insert.
+/// - Insertion order: existing keys keep their position; brand-new keys append
+///   in `updates` order (serde_json `preserve_order`).
+///
+/// Returns `None` if `updates` is not a JSON object.
+pub fn merge_config(existing: Option<&str>, updates: &serde_json::Value) -> Option<String> {
+    let updates = updates.as_object()?;
+    let mut doc: serde_json::Value = existing
+        .and_then(|t| serde_json::from_str(t).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let obj = doc.as_object_mut().expect("doc is an object");
+    for (k, v) in updates {
+        if v.is_null() {
+            obj.shift_remove(k);
+        } else {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    Some(serde_json::to_string(&doc).expect("settings serialize"))
+}
+
+/// Read the settings document and return it as a compact single-line JSON
+/// object (the `get-config` response body). A missing or unparseable file
+/// yields `{}` (empty object), so the QML client always gets valid JSON.
+pub fn load_config_json(path: &Path) -> String {
+    let doc: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    serde_json::to_string(&doc).expect("settings serialize")
+}
+
+/// Apply a `set-config` update to disk: read existing, merge, write single-line.
+/// Returns the new document text on success. `updates` must be a JSON object.
+pub fn set_config(path: &Path, updates: &serde_json::Value) -> std::io::Result<String> {
+    let existing = std::fs::read_to_string(path).ok();
+    let merged = merge_config(existing.as_deref(), updates).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "set-config body must be a JSON object",
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, &merged)?;
+    Ok(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +599,88 @@ mod tests {
             out,
             r#"{"keyBindings":{"select":"BTN_SOUTH","back":"BTN_EAST","altSelect":"BTN_NORTH","confirm":"BTN_START"}}"#
         );
+    }
+
+    #[test]
+    fn merge_config_preserves_foreign_keys_and_is_single_line() {
+        // Existing has a daemon-owned keyBindings the QML client must not clobber.
+        let existing = r#"{"keyBindings":{"select":"BTN_SOUTH"},"themeMode":"light"}"#;
+        let updates = serde_json::json!({
+            "themeMode": "dark",
+            "streamingViewMode": "apps",
+            "controllerDebug": true
+        });
+        let out = merge_config(Some(existing), &updates).unwrap();
+        assert!(!out.contains('\n'));
+        assert!(!out.contains(": ")); // compact separators
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // Foreign key preserved untouched.
+        assert_eq!(v["keyBindings"]["select"], "BTN_SOUTH");
+        // Existing key overwritten in place.
+        assert_eq!(v["themeMode"], "dark");
+        // New keys added (bool preserved as bool).
+        assert_eq!(v["streamingViewMode"], "apps");
+        assert_eq!(v["controllerDebug"], true);
+        // themeMode kept its original position (it existed before the update).
+        assert!(out.starts_with(r#"{"keyBindings":{"select":"BTN_SOUTH"},"themeMode":"dark""#));
+    }
+
+    #[test]
+    fn merge_config_null_removes_key() {
+        // Mirrors the shell dropping the legacy moonlightViewMode key.
+        let existing = r#"{"themeMode":"dark","moonlightViewMode":"grid"}"#;
+        let updates = serde_json::json!({ "moonlightViewMode": null });
+        let out = merge_config(Some(existing), &updates).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("moonlightViewMode").is_none());
+        assert_eq!(v["themeMode"], "dark");
+    }
+
+    #[test]
+    fn merge_config_no_existing_creates_object() {
+        let out = merge_config(None, &serde_json::json!({"themeMode":"auto"})).unwrap();
+        assert_eq!(out, r#"{"themeMode":"auto"}"#);
+        // Garbage existing is treated as empty.
+        let out = merge_config(Some("not json"), &serde_json::json!({"a":1})).unwrap();
+        assert_eq!(out, r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn set_config_then_load_round_trips_on_disk() {
+        // Unique temp file (no global env) so this is parallel-safe.
+        let path = std::env::temp_dir().join(format!(
+            "gs-cfg-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Seed a foreign daemon-owned key.
+        std::fs::write(&path, r#"{"keyBindings":{"select":"BTN_SOUTH"}}"#).unwrap();
+
+        // QML-style update.
+        let written = set_config(
+            &path,
+            &serde_json::json!({"themeMode":"dark","controllerDebug":true}),
+        )
+        .unwrap();
+        assert!(!written.contains('\n'));
+
+        // load_config_json reads it back as a compact object.
+        let loaded = load_config_json(&path);
+        let v: serde_json::Value = serde_json::from_str(&loaded).unwrap();
+        assert_eq!(v["keyBindings"]["select"], "BTN_SOUTH"); // preserved
+        assert_eq!(v["themeMode"], "dark");
+        assert_eq!(v["controllerDebug"], true);
+
+        // Missing file -> {}.
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(load_config_json(&path), "{}");
+    }
+
+    #[test]
+    fn merge_config_rejects_non_object_body() {
+        assert!(merge_config(None, &serde_json::json!([1, 2, 3])).is_none());
+        assert!(merge_config(None, &serde_json::json!("string")).is_none());
     }
 }

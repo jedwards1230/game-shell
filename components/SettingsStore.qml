@@ -2,24 +2,24 @@ pragma Singleton
 import Quickshell.Io
 import QtQuick
 
-// Centralized settings I/O for game-shell — the single source of truth for
-// ~/.config/game-shell/settings.json from the QML side.
+// Centralized settings I/O for game-shell — the QML-side façade over
+// ~/.config/game-shell/settings.json.
 //
 // IMPORTANT: root MUST be Item (not QtObject). Quickshell 0.3.0 cannot host
 // Process/Timer children inside a QtObject singleton, and this store needs
-// Process children to do file/socket I/O.
+// Process children to do socket I/O.
 //
-// Ownership split (both writers do read-modify-write of disjoint keys, which is
-// acceptable for a single-user kiosk):
-//   - QML side (this store) owns: themeMode, streamingViewMode, controllerDebug
-//   - Python daemon owns persistence of: keyBindings
-// This store is the SOLE QML-side writer of settings.json. `keyBindings` here is
-// a read-through mirror kept in sync with the daemon over IPC.
+// Ownership: the input daemon is the SOLE writer of settings.json. This store
+// holds the QML-relevant keys (themeMode, streamingViewMode, controllerDebug)
+// and hands them to the daemon via `set-config`; the daemon does the
+// read-modify-write, preserving foreign keys it owns (notably keyBindings).
+// `keyBindings` here is a read-through mirror kept in sync over IPC.
 //
 // Binding IPC lives here (rather than in InputManager) because keyBindings is a
 // setting and this keeps InputManager focused on the core input-grab/combo path.
 // IPC protocol: see docs/IPC_PROTOCOL.md
-// Binding commands used: get-bindings, set-binding, capture-next, capture-cancel
+// Commands used: get-config, set-config, get-bindings, set-binding,
+//                capture-next, capture-cancel
 Item {
     id: store
 
@@ -39,12 +39,12 @@ Item {
     signal bindingCaptured(string button)
     signal captureCancelled
 
-    readonly property string _settingsFile: "~/.config/game-shell/settings.json"
-
-    // --- Load: read settings.json into properties (no write) ---
+    // --- Load: read settings via the daemon's `get-config` IPC (no write) ---
+    // The daemon is the sole settings.json writer; this asks it for the current
+    // document as a compact single-line JSON object.
     Process {
         id: loadProc
-        command: ["bash", "-c", "cat " + store._settingsFile + " 2>/dev/null || true"]
+        command: ["python3", "-c", store._ipc("get-config")]
         stdout: SplitParser {
             onRead: line => {
                 try {
@@ -67,16 +67,28 @@ Item {
         }
     }
 
-    // --- Save: read-modify-write; preserves daemon-owned keyBindings ---
+    // --- Save: hand the QML-owned keys to the daemon via `set-config`. ---
+    // The daemon does the read-modify-write, preserving foreign keys (notably
+    // daemon-owned keyBindings). The JSON body is built with JSON.stringify and
+    // passed as argv to python (not interpolated into the source), so app/enum
+    // values can never break the command string. `moonlightViewMode:null` drops
+    // the legacy key, matching the previous behavior.
     Process {
         id: saveProc
-        command: ["python3", "-c", "import json,os,pathlib;" + "p=pathlib.Path(os.path.expanduser('" + store._settingsFile + "'));" + "p.parent.mkdir(parents=True,exist_ok=True);" + "d=json.loads(p.read_text()) if p.exists() else {};" + "d['themeMode']='" + store.themeMode + "';" + "d['streamingViewMode']='" + store.streamingViewMode + "';" + "d.pop('moonlightViewMode',None);" + "d['controllerDebug']=" + (store.controllerDebug ? "True" : "False") + ";" + "p.write_text(json.dumps(d,separators=(',',':')))"]
+        command: ["true"]
     }
 
     function load() {
         loadProc.running = true;
     }
     function save() {
+        var body = JSON.stringify({
+            "themeMode": store.themeMode,
+            "streamingViewMode": store.streamingViewMode,
+            "controllerDebug": store.controllerDebug,
+            "moonlightViewMode": null
+        });
+        saveProc.command = ["python3", "-c", store._ipcArg("set-config"), body];
         saveProc.running = true;
     }
 
@@ -120,9 +132,19 @@ Item {
         cancelCaptureProc.running = true;
     }
 
-    // Build a one-shot Unix-socket request/response python one-liner.
+    // Build a one-shot Unix-socket request/response python one-liner. The daemon
+    // keeps the connection open after replying (it loops waiting for the next
+    // command), so we read until the first newline — the response terminator —
+    // rather than until EOF, which would block until the socket timeout.
     function _ipc(cmd) {
-        return "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'" + cmd + "\\n');print(s.recv(1024).decode().strip());s.close()";
+        return "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'" + cmd + "\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
+    }
+
+    // Like _ipc, but the request body is sys.argv[1] (a JSON string passed as a
+    // separate argv element). This keeps arbitrary JSON out of the python source
+    // literal — no quoting/escaping bugs — and is used for `set-config`.
+    function _ipcArg(cmd) {
+        return "import socket,os,sys;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(('" + cmd + " '+sys.argv[1]+'\\n').encode());buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
     }
 
     Process {

@@ -2,11 +2,17 @@ pragma Singleton
 import Quickshell.Io
 import QtQuick
 
-// Discovers locally installed applications by scanning XDG .desktop entries.
+// Discovers locally installed applications by asking the input daemon to scan
+// XDG .desktop entries (the `list-apps` IPC command — see docs/IPC_PROTOCOL.md).
+//
+// The daemon owns discovery (via the freedesktop-desktop-entry crate) and
+// returns a compact single-line JSON array of {name, exec, icon, comment,
+// wmClass}, already filtered (NoDisplay/Hidden/Type), de-duplicated by name,
+// and sorted. This replaced an inline `python3 -c` configparser scanner.
 //
 // IMPORTANT: root MUST be Item (not QtObject). Quickshell 0.3.0 cannot host
 // Process children inside a QtObject singleton, and this manager needs a
-// Process to shell out to the desktop-entry scanner.
+// Process to talk to the daemon socket.
 //
 // Single source of truth for the `applications` model consumed by HomeScreen's
 // Applications row and by AppLifecycleManager (for window icon/name matching,
@@ -23,32 +29,16 @@ Item {
         loadApps.running = true;
     }
 
+    // One-shot Unix-socket request to the input daemon (respects GAME_SHELL_SOCK,
+    // falls back to the default per-UID path). The `list-apps` reply can be large,
+    // so accumulate chunks until the first newline (the response terminator). The
+    // daemon keeps the connection open after replying, so reading until EOF would
+    // block until the socket timeout instead.
+    readonly property string _listAppsCmd: "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'list-apps\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())"
+
     Process {
         id: loadApps
-        command: ["python3", "-c", `
-import os, json, configparser
-apps = []
-seen = set()
-for d in ['/usr/share/applications', os.path.expanduser('~/.local/share/applications')]:
-    if not os.path.isdir(d): continue
-    for f in sorted(os.listdir(d)):
-        if not f.endswith('.desktop'): continue
-        cp = configparser.ConfigParser(interpolation=None)
-        cp.read(os.path.join(d, f))
-        if not cp.has_section('Desktop Entry'): continue
-        if cp.get('Desktop Entry', 'NoDisplay', fallback='false').lower() == 'true': continue
-        if cp.get('Desktop Entry', 'Hidden', fallback='false').lower() == 'true': continue
-        if cp.get('Desktop Entry', 'Type', fallback='') != 'Application': continue
-        name = cp.get('Desktop Entry', 'Name', fallback='')
-        if not name or name in seen: continue
-        seen.add(name)
-        ex = cp.get('Desktop Entry', 'Exec', fallback='')
-        for tok in ['%u','%U','%f','%F','%i','%c','%k']:
-            ex = ex.replace(tok, '')
-        apps.append({'name': name, 'exec': ex.strip(), 'icon': cp.get('Desktop Entry', 'Icon', fallback=''), 'comment': cp.get('Desktop Entry', 'Comment', fallback=''), 'wmClass': cp.get('Desktop Entry', 'StartupWMClass', fallback='')})
-apps.sort(key=lambda x: x['name'].lower())
-print(json.dumps(apps))
-`]
+        command: ["python3", "-c", manager._listAppsCmd]
         stdout: SplitParser {
             onRead: line => {
                 try {

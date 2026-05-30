@@ -8,6 +8,7 @@
 
 use crate::protocol::{self, Command, Event};
 use crate::state::Control;
+use crate::{apps, config, recents};
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use std::os::unix::fs::PermissionsExt;
@@ -80,8 +81,80 @@ async fn handle_client(
     Ok(())
 }
 
+/// Handle the stateless Phase 2 commands (app discovery + config/recents I/O).
+/// These never touch the input runtime, so they are served directly here.
+/// Filesystem work runs on a blocking thread so the IPC reactor isn't stalled.
+/// Returns `None` for commands that aren't stateless (caller falls through to
+/// the input-runtime dispatch).
+async fn dispatch_stateless(cmd: &Command) -> Option<String> {
+    match cmd {
+        Command::ListApps => Some(spawn_blocking_string(apps::list_apps_json).await),
+        Command::GetConfig => {
+            Some(spawn_blocking_string(|| config::load_config_json(&config::settings_path())).await)
+        }
+        Command::GetRecents => {
+            Some(spawn_blocking_string(|| recents::load_recents(&recents::recents_path())).await)
+        }
+        Command::SetConfig(body) => {
+            let body = body.clone();
+            Some(
+                spawn_blocking_string(move || {
+                    match serde_json::from_str::<serde_json::Value>(&body) {
+                        Ok(updates) if updates.is_object() => {
+                            match config::set_config(&config::settings_path(), &updates) {
+                                Ok(merged) => merged,
+                                Err(e) => protocol::resp_error(&format!("set-config failed: {e}")),
+                            }
+                        }
+                        Ok(_) => protocol::resp_error("set-config body must be a JSON object"),
+                        Err(e) => protocol::resp_error(&format!("invalid JSON: {e}")),
+                    }
+                })
+                .await,
+            )
+        }
+        Command::SetConfigUsage => Some(protocol::resp_set_config_usage()),
+        Command::RecordLaunch(body) => {
+            let body = body.clone();
+            Some(
+                spawn_blocking_string(move || {
+                    match serde_json::from_str::<recents::Recent>(&body) {
+                        Ok(mut entry) => {
+                            entry.time = recents::now_unix_secs();
+                            match recents::record_launch(&recents::recents_path(), entry) {
+                                Ok(()) => protocol::resp_ok(),
+                                Err(e) => {
+                                    protocol::resp_error(&format!("record-launch failed: {e}"))
+                                }
+                            }
+                        }
+                        Err(e) => protocol::resp_error(&format!("invalid JSON: {e}")),
+                    }
+                })
+                .await,
+            )
+        }
+        Command::RecordLaunchUsage => Some(protocol::resp_record_launch_usage()),
+        _ => None,
+    }
+}
+
+/// Run a blocking closure that returns the response string on tokio's blocking
+/// pool, falling back to an error reply if the task is cancelled/panics.
+async fn spawn_blocking_string<F>(f: F) -> String
+where
+    F: FnOnce() -> String + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| protocol::resp_error(&format!("internal task failed: {e}")))
+}
+
 /// Resolve a non-subscribe command to its response line.
 async fn dispatch(control_tx: &mpsc::Sender<Control>, cmd: Command) -> String {
+    if let Some(resp) = dispatch_stateless(&cmd).await {
+        return resp;
+    }
     let fallback = protocol::resp_unknown();
     match cmd {
         Command::Grab => request(control_tx, Control::Grab).await,
@@ -104,6 +177,15 @@ async fn dispatch(control_tx: &mpsc::Sender<Control>, cmd: Command) -> String {
         Command::Unknown => return protocol::resp_unknown(),
         // Subscribe is handled by the caller before dispatch.
         Command::Subscribe => return protocol::resp_unknown(),
+        // Stateless Phase 2 commands are consumed by `dispatch_stateless`
+        // above, which returns early; they never reach this match.
+        Command::ListApps
+        | Command::GetConfig
+        | Command::SetConfig(_)
+        | Command::SetConfigUsage
+        | Command::RecordLaunch(_)
+        | Command::RecordLaunchUsage
+        | Command::GetRecents => return protocol::resp_unknown(),
     }
     .unwrap_or(fallback)
 }
@@ -221,6 +303,47 @@ mod tests {
             "error:usage: set-binding <action> <button_name>"
         );
         assert_eq!(send_line(&mut s, "frobnicate").await, "unknown");
+
+        // Stateless Phase 2 commands are served without the input runtime.
+        // They read real (possibly absent) files; assert only the response
+        // *shape* so the test is independent of the host's HOME contents.
+        let apps = send_line(&mut s, "list-apps").await;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&apps)
+                .map(|v| v.is_array())
+                .unwrap_or(false),
+            "list-apps should be a JSON array, got: {apps}"
+        );
+        let cfg = send_line(&mut s, "get-config").await;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&cfg)
+                .map(|v| v.is_object())
+                .unwrap_or(false),
+            "get-config should be a JSON object, got: {cfg}"
+        );
+        let recents = send_line(&mut s, "get-recents").await;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&recents)
+                .map(|v| v.is_array())
+                .unwrap_or(false),
+            "get-recents should be a JSON array, got: {recents}"
+        );
+        // Usage + malformed-body errors are stateless and HOME-independent.
+        assert_eq!(
+            send_line(&mut s, "set-config").await,
+            "error:usage: set-config <json-object>"
+        );
+        assert_eq!(
+            send_line(&mut s, "record-launch").await,
+            "error:usage: record-launch <json-object>"
+        );
+        assert!(send_line(&mut s, "set-config not-json")
+            .await
+            .starts_with("error:invalid JSON"));
+        assert_eq!(
+            send_line(&mut s, "set-config [1,2,3]").await,
+            "error:set-config body must be a JSON object"
+        );
         drop(s);
 
         // Subscribe receives broadcast events.
