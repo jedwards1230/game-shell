@@ -10,12 +10,14 @@ A 10-foot couch gaming UI built with [Quickshell](https://quickshell.org/) (QML)
 
 ```
 SDDM → game-shell-session.sh → Hyprland (kiosk) → Quickshell (shell.qml)
-                               └── game-shell-input (Rust daemon: EVIOCGRAB → uinput
-                                   + backend IPC; falls back to gamepad-input.py)
+       │                                  │  ▲ intent:* control-surface stream + Keys
+       │  Super → super-intent.sh ────────┼──┘ (keyboard global-escape)
+                               └── game-shell-input (Rust daemon: EVIOCGRAB the
+                                   gamepad fleet → per-player uinput; backend IPC)
 ```
 
 - **shell.qml** — entry point: state machine (`idle` → `launching` → `streaming` → `reconnecting`) and process management
-- **game-shell-input** (Rust daemon, `rust/`) — the primary backend: grabs the gamepad exclusively via evdev, emits keyboard/mouse via uinput, and serves the full Unix-socket IPC (input `grab`/`release`/`subscribe`, settings, app discovery, Bluetooth/network/power, Hyprland reads, Sunshine). `input/gamepad-input.py` is the input-only rollback the session script falls back to (build/install the binary to switch; remove/rename it to roll back)
+- **game-shell-input** (Rust daemon, `rust/`) — the sole backend. It owns the **gamepad fleet only**: grabs every connected pad exclusively via evdev (`EVIOCGRAB`, tracked by fd with a DB-match-or-reject discovery gate), manages hot-join/leave with stable per-player slots (#98), and re-presents each pad as a clean per-player virtual gamepad in the game presenter. It emits nav keys + a first-class **`intent` control surface** (`intent <name>` command → `intent:*` broadcast — the closed vocabulary keyboard-escape and automation also ride), plus fleet outputs (rumble/battery/LED, #99/#100/#101), and serves the full Unix-socket IPC (settings, app discovery, Bluetooth/network/power, Hyprland reads, Sunshine). **It does NOT read the keyboard** — the keyboard (K400) belongs to the compositor + QML (Wayland focus / `Keys`); the bare `Super` press is a Hyprland bind → `intent home` (`scripts/super-intent.sh`). Build with `cargo build --release` and install to `$SHELL_DIR/bin/game-shell-input`; the session script spawns it directly
 - **Theme.qml** — singleton (must be `Item`, not `QtObject` — Quickshell can't host Process/Timer children in QtObject) with all colors, fonts, and layout constants. Dark/light/auto mode state is read from `SettingsStore`
 - **SettingsStore.qml** — singleton (also `Item`, for the same reason) that owns all QML-side settings I/O for `~/.config/game-shell/settings.json` and the binding IPC (get/set/capture). Single source of truth for the settings schema
 - **components/qmldir** — component registry. New components must be added here or Quickshell won't find them
@@ -46,21 +48,19 @@ config/
   palette.md                  # Color palette documentation
   game-shell.desktop          # SDDM session file
   targets.yaml.example        # Example streaming targets (docs only)
-rust/                        # Rust backend daemon (game-shell-input) — primary
+rust/                        # Rust backend daemon (game-shell-input) — sole backend
   src/                       # input/uinput, ipc, config, apps, bluetooth, network, power, hyprland, health
   README.md                  # daemon architecture + phase notes
-input/
-  gamepad-input.py            # Input-only Python daemon — rollback fallback
-  requirements.txt            # Python deps (evdev)
 scripts/
   game-shell-session.sh       # Session wrapper launched by SDDM
+  super-intent.sh             # Hyprland Super bind -> `intent home` (keyboard escape)
 ```
 
 ## Key Data Flows
 
 - **Streaming targets**: Loaded from `/opt/game-shell/targets.json` at startup (single-line JSON — see gotchas). Managed in-UI via MoonlightSettings. Optional `sunshineUser`/`sunshinePass`/`sunshinePort` fields enable pre-flight session detection via the Sunshine API — when present, the shell checks for active sessions before streaming and offers Resume/Quit/Cancel if a different app is running. Credentials should be injected by the deployment system, not committed.
 - **Settings persistence**: `~/.config/game-shell/settings.json` stores `themeMode`, `streamingViewMode`, `controllerDebug` (QML-owned) and `keyBindings` (daemon-owned). The **daemon is the sole writer** — `SettingsStore` reads via `get-config` and hands QML-owned keys to `set-config` (read-modify-write), so QML never formats config JSON itself. All QML-side I/O is centralized in the `SettingsStore` singleton — add new settings there (a property + load/save handling), not in Theme.qml. Theme delegates to SettingsStore.
-- **App discovery & recents**: `AppDiscoveryManager` (apps via `list-apps`) and `RecentsTracker` (`get-recents` / `record-launch`) read JSON straight from the daemon, which owns the `.desktop` scanning (`freedesktop-desktop-entry` crate) and recents file. QML no longer parses `.desktop` files. The QML side still uses a thin `python3` one-liner only as a Unix-socket client.
+- **App discovery & recents**: `AppDiscoveryManager` (apps via `list-apps`) and `RecentsTracker` (`get-recents` / `record-launch`) read JSON straight from the daemon, which owns the `.desktop` scanning (`freedesktop-desktop-entry` crate) and recents file. QML no longer parses `.desktop` files. The QML side talks to the daemon over a native `Quickshell.Io` socket via `SocketClient.qml` (#97) — the old per-call `python3 -c` Unix-socket shims were retired.
 - **Input daemon IPC**: See [docs/IPC_PROTOCOL.md](docs/IPC_PROTOCOL.md) for the full protocol specification. QML sends commands via Unix socket; the daemon streams events to subscribers.
 - **Settings panels**: SettingsPanel uses a Loader to swap between section components. Each section manages its own system calls via `Quickshell.Io.Process`.
 
@@ -117,13 +117,14 @@ WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 \
 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 grim /tmp/screenshot.png
 ```
 
-### Python Input Daemon
+### Rust Input Daemon
 
 ```bash
-pip install evdev  # or: pip install -r input/requirements.txt
+cd rust && cargo build --release
+install -m755 target/release/game-shell-input /opt/game-shell/bin/game-shell-input
 ```
 
-Requires Linux with evdev and uinput access. Auto-discovers gamepad by vendor/product ID (defaults: Xbox controller `045e:028e`, configurable via `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT` env vars).
+Requires Linux with evdev and uinput access. Auto-discovers gamepad by vendor/product ID (defaults: Xbox controller `045e:028e`, configurable via `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT` env vars). The Linux-only evdev/uinput/D-Bus modules build only on the target (or CI); the cross-platform subset (`protocol`, `config`, `state`, `device` GUID math, `apps`, `health`, `recents`) builds and tests on any host.
 
 ### QA Screenshots
 

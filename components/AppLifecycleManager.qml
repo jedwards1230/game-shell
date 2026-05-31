@@ -23,6 +23,9 @@ Item {
 
     signal appLaunched
     signal appClosed
+    // Emitted when the launcher process exits non-zero (app failed to start).
+    // shell.qml uses this for an error haptic (#99); the failure is also logged.
+    signal appLaunchFailed
 
     function launchDesktopApp(app) {
         runningAppClass = "";
@@ -94,6 +97,7 @@ Item {
             if (exitCode !== 0) {
                 let cmd = appRunner.command.join(" ");
                 ErrorLog.log("app", "Failed to launch " + (_appName || "application"), "Command: " + cmd + "\nExit code: " + exitCode, _appName);
+                root.appLaunchFailed();
             }
         }
     }
@@ -300,33 +304,20 @@ Item {
     // tick. The periodic windowPoller above remains the source of truth for the
     // runningWindows model and appClosed detection; these events just kick an
     // extra poll on transitions, so the public behavior is unchanged.
-    Process {
+    SocketClient {
         id: hyprEventListener
-        // Filter to `hypr:` lines on the Python side (the subscribe stream also
-        // carries high-frequency buttons:/keys: events we don't want), and read
-        // via makefile('r') for proper UTF-8 line framing across recv chunks.
-        command: ["python3", "-c", "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'subscribe\\n');f=s.makefile('r');[print(line.rstrip(),flush=True) for line in f if line.startswith('hypr:')]"]
-        stdout: SplitParser {
-            onRead: line => {
-                if (line.indexOf("hypr:activewindow:") === 0) {
-                    root.activeWindowClass = line.substring("hypr:activewindow:".length);
-                    root._onHyprWindowEvent();
-                } else if (line.indexOf("hypr:fullscreen:") === 0) {
-                    root.activeWindowFullscreen = line.substring("hypr:fullscreen:".length) === "1";
-                    root._onHyprWindowEvent();
-                }
+        // Subscribe stream over a native Quickshell socket (SocketClient, #97);
+        // filter to `hypr:` lines (the stream also carries high-frequency
+        // buttons:/intent:* events we don't want here). Auto-reconnects on drop.
+        subscribe: true
+        onLineReceived: line => {
+            if (line.indexOf("hypr:activewindow:") === 0) {
+                root.activeWindowClass = line.substring("hypr:activewindow:".length);
+                root._onHyprWindowEvent();
+            } else if (line.indexOf("hypr:fullscreen:") === 0) {
+                root.activeWindowFullscreen = line.substring("hypr:fullscreen:".length) === "1";
+                root._onHyprWindowEvent();
             }
-        }
-        onExited: {
-            hyprEventReconnect.start();
-        }
-    }
-
-    Timer {
-        id: hyprEventReconnect
-        interval: 2000
-        onTriggered: {
-            hyprEventListener.running = true;
         }
     }
 
@@ -338,6 +329,6 @@ Item {
     }
 
     Component.onCompleted: {
-        hyprEventListener.running = true;
+        hyprEventListener.start();
     }
 }

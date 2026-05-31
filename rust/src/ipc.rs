@@ -239,8 +239,19 @@ async fn dispatch(control_tx: &mpsc::Sender<Control>, dbus: &DbusSenders, cmd: C
         }
         Command::CaptureNext => request(control_tx, Control::CaptureNext).await,
         Command::CaptureCancel => request(control_tx, Control::CaptureCancel).await,
-        Command::KbdLog(on) => request(control_tx, move |reply| Control::KbdLog(on, reply)).await,
+        Command::GetPads => request(control_tx, Control::GetPads).await,
+        Command::ListInputDevices => {
+            request(control_tx, Control::ListInputDevices).await
+        }
+        Command::Intent(name) => {
+            request(control_tx, move |reply| Control::Intent { name, reply }).await
+        }
+        Command::Rumble { id, ms } => {
+            request(control_tx, move |reply| Control::Rumble { id, ms, reply }).await
+        }
         // Handled without a round-trip to the runtime:
+        Command::IntentUsage => return protocol::resp_intent_usage(),
+        Command::RumbleUsage => return protocol::resp_rumble_usage(),
         Command::SetBindingUsage => return protocol::resp_set_binding_usage(),
         Command::Unknown => return protocol::resp_unknown(),
         // Subscribe is handled by the caller before dispatch.
@@ -407,9 +418,6 @@ mod tests {
                 Control::Grab(r) | Control::Release(r) | Control::CaptureCancel(r) => {
                     let _ = r.send(protocol::resp_ok());
                 }
-                Control::KbdLog(_, r) => {
-                    let _ = r.send(protocol::resp_ok());
-                }
                 Control::Status(r) => {
                     let _ = r.send(protocol::resp_status(true, true));
                 }
@@ -424,6 +432,40 @@ mod tests {
                 }
                 Control::CaptureNext(r) => {
                     let _ = r.send(protocol::resp_captured("BTN_SOUTH"));
+                }
+                Control::GetPads(r) => {
+                    let _ = r.send(protocol::resp_pads(&[(
+                        "uniq:test".into(),
+                        0,
+                        "Test Pad".into(),
+                        true,
+                    )]));
+                }
+                Control::ListInputDevices(r) => {
+                    let _ = r.send(protocol::resp_input_devices(&[protocol::InputDeviceInfo {
+                        name: "Test Pad".into(),
+                        path: "/dev/input/event0".into(),
+                        vendor: 0x045e,
+                        product: 0x028e,
+                        phys: "usb-test/input0".into(),
+                        handlers: vec!["event0".into(), "js0".into()],
+                        grabbed: true,
+                    }]));
+                }
+                Control::Intent { name, reply } => {
+                    // Mirror the runtime: accept the closed vocabulary, reject
+                    // anything else. The fake doesn't actually broadcast.
+                    let resp = if protocol::is_known_intent(&name) {
+                        protocol::resp_ok()
+                    } else {
+                        protocol::resp_unknown_intent(&name)
+                    };
+                    let _ = reply.send(resp);
+                }
+                Control::Rumble { reply, .. } => {
+                    // The real runtime no-ops when the pad/capability/setting is
+                    // absent but still replies `ok`; the fake mirrors that.
+                    let _ = reply.send(protocol::resp_ok());
                 }
                 Control::Shutdown => break,
             }
@@ -543,16 +585,61 @@ mod tests {
             send_line(&mut s, "bt-connect").await,
             "error:usage: bt-connect <mac>"
         );
+
+        // Intent control surface: a closed-vocabulary name is accepted; an
+        // unknown name is rejected; a bare command is a usage error.
+        assert_eq!(send_line(&mut s, "intent home-tap").await, "ok");
+        assert_eq!(send_line(&mut s, "intent home").await, "ok");
+        assert_eq!(
+            send_line(&mut s, "intent frobnicate").await,
+            "error:unknown intent 'frobnicate'"
+        );
+        assert_eq!(
+            send_line(&mut s, "intent").await,
+            "error:usage: intent <name>"
+        );
+
+        // Rumble control surface: a well-formed command round-trips the runtime
+        // (the fake replies ok); a malformed body is a stateless usage error.
+        assert_eq!(send_line(&mut s, "rumble uniq:test 200").await, "ok");
+        assert_eq!(
+            send_line(&mut s, "rumble uniq:test").await,
+            "error:usage: rumble <id> <ms>"
+        );
+
+        // get-pads round-trips the runtime and returns the fleet JSON array.
+        assert_eq!(
+            send_line(&mut s, "get-pads").await,
+            r#"[{"id":"uniq:test","index":0,"name":"Test Pad","grabbed":true}]"#
+        );
+
+        // list-input-devices round-trips the runtime and returns the diagnostics
+        // enumerator array (one object per controller-like input device).
+        assert_eq!(
+            send_line(&mut s, "list-input-devices").await,
+            r#"[{"name":"Test Pad","path":"/dev/input/event0","vendor":"045e","product":"028e","phys":"usb-test/input0","handlers":["event0","js0"],"grabbed":true}]"#
+        );
         drop(s);
 
         // Subscribe receives broadcast events.
         let mut sub = UnixStream::connect(&sock).await.unwrap();
         assert_eq!(send_line(&mut sub, "subscribe").await, "subscribed");
-        events_tx.send(Event::HomePress).unwrap();
+        events_tx.send(Event::ControllerWake).unwrap();
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 64];
         let n = sub.read(&mut buf).await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&buf[..n]).trim_end(), "home-press");
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]).trim_end(),
+            "controller-wake"
+        );
+
+        // A broadcast `intent:*` event reaches the subscriber on the wire.
+        events_tx.send(Event::Intent("home-tap".into())).unwrap();
+        let n = sub.read(&mut buf).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]).trim_end(),
+            "intent:home-tap"
+        );
 
         server.abort();
     }

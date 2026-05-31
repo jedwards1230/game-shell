@@ -35,12 +35,13 @@ FocusScope {
         homeFocusTimer.restart();
     }
 
-    // Drawer-toggle behavior for the "home tap" action, called from
-    // shell.qml's onHomePressed when in idle state. Single source of
-    // truth — controller Home (socket), keyboard Meta (Hyprland-bound
-    // and routed through the daemon), and any future "home tap" surface
-    // all converge here via the home-press socket event.
-    function handleHomeTap() {
+    // Toggle the nav drawer — the focus-scoped `menu` action. Converges every
+    // drawer-toggle surface: the gamepad Home-tap (shell.qml's onIntentHomeTap
+    // when idle), the on-screen menu button, and the keyboard Tab path below.
+    // If an overlay is open, the first press dismisses it instead of opening the
+    // drawer. (The global return-to-shell escape lives in shell.qml's
+    // onIntentHome, NOT here — `menu` never leaves a running app.)
+    function toggleMenu() {
         if (powerOverlay.opened) {
             powerOverlay.opened = false;
             homeFocusTimer.restart();
@@ -54,6 +55,85 @@ FocusScope {
             else
                 homeFocusTimer.restart();
         }
+    }
+
+    // Keyboard drawer toggle (Tab), independent of Home. First-class keyboard
+    // co-primary: the K400 on the couch opens the drawer without a controller.
+    // Only meaningful on the home screen; when an app owns focus the shell
+    // window isn't focused, so this never fires over a stream.
+    Keys.onTabPressed: {
+        if (root.shellState === "idle")
+            toggleMenu();
+    }
+
+    // --- Keyboard debug capture (replaces the deleted daemon keys: snoop) ---
+    // Rolling list of currently-held keyboard keys, read straight from Wayland
+    // `Keys` on the layout root. The daemon stopped snooping the keyboard in
+    // Phase 2, so the debug pane's keyboard half is now QML-native. Only used
+    // when Theme.controllerDebug is on; the handlers never consume the event
+    // (accepted stays false) so navigation is unaffected.
+    property var _debugKeyNames: []
+
+    function _debugKeyName(event) {
+        // Friendly labels for the keys most worth seeing; fall back to the raw
+        // text, else the numeric key code.
+        switch (event.key) {
+        case Qt.Key_Up:
+            return "↑";
+        case Qt.Key_Down:
+            return "↓";
+        case Qt.Key_Left:
+            return "←";
+        case Qt.Key_Right:
+            return "→";
+        case Qt.Key_Return:
+        case Qt.Key_Enter:
+            return "Enter";
+        case Qt.Key_Escape:
+            return "Esc";
+        case Qt.Key_Tab:
+            return "Tab";
+        case Qt.Key_Backspace:
+            return "Backspace";
+        case Qt.Key_Space:
+            return "Space";
+        case Qt.Key_Meta:
+        case Qt.Key_Super_L:
+        case Qt.Key_Super_R:
+            return "Meta";
+        case Qt.Key_Control:
+            return "Ctrl";
+        case Qt.Key_Shift:
+            return "Shift";
+        case Qt.Key_Alt:
+            return "Alt";
+        }
+        if (event.text && event.text.trim().length > 0)
+            return event.text.toUpperCase();
+        return "0x" + event.key.toString(16);
+    }
+
+    Keys.onPressed: event => {
+        if (Theme.controllerDebug && !event.isAutoRepeat) {
+            let name = _debugKeyName(event);
+            let names = root._debugKeyNames.slice();
+            if (names.indexOf(name) === -1) {
+                names.push(name);
+                root._debugKeyNames = names;
+                debugOverlay.currentKeys = names.join(" + ");
+            }
+        }
+        event.accepted = false;
+    }
+
+    Keys.onReleased: event => {
+        if (Theme.controllerDebug && !event.isAutoRepeat) {
+            let name = _debugKeyName(event);
+            let names = root._debugKeyNames.filter(n => n !== name);
+            root._debugKeyNames = names;
+            debugOverlay.currentKeys = names.join(" + ");
+        }
+        event.accepted = false;
     }
 
     HomeScreen {
@@ -257,8 +337,10 @@ FocusScope {
     }
 
     // --- Debug Input Overlay ---
-    // Subscribes to the daemon socket for buttons:* (controller) and
-    // keys:* (keyboard) events. See docs/IPC_PROTOCOL.md.
+    // Controller `buttons:` come from the daemon subscribe stream; keyboard
+    // keys are read QML-side from Wayland `Keys` (see the root key-capture
+    // handlers below) since the daemon no longer snoops the keyboard.
+    // See docs/IPC_PROTOCOL.md.
     Item {
         id: debugOverlay
         anchors.fill: parent
@@ -276,35 +358,22 @@ FocusScope {
             return currentCombo !== "" ? currentCombo : currentKeys;
         }
 
-        Process {
+        SocketClient {
             id: debugSubscribe
-            // Enables daemon-side `kbd-key` logging for this session and
-            // then subscribes to events. Re-sent on every reconnect so a
-            // daemon restart still results in logging being on while the
-            // overlay is visible.
-            command: ["python3", "-c", "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'kbd-log on\\nsubscribe\\n');[print(l,flush=True) for d in iter(lambda:s.recv(1024),b'') for l in d.decode().splitlines()]"]
-            stdout: SplitParser {
-                onRead: line => {
-                    if (line === "subscribed" || line === "ok")
-                        return;
-                    if (line.startsWith("buttons:")) {
-                        debugOverlay.currentCombo = line.substring(8).trim();
-                    } else if (line.startsWith("keys:")) {
-                        debugOverlay.currentKeys = line.substring(5).trim();
-                    }
+            // Subscribe to the daemon's controller `buttons:` stream over a
+            // native Quickshell socket (SocketClient, #97). The keyboard half of
+            // the pane no longer comes from the daemon — the daemon stopped
+            // snooping the keyboard (Phase 2). Keyboard keys are captured
+            // QML-side from Wayland `Keys` on the layout root and fed into
+            // `debugOverlay.currentKeys`. Auto-reconnects on drop.
+            subscribe: true
+            onLineReceived: line => {
+                if (line === "subscribed")
+                    return;
+                if (line.startsWith("buttons:")) {
+                    debugOverlay.currentCombo = line.substring(8).trim();
                 }
             }
-            onExited: {
-                if (debugOverlay.visible)
-                    reconnectDebug.start();
-            }
-        }
-
-        // One-shot to turn off daemon-side `kbd-key` logging when the
-        // debug overlay closes (or controllerDebug is disabled).
-        Process {
-            id: kbdLogOff
-            command: ["python3", "-c", "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'kbd-log off\\n');s.recv(64);s.close()"]
         }
 
         // Pin displayInput to the latest non-empty value and hold it
@@ -314,15 +383,6 @@ FocusScope {
                 displayInput = currentInput;
                 showingInput = true;
                 inputFadeTimer.restart();
-            }
-        }
-
-        Timer {
-            id: reconnectDebug
-            interval: 2000
-            onTriggered: {
-                if (debugOverlay.visible)
-                    debugSubscribe.running = true;
             }
         }
 
@@ -337,15 +397,14 @@ FocusScope {
 
         onVisibleChanged: {
             if (!visible) {
-                debugSubscribe.running = false;
-                reconnectDebug.running = false;
+                debugSubscribe.stop();
                 showingInput = false;
                 currentCombo = "";
                 currentKeys = "";
                 displayInput = "";
-                kbdLogOff.running = true;
+                root._debugKeyNames = [];
             } else {
-                debugSubscribe.running = true;
+                debugSubscribe.start();
             }
         }
 

@@ -73,23 +73,50 @@ ShellRoot {
             if (root.state === "idle")
                 avController.wake();
         }
-        onHomePressed: {
+
+        // --- Control-surface intents (de-overloaded "home") ---
+        // intent:home is the GLOBAL escape (keyboard Super+Escape / automation):
+        // always leave the running app, regardless of focus. Fires instantly.
+        onIntentHome: root.returnToShell()
+
+        // intent:home-tap is the gamepad Home neutral (short press). The shell
+        // owns the focus, so it decides: over a running app -> toggle the app
+        // overlay drawer (the full return-to-shell is Home-hold / intent:home);
+        // on the home screen -> toggle the nav drawer (the `menu` action).
+        onIntentHomeTap: {
             if (root.state === "appRunning") {
                 root.overlayDrawerOpen = !root.overlayDrawerOpen;
             } else if (root.state === "idle" && root._layout) {
                 avController.wake();
-                root._layout.handleHomeTap();
+                root._layout.toggleMenu();
             }
         }
-        onHomeHeld: {
-            if (root.state === "appRunning") {
-                root.returnToShell();
-            } else if (root.state === "idle" && root._layout) {
-                root._layout.navDrawer.opened = false;
-                root._layout.settingsPanel.visible = false;
-                root._layout.notificationCenter.opened = false;
-                root._layout.powerOverlay.opened = false;
-                root._layout.focusHome();
+
+        // intent:home-hold = reset. Fired by the gamepad Home long-press AND by
+        // keyboard Super+Backspace.
+        onIntentHomeHold: root.resetToHome()
+
+        // intent:menu toggles the nav drawer. Fired by bare Super (keyboard),
+        // the gamepad Home-tap on the home screen, and the on-screen menu
+        // button. Home-screen only: a bare Super press also precedes a
+        // Super+<key> chord, so over a running app `menu` is a deliberate no-op
+        // (the chord's intent:home/home-hold does the real work, no overlay flash).
+        onIntentMenu: {
+            if (root.state === "idle" && root._layout)
+                root._layout.toggleMenu();
+        }
+
+        // intent:settings / intent:power open their panels from the home screen.
+        onIntentSettings: {
+            if (root.state === "idle" && root._layout) {
+                root._layout.settingsPanel.visible = true;
+                root._layout.settingsPanel.forceActiveFocus();
+            }
+        }
+        onIntentPower: {
+            if (root.state === "idle" && root._layout) {
+                root._layout.powerOverlay.opened = true;
+                root._layout.powerOverlay.forceActiveFocus();
             }
         }
     }
@@ -105,10 +132,19 @@ ShellRoot {
         applications: root._applications
         onAppLaunched: {
             root.state = "appRunning";
+            // #99: short haptic confirmation on a successful app launch.
+            if (inputManager)
+                inputManager.rumblePulse(120);
         }
         onAppClosed: {
             appLifecycle.runningAppClass = "";
             root.returnToShell();
+        }
+        // App failed to launch (non-zero exit from the launcher process).
+        // Stronger double-ish pulse so the failure is felt, not just logged.
+        onAppLaunchFailed: {
+            if (inputManager)
+                inputManager.rumblePulse(250);
         }
     }
 
@@ -117,6 +153,9 @@ ShellRoot {
         shellState: root.state
         onStreamStarted: {
             root.state = "streaming";
+            // #99: short haptic confirmation on stream launch.
+            if (inputManager)
+                inputManager.rumblePulse(120);
         }
         onStreamEnded: {
             Components.NotificationManager.info("stream", "Stream Suspended");
@@ -128,10 +167,16 @@ ShellRoot {
         }
         onStreamCrashed: attempts => {
             root.state = "reconnecting";
+            // #99: stronger pulse to signal the stream dropped / is reconnecting.
+            if (inputManager)
+                inputManager.rumblePulse(250);
         }
         onStreamFailed: {
             root.state = "idle";
             inputManager.grab();
+            // #99: stronger pulse on terminal stream failure.
+            if (inputManager)
+                inputManager.rumblePulse(250);
         }
         onRequestOverlayShow: msg => {
             if (root._layout)
@@ -190,6 +235,22 @@ ShellRoot {
     function closeAndReturnToShell() {
         appLifecycle.closeApp();
         returnToShell();
+    }
+
+    // Full reset to a clean home screen. Triggered by intent:home-hold — the
+    // gamepad Home-hold and the keyboard Super+Backspace. Over a running app it
+    // returns to the shell; on the home screen it dismisses every
+    // overlay/drawer and refocuses Home.
+    function resetToHome() {
+        if (root.state === "appRunning") {
+            root.returnToShell();
+        } else if (root.state === "idle" && root._layout) {
+            root._layout.navDrawer.opened = false;
+            root._layout.settingsPanel.visible = false;
+            root._layout.notificationCenter.opened = false;
+            root._layout.powerOverlay.opened = false;
+            root._layout.focusHome();
+        }
     }
 
     Variants {

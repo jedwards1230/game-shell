@@ -6,9 +6,10 @@
 //! Linux input layer (`input.rs`) translates between these `u16` codes and
 //! `evdev` types.
 //!
-//! Behavior here mirrors `input/gamepad-input.py` exactly so the QML client
-//! sees an identical daemon. Where the legacy IPC doc and the Python code
-//! disagree, the Python code wins (it is what the live shell talks to).
+//! Behavior here was ported from the former `input/gamepad-input.py` (since
+//! deleted) so the QML client sees an identical daemon. Where the legacy IPC
+//! doc and that Python code disagreed, the Python code won (it was what the
+//! live shell talked to).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,7 +83,7 @@ pub const ABS_HAT0X: u16 = 0x10;
 pub const ABS_HAT0Y: u16 = 0x11;
 
 // ---------------------------------------------------------------------------
-// Combos and tuning constants (mirror gamepad-input.py)
+// Combos and tuning constants (ported from the former gamepad-input.py)
 // ---------------------------------------------------------------------------
 
 /// Home + B held for COMBO_HOLD_SECS -> `combo:end-session`.
@@ -120,7 +121,7 @@ pub struct Binding {
 }
 
 /// Default bindings, in canonical order. `BTN_MODE` (Home) is intentionally
-/// absent: it is handled directly to broadcast `home-press`/`combo:home-hold`
+/// absent: it is handled directly to broadcast `intent:home-tap`/`intent:home-hold`
 /// rather than mapped to a key (mapping `KEY_HOMEPAGE` would leak to focused
 /// apps). The legacy IPC doc lists a `drawer` action — that is stale; the
 /// Python daemon and the QML `remappableActions` both use exactly these four.
@@ -244,7 +245,8 @@ pub fn dpad_display_name(code: u16) -> Option<&'static str> {
     })
 }
 
-/// Keyboard source classification for the `keys:` event and `kbd-log` line.
+/// Keyboard source classification used when resolving a keyboard key's
+/// friendly display name from its kernel code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KbdSource {
     Mapped,
@@ -324,11 +326,6 @@ pub fn kbd_key_info(code: u16, raw_kernel_name: Option<&str>) -> (String, String
     }
     let display = raw.clone();
     (raw, display, KbdSource::Unknown)
-}
-
-/// Display name for a held keyboard key in the `keys:` event.
-pub fn kbd_display_name(code: u16, raw_kernel_name: Option<&str>) -> String {
-    kbd_key_info(code, raw_kernel_name).1
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +474,33 @@ pub fn load_config_json(path: &Path) -> String {
         .filter(|v: &serde_json::Value| v.is_object())
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     serde_json::to_string(&doc).expect("settings serialize")
+}
+
+/// Default for the `rumbleEnabled` setting when the key is absent or malformed.
+/// Rumble is tasteful and on by default (#99); the user can disable it.
+pub const RUMBLE_ENABLED_DEFAULT: bool = true;
+
+/// Read the `rumbleEnabled` setting from a parsed settings document. Returns
+/// [`RUMBLE_ENABLED_DEFAULT`] when the key is absent or not a JSON bool, so a
+/// stale/garbage value never silently disables rumble. Pure (no I/O) — the
+/// caller supplies the parsed document — so it unit-tests on any host.
+pub fn rumble_enabled_from(settings: &serde_json::Value) -> bool {
+    settings
+        .get("rumbleEnabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(RUMBLE_ENABLED_DEFAULT)
+}
+
+/// Read the `rumbleEnabled` setting from `settings.json` on disk. A missing or
+/// unparseable file (or a non-bool value) yields [`RUMBLE_ENABLED_DEFAULT`].
+pub fn rumble_enabled(path: &Path) -> bool {
+    let parsed = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    match parsed {
+        Some(v) => rumble_enabled_from(&v),
+        None => RUMBLE_ENABLED_DEFAULT,
+    }
 }
 
 /// Apply a `set-config` update to disk: read existing, merge, write single-line.
@@ -682,5 +706,50 @@ mod tests {
     fn merge_config_rejects_non_object_body() {
         assert!(merge_config(None, &serde_json::json!([1, 2, 3])).is_none());
         assert!(merge_config(None, &serde_json::json!("string")).is_none());
+    }
+
+    #[test]
+    fn rumble_enabled_reads_bool_with_default() {
+        // Explicit values pass through.
+        assert!(rumble_enabled_from(
+            &serde_json::json!({ "rumbleEnabled": true })
+        ));
+        assert!(!rumble_enabled_from(
+            &serde_json::json!({ "rumbleEnabled": false })
+        ));
+        // Absent key -> default (on).
+        assert_eq!(
+            rumble_enabled_from(&serde_json::json!({ "themeMode": "dark" })),
+            RUMBLE_ENABLED_DEFAULT
+        );
+        // Non-bool value -> default (never silently disables).
+        assert_eq!(
+            rumble_enabled_from(&serde_json::json!({ "rumbleEnabled": "yes" })),
+            RUMBLE_ENABLED_DEFAULT
+        );
+        // The default is on (#99): an absent setting should never silence rumble.
+        assert!(
+            rumble_enabled_from(&serde_json::json!({})),
+            "rumble defaults on"
+        );
+    }
+
+    #[test]
+    fn rumble_enabled_from_disk_round_trips() {
+        let path = std::env::temp_dir().join(format!(
+            "gs-rumble-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        // Missing file -> default.
+        assert_eq!(rumble_enabled(&path), RUMBLE_ENABLED_DEFAULT);
+        // Explicit off.
+        std::fs::write(&path, r#"{"rumbleEnabled":false}"#).unwrap();
+        assert!(!rumble_enabled(&path));
+        // Garbage file -> default.
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(rumble_enabled(&path), RUMBLE_ENABLED_DEFAULT);
+        let _ = std::fs::remove_file(&path);
     }
 }

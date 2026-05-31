@@ -37,7 +37,17 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
+        // Hover flips to mouse-mode only on a GENUINE pointer move, filtered by
+        // Theme.pointerMoved (global-coords delta). No onEntered: containsMouse
+        // flips when content scrolls under a stationary cursor and would hijack
+        // controller-nav focus (#45). Coords mapped to scene root (null) —
+        // mapToItem (used elsewhere here) over mapToGlobal (used nowhere).
+        onPositionChanged: mouse => {
+            let p = mapToItem(null, mouse.x, mouse.y);
+            Theme.pointerMoved(p.x, p.y);
+        }
         onClicked: {
+            Theme.enterMouseMode();
             root.forceActiveFocus();
             root.Keys.returnPressed(null);
         }

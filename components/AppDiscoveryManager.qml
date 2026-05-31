@@ -26,28 +26,24 @@ Item {
 
     function refresh() {
         loading = true;
-        loadApps.running = true;
+        loadApps.request("list-apps");
     }
 
-    // One-shot Unix-socket request to the input daemon (respects GAME_SHELL_SOCK,
-    // falls back to the default per-UID path). The `list-apps` reply can be large,
-    // so accumulate chunks until the first newline (the response terminator). The
-    // daemon keeps the connection open after replying, so reading until EOF would
-    // block until the socket timeout instead.
-    readonly property string _listAppsCmd: "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'list-apps\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())"
-
-    Process {
+    // One-shot daemon IPC over a native Quickshell socket (SocketClient, #97) —
+    // the `list-apps` reply is a single (possibly large) JSON line. The python3
+    // socket shim was retired in Phase 8.
+    SocketClient {
         id: loadApps
-        command: ["python3", "-c", manager._listAppsCmd]
-        stdout: SplitParser {
-            onRead: line => {
-                try {
-                    manager.applications = JSON.parse(line);
-                } catch (e) {
-                    console.log("AppDiscoveryManager: failed to parse apps:", e);
-                }
-                manager.loading = false;
+        onResponseReceived: line => {
+            try {
+                manager.applications = JSON.parse(line);
+            } catch (e) {
+                console.log("AppDiscoveryManager: failed to parse apps:", e);
             }
+            manager.loading = false;
+        }
+        onRequestFailed: {
+            manager.loading = false;
         }
     }
 

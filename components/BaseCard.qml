@@ -35,7 +35,20 @@ Item {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            // Hover flips to mouse-mode only on a GENUINE pointer move, filtered
+            // by Theme.pointerMoved (global-coords delta). We deliberately do NOT
+            // re-add onEntered: containsMouse flips when a row scrolls a card
+            // under a *stationary* cursor, which would hijack controller-nav
+            // focus mid-nav (#45). Coords mapped to the scene root (null) — a
+            // stable frame that doesn't scroll, so content-scroll yields zero
+            // delta. (mapToItem(null,...) over mapToGlobal: mapToGlobal is not
+            // used anywhere in this codebase, mapToItem is — easy to swap.)
+            onPositionChanged: mouse => {
+                let p = mapToItem(null, mouse.x, mouse.y);
+                Theme.pointerMoved(p.x, p.y);
+            }
             onClicked: {
+                Theme.enterMouseMode();
                 root.forceActiveFocus();
                 root.activated();
             }

@@ -15,32 +15,30 @@ Item {
     signal clientsReceived(var clients)
     signal errorOccurred(string message)
 
-    // One-shot Unix-socket request to the input daemon (respects GAME_SHELL_SOCK,
-    // falls back to the default per-UID path). The `hypr-clients` reply can be
-    // large, so accumulate chunks until the first newline (the response
-    // terminator); the daemon keeps the connection open after replying, so
-    // reading until EOF would block until the socket timeout instead.
-    readonly property string _clientsCmd: "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(10);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'hypr-clients\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())"
-
-    Process {
-        id: proc
-        running: root.running
-        command: ["python3", "-c", root._clientsCmd]
-        stdout: SplitParser {
-            property string buffer: ""
-            onRead: line => {
-                buffer += line;
-            }
-        }
-        onExited: {
+    // One-shot daemon IPC over a native Quickshell socket (SocketClient, #97).
+    // The `hypr-clients` reply is a single JSON line; the python3 socket shim
+    // was retired in Phase 8.
+    SocketClient {
+        id: sock
+        onResponseReceived: line => {
             root.running = false;
             try {
-                let clients = JSON.parse(proc.stdout.buffer);
+                let clients = JSON.parse(line);
                 root.clientsReceived(clients);
             } catch (e) {
                 root.errorOccurred(e.toString());
             }
-            proc.stdout.buffer = "";
         }
+        onRequestFailed: {
+            root.running = false;
+            root.errorOccurred("hypr-clients socket request failed");
+        }
+    }
+
+    // Fire the request whenever `running` flips true (preserves the old
+    // `running: root.running` Process binding semantics).
+    onRunningChanged: {
+        if (root.running)
+            sock.request("hypr-clients");
     }
 }

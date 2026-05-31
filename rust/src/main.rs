@@ -2,8 +2,9 @@
 //!
 //! Grabs a gamepad exclusively via `EVIOCGRAB`, emits keyboard/mouse events via
 //! uinput, and serves a newline-delimited IPC protocol on a Unix socket
-//! (see `docs/IPC_PROTOCOL.md`). A drop-in replacement for `gamepad-input.py`
-//! with an identical wire protocol, so the QML shell is unchanged.
+//! (see `docs/IPC_PROTOCOL.md`). Formerly a drop-in replacement for the
+//! now-deleted `gamepad-input.py`, keeping its wire protocol so the QML shell
+//! is unchanged.
 //!
 //! Runtime topology: the IPC server and signal handling run on a multi-thread
 //! tokio runtime; the input subsystem runs on its own OS thread with a

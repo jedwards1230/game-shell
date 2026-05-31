@@ -44,22 +44,36 @@ FocusScope {
     onCurrentIndexChanged: _ensureVisible()
     onWidthChanged: _ensureVisible()
 
-    // Keyboard navigation (LTR: Left lowers index, Right raises it).
+    // Keyboard navigation (LTR: Left lowers index, Right raises it). Any nav
+    // key means controller/keyboard is driving — flip out of mouse-mode (#45),
+    // no daemon round-trip.
     Keys.onLeftPressed: {
+        Theme.exitMouseMode();
         if (currentIndex > 0)
             currentIndex--;
     }
     Keys.onRightPressed: {
+        Theme.exitMouseMode();
         if (currentIndex < _iconCount - 1)
             currentIndex++;
     }
-    Keys.onDownPressed: root.focusDownRequested()
-    Keys.onUpPressed: root.focusUpRequested()
+    Keys.onDownPressed: {
+        Theme.exitMouseMode();
+        root.focusDownRequested();
+    }
+    Keys.onUpPressed: {
+        Theme.exitMouseMode();
+        root.focusUpRequested();
+    }
     Keys.onEscapePressed: {
+        Theme.exitMouseMode();
         if (root.escapeRequestsSettings)
             root.settingsRequested();
     }
-    Keys.onReturnPressed: root._activate(currentIndex)
+    Keys.onReturnPressed: {
+        Theme.exitMouseMode();
+        root._activate(currentIndex);
+    }
 
     function _activate(index) {
         switch (index) {
@@ -188,7 +202,16 @@ FocusScope {
                     id: notifMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Hover flips to mouse-mode only on a GENUINE pointer move,
+                    // filtered by Theme.pointerMoved (global-coords delta). No
+                    // onEntered: content-scroll under a stationary cursor would
+                    // hijack controller-nav focus (#45). mapToItem(null,...) maps
+                    // to the scene root (used elsewhere here, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: root.notificationCenterRequested()
                 }
             }
@@ -228,7 +251,14 @@ FocusScope {
                     id: settingsMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: root.settingsRequested()
                 }
             }
@@ -260,7 +290,14 @@ FocusScope {
                     id: themeMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: {
                         if (Theme.themeMode === "auto")
                             Theme.setThemeMode("light");
@@ -315,6 +352,13 @@ FocusScope {
                     id: networkMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                 }
             }
 
@@ -353,6 +397,13 @@ FocusScope {
                     id: volumeMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                 }
             }
 
@@ -391,7 +442,14 @@ FocusScope {
                     id: powerMA
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Genuine-move-only mouse-mode via Theme.pointerMoved; no
+                    // onEntered (content-scroll false trigger, #45). Scene-root
+                    // mapToItem(null,...) (used elsewhere, vs mapToGlobal).
                     cursorShape: Qt.PointingHandCursor
+                    onPositionChanged: mouse => {
+                        let p = mapToItem(null, mouse.x, mouse.y);
+                        Theme.pointerMoved(p.x, p.y);
+                    }
                     onClicked: root.powerRequested()
                 }
             }

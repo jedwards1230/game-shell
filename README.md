@@ -9,11 +9,11 @@ A minimal 10-foot UI for a dedicated streaming box — controller-navigable home
 ```
 SDDM → game-shell-session.sh → Hyprland (kiosk) → Quickshell (shell.qml)
                                └── game-shell-input (Rust daemon: EVIOCGRAB → uinput
-                                   + backend IPC; falls back to gamepad-input.py)
+                                   + backend IPC)
 ```
 
 - **Quickshell** renders the UI via QML on Hyprland's Wayland compositor
-- **game-shell-input** (Rust daemon, `rust/`) grabs the gamepad exclusively, emits keyboard/mouse via uinput, and serves the backend IPC (settings, app discovery, Bluetooth/network/power, Hyprland, Sunshine). `input/gamepad-input.py` is kept as an input-only rollback
+- **game-shell-input** (Rust daemon, `rust/`) grabs the gamepad exclusively, emits keyboard/mouse via uinput, and serves the backend IPC (settings, app discovery, Bluetooth/network/power, Hyprland, Sunshine). It is the sole input/backend daemon
 - **Moonlight** streams games from a Sunshine host
 - **living-room-cec** and **end-game-session** scripts handle AV control (deployed separately via Ansible)
 
@@ -29,10 +29,8 @@ components/              # QML UI components
   SettingsPanel.qml      # Audio + power controls
   SettingsButton.qml     # Focusable button widget
   Theme.qml              # Colors, fonts, layout constants
-rust/                    # Rust backend daemon (game-shell-input) — primary
+rust/                    # Rust backend daemon (game-shell-input) — sole backend
   src/                   # input/uinput, IPC, config, apps, bluetooth, network, power, hyprland, health
-input/
-  gamepad-input.py       # Input-only Python daemon — rollback fallback
 config/
   hyprland.conf          # Kiosk compositor config
   game-shell.desktop     # SDDM wayland session entry
@@ -70,7 +68,7 @@ targets:
 
 - Hyprland
 - Quickshell
-- python3-evdev
+- Rust toolchain (to build `game-shell-input`)
 - Moonlight Qt (built from source)
 
 ## License

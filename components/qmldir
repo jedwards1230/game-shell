@@ -5,6 +5,7 @@ singleton RecentsTracker 1.0 RecentsTracker.qml
 singleton StreamProviders 1.0 StreamProviders.qml
 TargetProvider 1.0 TargetProvider.qml
 MoonlightProvider 1.0 MoonlightProvider.qml
+MoonlightConf 1.0 MoonlightConf.qml
 singleton Theme 1.0 Theme.qml
 singleton Units 1.0 Units.qml
 singleton WindowMatcher 1.0 WindowMatcher.qml
@@ -34,6 +35,7 @@ NavigationDrawer 1.0 NavigationDrawer.qml
 KeyBindingsSettings 1.0 KeyBindingsSettings.qml
 HyprctlClients 1.0 HyprctlClients.qml
 AVController 1.0 AVController.qml
+SocketClient 1.0 SocketClient.qml
 InputManager 1.0 InputManager.qml
 AppLifecycleManager 1.0 AppLifecycleManager.qml
 StreamManager 1.0 StreamManager.qml

@@ -3,7 +3,8 @@
 //! The wire format is **newline-delimited bare UTF-8 text** in both directions
 //! (see `docs/IPC_PROTOCOL.md`), NOT JSON — only the `get-bindings` *response*
 //! body is a compact JSON object. The QML client talks to this exact format,
-//! so every string here is byte-for-byte compatible with `gamepad-input.py`.
+//! so every string here stayed byte-for-byte compatible with the former
+//! `gamepad-input.py` (since deleted) — the QML client is unchanged.
 //!
 //! `Command`/`Event` are typed enums so the daemon's `match` arms are
 //! compiler-checked exhaustive; the (de)serialization to/from legacy text lives
@@ -28,7 +29,41 @@ pub enum Command {
     SetBindingUsage,
     CaptureNext,
     CaptureCancel,
-    KbdLog(bool),
+    /// `get-pads` — return the gamepad fleet as a compact JSON array, one object
+    /// per connected pad (`{id,index,name,grabbed}`). Stable player indices
+    /// (#101). Served by the input runtime (fleet state), so it round-trips the
+    /// control channel like `status`.
+    GetPads,
+    /// `list-input-devices` — enumerate EVERY controller-like input device on
+    /// the host (anything with `BTN_SOUTH` or a `js*` handler), including
+    /// ungrabbed and virtual ones, as a compact JSON array. A diagnostics
+    /// enumerator (replaces `ControllerSettings`' `/proc/bus/input/devices`
+    /// reader), distinct from `get-pads` (which lists only the grabbed fleet).
+    /// Served by the input runtime so it can mark which devices the fleet owns.
+    /// Reply shape: `[{name,path,vendor,product,phys,handlers,grabbed}, …]`.
+    ListInputDevices,
+    /// `intent <name>` — inject a shell intent into the broadcast bus. `<name>`
+    /// is validated against the closed vocabulary by the input runtime: a valid
+    /// name re-broadcasts as `intent:<name>` and replies `ok`; an unknown name
+    /// replies `error:unknown intent '<name>'`. This is the headless control
+    /// surface for keyboard global-escape and automation (see
+    /// `docs/IPC_PROTOCOL.md`). Pure broadcast — touches no device.
+    Intent(String),
+    /// `intent` with a missing/empty `<name>` body.
+    IntentUsage,
+    /// `rumble <id> <ms>` — fire a rumble (FF_RUMBLE) effect on the pad whose
+    /// stable wire id is `<id>` for `<ms>` milliseconds. Served by the input
+    /// runtime (Phase 5.5 ride-along, #99); a no-op for pads without `EV_FF`
+    /// support or when the persisted `rumbleEnabled` setting is off. `<id>` is a
+    /// single token (the wire id, which may itself contain `:`), `<ms>` a
+    /// non-negative integer.
+    Rumble {
+        id: String,
+        ms: u32,
+    },
+    /// `rumble` with a missing/incomplete `<id> <ms>` body, or a non-integer
+    /// `<ms>`.
+    RumbleUsage,
     /// Scan installed `.desktop` apps; reply is a compact JSON array.
     /// Stateless (no input-runtime round-trip).
     ListApps,
@@ -114,6 +149,40 @@ pub enum Command {
     Unknown,
 }
 
+/// The closed vocabulary of shell intents accepted by the `intent <name>`
+/// command and re-broadcast as `intent:<name>` events. Single source of truth
+/// shared by the input runtime's validator and the IPC tests.
+///
+/// Semantics (mapped to shell actions by QML):
+/// - `home` — global return-to-shell escape (keyboard Super, automation);
+///   distinct from the gamepad neutrals below.
+/// - `home-tap` / `home-hold` — gamepad Home neutrals (QML routes tap->menu,
+///   hold->home/reset from the focus it owns).
+/// - `menu` — nav-drawer toggle.
+/// - `nav-up` / `nav-down` / `nav-left` / `nav-right` — directional navigation.
+/// - `select` / `back` — confirm / cancel.
+/// - `settings` — open settings.
+/// - `power` — power menu.
+pub const INTENT_VOCAB: &[&str] = &[
+    "home",
+    "home-tap",
+    "home-hold",
+    "menu",
+    "nav-up",
+    "nav-down",
+    "nav-left",
+    "nav-right",
+    "select",
+    "back",
+    "settings",
+    "power",
+];
+
+/// True if `name` is in the closed intent vocabulary.
+pub fn is_known_intent(name: &str) -> bool {
+    INTENT_VOCAB.contains(&name)
+}
+
 /// If `cmd` is `word` (exact) or `word` followed by whitespace, return the
 /// trimmed remainder (the body). `Some("")` means the bare command with no body;
 /// `None` means `cmd` isn't this command at all (e.g. `set-configX`).
@@ -141,8 +210,8 @@ impl Command {
             "get-bindings" => Command::GetBindings,
             "capture-next" => Command::CaptureNext,
             "capture-cancel" => Command::CaptureCancel,
-            "kbd-log on" => Command::KbdLog(true),
-            "kbd-log off" => Command::KbdLog(false),
+            "get-pads" => Command::GetPads,
+            "list-input-devices" => Command::ListInputDevices,
             "list-apps" => Command::ListApps,
             "get-config" => Command::GetConfig,
             "get-recents" => Command::GetRecents,
@@ -180,6 +249,36 @@ impl Command {
                         Command::RecordLaunchUsage
                     } else {
                         Command::RecordLaunch(body.to_string())
+                    };
+                }
+                // `intent <name>`: a single intent-name token (whitespace-
+                // trimmed). A missing body is a usage error. `command_body`
+                // enforces the word boundary so e.g. `intentX` is not mistaken
+                // for `intent`. The closed-vocabulary check happens in the
+                // input runtime, not here (parsing stays validation-free).
+                if let Some(body) = command_body(cmd, "intent") {
+                    return if body.is_empty() {
+                        Command::IntentUsage
+                    } else {
+                        Command::Intent(body.to_string())
+                    };
+                }
+                // `rumble <id> <ms>`: two whitespace-separated tokens — the pad
+                // wire id and a non-negative millisecond duration. A missing
+                // token or a non-integer `<ms>` is a usage error.
+                // `command_body` enforces the word boundary so e.g. `rumbleX`
+                // is not mistaken for `rumble`.
+                if let Some(body) = command_body(cmd, "rumble") {
+                    let mut toks = body.split_whitespace();
+                    return match (toks.next(), toks.next()) {
+                        (Some(id), Some(ms)) => match ms.parse::<u32>() {
+                            Ok(ms) => Command::Rumble {
+                                id: id.to_string(),
+                                ms,
+                            },
+                            Err(_) => Command::RumbleUsage,
+                        },
+                        _ => Command::RumbleUsage,
                     };
                 }
                 // Phase 3 MAC-argument commands: `bt-connect <mac>` etc. The body
@@ -251,16 +350,39 @@ impl Command {
 pub enum Event {
     ControllerWake,
     ControllerDisconnected,
-    HomePress,
-    ComboHomeHold,
+    /// A physical pad joined the fleet and was assigned a stable player slot
+    /// (#101). Payload is a compact JSON object `{id,index,name}`: `id` is the
+    /// stable wire id, `index` the player slot (0 = P1), `name` the device name.
+    /// Wire: `pad:connected:<json>`. Complements `controller-wake` (the
+    /// single-pad legacy signal still fires for the first pad).
+    PadConnected(String),
+    /// A physical pad left the fleet; its slot is freed for reuse. Payload is the
+    /// pad's stable wire id. Wire: `pad:disconnected:<id>`. Complements
+    /// `controller-disconnected`.
+    PadDisconnected(String),
+    /// A pad's player LED was assigned (#101 LED, Phase 5.5). Payload is a
+    /// compact JSON object `{id,index}`: `id` the stable wire id, `index` the
+    /// player slot whose LED was lit. Wire: `pad:index:<json>`. Emitted at slot
+    /// assignment only when the pad has a controllable LED (`EV_LED`); a no-op
+    /// for pads without one.
+    PadIndex(String),
+    /// A pad's battery state changed (#100 battery, Phase 5.5). Payload is a
+    /// compact JSON object `{id,level,charging}`: `id` the stable wire id,
+    /// `level` the charge percentage (0..=100), `charging` whether it is
+    /// charging. Wire: `pad:battery:<json>`. Only emitted for pads that report a
+    /// battery (wireless); wired pads emit none.
+    PadBattery(String),
     ComboEndSession,
     ComboForceQuit,
     ComboSuspendStream,
+    /// A shell intent broadcast (`intent:<name>`), re-emitted from an accepted
+    /// `intent <name>` command. `<name>` is one of the closed vocabulary
+    /// (see `docs/IPC_PROTOCOL.md`). The control surface for keyboard
+    /// global-escape and automation; QML maps each name to a shell action.
+    Intent(String),
     InputMode(InputMode),
     /// Space-and-plus joined held controller inputs (may be empty).
     Buttons(String),
-    /// Space-and-plus joined held keyboard keys (may be empty).
-    Keys(String),
 
     // --- Phase 3 events ---
     /// Bluetooth adapter power changed (`bt:powered:on` / `bt:powered:off`).
@@ -316,14 +438,16 @@ impl fmt::Display for Event {
         match self {
             Event::ControllerWake => f.write_str("controller-wake"),
             Event::ControllerDisconnected => f.write_str("controller-disconnected"),
-            Event::HomePress => f.write_str("home-press"),
-            Event::ComboHomeHold => f.write_str("combo:home-hold"),
+            Event::PadConnected(json) => write!(f, "pad:connected:{json}"),
+            Event::PadDisconnected(id) => write!(f, "pad:disconnected:{id}"),
+            Event::PadIndex(json) => write!(f, "pad:index:{json}"),
+            Event::PadBattery(json) => write!(f, "pad:battery:{json}"),
             Event::ComboEndSession => f.write_str("combo:end-session"),
             Event::ComboForceQuit => f.write_str("combo:force-quit"),
             Event::ComboSuspendStream => f.write_str("combo:suspend-stream"),
+            Event::Intent(name) => write!(f, "intent:{name}"),
             Event::InputMode(m) => write!(f, "input-mode:{}", m.as_str()),
             Event::Buttons(s) => write!(f, "buttons:{s}"),
-            Event::Keys(s) => write!(f, "keys:{s}"),
             Event::BtPowered(on) => write!(f, "bt:powered:{}", on_off(*on)),
             Event::BtDevice(json) => write!(f, "bt:device:{json}"),
             Event::BtDeviceRemoved(mac) => write!(f, "bt:device-removed:{mac}"),
@@ -397,6 +521,21 @@ pub fn resp_record_launch_usage() -> String {
     "error:usage: record-launch <json-object>".to_string()
 }
 
+pub fn resp_intent_usage() -> String {
+    "error:usage: intent <name>".to_string()
+}
+
+/// Usage line for a `rumble` issued without a valid `<id> <ms>` body.
+pub fn resp_rumble_usage() -> String {
+    "error:usage: rumble <id> <ms>".to_string()
+}
+
+/// Error reply for an `intent <name>` whose name is outside the closed
+/// vocabulary.
+pub fn resp_unknown_intent(name: &str) -> String {
+    format!("error:unknown intent '{name}'")
+}
+
 /// Generic error reply for a malformed config/recents body.
 pub fn resp_error(msg: &str) -> String {
     format!("error:{msg}")
@@ -461,6 +600,111 @@ pub fn resp_bindings(ordered: &[(String, String)]) -> String {
     serde_json::to_string(&serde_json::Value::Object(map)).expect("bindings serialize")
 }
 
+/// One pad's compact-JSON object `{id,index,name,grabbed}`. Shared shape for the
+/// `pad:connected:<json>` event body (sans `grabbed`) and the `get-pads` array
+/// elements. `grabbed` is omitted from the connect event (the slot is always
+/// grabbed at connect) and present in `get-pads` so the UI can show per-pad grab
+/// state.
+fn pad_value(id: &str, index: u8, name: &str, grabbed: Option<bool>) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), serde_json::Value::String(id.to_string()));
+    obj.insert("index".into(), serde_json::Value::Number(index.into()));
+    obj.insert("name".into(), serde_json::Value::String(name.to_string()));
+    if let Some(g) = grabbed {
+        obj.insert("grabbed".into(), serde_json::Value::Bool(g));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Compact single-line JSON object for a `pad:connected:<json>` event body.
+pub fn pad_connected_json(id: &str, index: u8, name: &str) -> String {
+    serde_json::to_string(&pad_value(id, index, name, None)).expect("pad serialize")
+}
+
+/// Compact single-line JSON object for a `pad:index:<json>` event body
+/// (#101 LED). Shape: `{"id":..,"index":..}`.
+pub fn pad_index_json(id: &str, index: u8) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), serde_json::Value::String(id.to_string()));
+    obj.insert("index".into(), serde_json::Value::Number(index.into()));
+    serde_json::to_string(&serde_json::Value::Object(obj)).expect("pad index serialize")
+}
+
+/// Compact single-line JSON object for a `pad:battery:<json>` event body
+/// (#100 battery). Shape: `{"id":..,"level":..,"charging":..}` where `level` is
+/// the charge percentage (0..=100) and `charging` a bool.
+pub fn pad_battery_json(id: &str, level: u8, charging: bool) -> String {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), serde_json::Value::String(id.to_string()));
+    obj.insert("level".into(), serde_json::Value::Number(level.into()));
+    obj.insert("charging".into(), serde_json::Value::Bool(charging));
+    serde_json::to_string(&serde_json::Value::Object(obj)).expect("pad battery serialize")
+}
+
+/// Compact single-line JSON array body for the `get-pads` reply. `pads` is
+/// `(id, index, name, grabbed)` per connected pad; the caller should pass them
+/// in ascending player-index order for a stable wire.
+pub fn resp_pads(pads: &[(String, u8, String, bool)]) -> String {
+    let arr: Vec<serde_json::Value> = pads
+        .iter()
+        .map(|(id, index, name, grabbed)| pad_value(id, *index, name, Some(*grabbed)))
+        .collect();
+    serde_json::to_string(&serde_json::Value::Array(arr)).expect("pads serialize")
+}
+
+/// One row of the `list-input-devices` diagnostics enumerator (#97). Carries the
+/// raw fields the Linux runtime read from evdev / `/proc/bus/input/devices`; the
+/// wire JSON is built by [`resp_input_devices`]. `vendor`/`product` are the raw
+/// 16-bit ids (rendered as 4-hex-digit lowercase strings on the wire).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDeviceInfo {
+    pub name: String,
+    pub path: String,
+    pub vendor: u16,
+    pub product: u16,
+    pub phys: String,
+    pub handlers: Vec<String>,
+    pub grabbed: bool,
+}
+
+/// Compact single-line JSON array body for the `list-input-devices` reply (#97).
+/// One object per controller-like input device:
+/// `{"name","path","vendor","product","phys","handlers":[..],"grabbed"}`.
+/// `vendor`/`product` are 4-hex-digit lowercase strings (e.g. `"045e"`). The
+/// caller passes the devices already ordered (by devnode path) for a stable
+/// wire; an empty list serializes to `[]`.
+pub fn resp_input_devices(devices: &[InputDeviceInfo]) -> String {
+    let arr: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|d| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".into(), serde_json::Value::String(d.name.clone()));
+            obj.insert("path".into(), serde_json::Value::String(d.path.clone()));
+            obj.insert(
+                "vendor".into(),
+                serde_json::Value::String(format!("{:04x}", d.vendor)),
+            );
+            obj.insert(
+                "product".into(),
+                serde_json::Value::String(format!("{:04x}", d.product)),
+            );
+            obj.insert("phys".into(), serde_json::Value::String(d.phys.clone()));
+            obj.insert(
+                "handlers".into(),
+                serde_json::Value::Array(
+                    d.handlers
+                        .iter()
+                        .map(|h| serde_json::Value::String(h.clone()))
+                        .collect(),
+                ),
+            );
+            obj.insert("grabbed".into(), serde_json::Value::Bool(d.grabbed));
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::to_string(&serde_json::Value::Array(arr)).expect("input-devices serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,8 +718,16 @@ mod tests {
         assert_eq!(Command::parse("get-bindings"), Command::GetBindings);
         assert_eq!(Command::parse("capture-next"), Command::CaptureNext);
         assert_eq!(Command::parse("capture-cancel"), Command::CaptureCancel);
-        assert_eq!(Command::parse("kbd-log on"), Command::KbdLog(true));
-        assert_eq!(Command::parse("kbd-log off"), Command::KbdLog(false));
+        assert_eq!(Command::parse("get-pads"), Command::GetPads);
+        assert_eq!(Command::parse("  get-pads  "), Command::GetPads);
+        assert_eq!(
+            Command::parse("list-input-devices"),
+            Command::ListInputDevices
+        );
+        assert_eq!(
+            Command::parse("  list-input-devices  "),
+            Command::ListInputDevices
+        );
     }
 
     #[test]
@@ -530,6 +782,8 @@ mod tests {
     #[test]
     fn unrecognized_is_unknown() {
         assert_eq!(Command::parse("frobnicate"), Command::Unknown);
+        // `kbd-log` is gone entirely (keyboard snoop removed in Phase 2).
+        assert_eq!(Command::parse("kbd-log on"), Command::Unknown);
         assert_eq!(Command::parse("kbd-log maybe"), Command::Unknown);
         assert_eq!(Command::parse(""), Command::Unknown);
     }
@@ -571,6 +825,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_intent_command() {
+        // Valid name token -> Intent (vocabulary is NOT checked at parse time).
+        assert_eq!(
+            Command::parse("intent home-tap"),
+            Command::Intent("home-tap".into())
+        );
+        assert_eq!(
+            Command::parse("intent home"),
+            Command::Intent("home".into())
+        );
+        // An unknown-but-well-formed token still parses; the runtime rejects it.
+        assert_eq!(
+            Command::parse("intent frobnicate"),
+            Command::Intent("frobnicate".into())
+        );
+        // Body is whitespace-trimmed.
+        assert_eq!(
+            Command::parse("  intent   nav-up  "),
+            Command::Intent("nav-up".into())
+        );
+        // Bare command (no name) -> usage.
+        assert_eq!(Command::parse("intent"), Command::IntentUsage);
+        assert_eq!(Command::parse("intent   "), Command::IntentUsage);
+        // Word boundary: `intentX` is NOT intent.
+        assert_eq!(Command::parse("intentX"), Command::Unknown);
+    }
+
+    #[test]
+    fn intent_event_wire_strings_round_trip() {
+        // Each closed-vocabulary intent renders as `intent:<name>`.
+        for name in [
+            "home",
+            "home-tap",
+            "home-hold",
+            "menu",
+            "nav-up",
+            "nav-down",
+            "nav-left",
+            "nav-right",
+            "select",
+            "back",
+            "settings",
+            "power",
+        ] {
+            assert_eq!(
+                Event::Intent(name.to_string()).to_string(),
+                format!("intent:{name}")
+            );
+        }
+    }
+
+    #[test]
     fn phase2_usage_strings() {
         assert_eq!(
             resp_set_config_usage(),
@@ -581,6 +887,11 @@ mod tests {
             "error:usage: record-launch <json-object>"
         );
         assert_eq!(resp_error("bad body"), "error:bad body");
+        assert_eq!(resp_intent_usage(), "error:usage: intent <name>");
+        assert_eq!(
+            resp_unknown_intent("frobnicate"),
+            "error:unknown intent 'frobnicate'"
+        );
     }
 
     #[test]
@@ -590,8 +901,6 @@ mod tests {
             Event::ControllerDisconnected.to_string(),
             "controller-disconnected"
         );
-        assert_eq!(Event::HomePress.to_string(), "home-press");
-        assert_eq!(Event::ComboHomeHold.to_string(), "combo:home-hold");
         assert_eq!(Event::ComboEndSession.to_string(), "combo:end-session");
         assert_eq!(Event::ComboForceQuit.to_string(), "combo:force-quit");
         assert_eq!(
@@ -611,11 +920,6 @@ mod tests {
             "buttons:Home + B"
         );
         assert_eq!(Event::Buttons(String::new()).to_string(), "buttons:");
-        assert_eq!(
-            Event::Keys("Ctrl + Shift + A".into()).to_string(),
-            "keys:Ctrl + Shift + A"
-        );
-        assert_eq!(Event::Keys(String::new()).to_string(), "keys:");
     }
 
     #[test]
@@ -815,6 +1119,145 @@ mod tests {
             "error:usage: bt-connect <mac>"
         );
         assert_eq!(resp_bt_mac_usage("bt-pair"), "error:usage: bt-pair <mac>");
+    }
+
+    #[test]
+    fn pad_event_wire_strings() {
+        // `pad:connected:<json>` carries a compact `{id,index,name}` object.
+        assert_eq!(
+            Event::PadConnected(r#"{"id":"uniq:aa","index":0,"name":"Xbox"}"#.into()).to_string(),
+            r#"pad:connected:{"id":"uniq:aa","index":0,"name":"Xbox"}"#
+        );
+        // `pad:disconnected:<id>` carries the bare wire id.
+        assert_eq!(
+            Event::PadDisconnected("uniq:aa".into()).to_string(),
+            "pad:disconnected:uniq:aa"
+        );
+    }
+
+    #[test]
+    fn pad_connected_json_is_compact_object() {
+        assert_eq!(
+            pad_connected_json("uniq:aa:bb", 1, "DualSense"),
+            r#"{"id":"uniq:aa:bb","index":1,"name":"DualSense"}"#
+        );
+    }
+
+    #[test]
+    fn parses_rumble_command() {
+        assert_eq!(
+            Command::parse("rumble uniq:aa:bb 200"),
+            Command::Rumble {
+                id: "uniq:aa:bb".into(),
+                ms: 200
+            }
+        );
+        // Surrounding/internal whitespace collapses like split_whitespace.
+        assert_eq!(
+            Command::parse("  rumble   vp:045e:028e:/dev/input/event5   50  "),
+            Command::Rumble {
+                id: "vp:045e:028e:/dev/input/event5".into(),
+                ms: 50
+            }
+        );
+        // Zero duration is a valid (instant/cancel) request.
+        assert_eq!(
+            Command::parse("rumble uniq:aa 0"),
+            Command::Rumble {
+                id: "uniq:aa".into(),
+                ms: 0
+            }
+        );
+        // Missing ms / bare command / non-integer ms / negative -> usage.
+        assert_eq!(Command::parse("rumble uniq:aa"), Command::RumbleUsage);
+        assert_eq!(Command::parse("rumble"), Command::RumbleUsage);
+        assert_eq!(Command::parse("rumble uniq:aa abc"), Command::RumbleUsage);
+        assert_eq!(Command::parse("rumble uniq:aa -5"), Command::RumbleUsage);
+        // Word boundary: `rumbleX` is NOT rumble.
+        assert_eq!(Command::parse("rumbleX"), Command::Unknown);
+    }
+
+    #[test]
+    fn rumble_usage_string() {
+        assert_eq!(resp_rumble_usage(), "error:usage: rumble <id> <ms>");
+    }
+
+    #[test]
+    fn pad_index_and_battery_event_wire_strings() {
+        // `pad:index:<json>` carries a compact `{id,index}` object (#101 LED).
+        assert_eq!(
+            Event::PadIndex(r#"{"id":"uniq:aa","index":0}"#.into()).to_string(),
+            r#"pad:index:{"id":"uniq:aa","index":0}"#
+        );
+        // `pad:battery:<json>` carries a compact `{id,level,charging}` object (#100).
+        assert_eq!(
+            Event::PadBattery(r#"{"id":"uniq:aa","level":80,"charging":false}"#.into()).to_string(),
+            r#"pad:battery:{"id":"uniq:aa","level":80,"charging":false}"#
+        );
+    }
+
+    #[test]
+    fn pad_index_json_is_compact_object() {
+        assert_eq!(
+            pad_index_json("uniq:aa:bb", 2),
+            r#"{"id":"uniq:aa:bb","index":2}"#
+        );
+    }
+
+    #[test]
+    fn pad_battery_json_is_compact_object() {
+        assert_eq!(
+            pad_battery_json("uniq:aa:bb", 73, true),
+            r#"{"id":"uniq:aa:bb","level":73,"charging":true}"#
+        );
+        assert_eq!(
+            pad_battery_json("phys:usb-1", 100, false),
+            r#"{"id":"phys:usb-1","level":100,"charging":false}"#
+        );
+    }
+
+    #[test]
+    fn resp_pads_is_compact_array_with_grabbed() {
+        let pads = vec![
+            ("uniq:p1".to_string(), 0u8, "Xbox".to_string(), true),
+            ("uniq:p2".to_string(), 1u8, "PS5".to_string(), false),
+        ];
+        assert_eq!(
+            resp_pads(&pads),
+            r#"[{"id":"uniq:p1","index":0,"name":"Xbox","grabbed":true},{"id":"uniq:p2","index":1,"name":"PS5","grabbed":false}]"#
+        );
+        // Empty fleet -> empty array.
+        assert_eq!(resp_pads(&[]), "[]");
+    }
+
+    #[test]
+    fn resp_input_devices_is_compact_array() {
+        let devs = vec![
+            InputDeviceInfo {
+                name: "Xbox 360 Controller".into(),
+                path: "/dev/input/event18".into(),
+                vendor: 0x045e,
+                product: 0x028e,
+                phys: "usb-0000:00:14.0-1/input0".into(),
+                handlers: vec!["event18".into(), "js0".into()],
+                grabbed: true,
+            },
+            InputDeviceInfo {
+                name: "Virtual Pad".into(),
+                path: "/dev/input/event20".into(),
+                vendor: 0x0000,
+                product: 0x0000,
+                phys: "".into(),
+                handlers: vec!["event20".into()],
+                grabbed: false,
+            },
+        ];
+        assert_eq!(
+            resp_input_devices(&devs),
+            r#"[{"name":"Xbox 360 Controller","path":"/dev/input/event18","vendor":"045e","product":"028e","phys":"usb-0000:00:14.0-1/input0","handlers":["event18","js0"],"grabbed":true},{"name":"Virtual Pad","path":"/dev/input/event20","vendor":"0000","product":"0000","phys":"","handlers":["event20"],"grabbed":false}]"#
+        );
+        // Empty list -> empty array.
+        assert_eq!(resp_input_devices(&[]), "[]");
     }
 
     #[test]

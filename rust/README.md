@@ -26,8 +26,9 @@ shell's inline `python3` one-liners and into the daemon:
   `settings.json` (read-modify-write, compact JSON).
 - `record-launch` / `get-recents` — maintains the recents file.
 
-The QML side still opens the socket from a thin `python3` client but no longer
-parses `.desktop` files or hand-formats config JSON.
+The QML side opens the socket natively via `Quickshell.Io.Socket`
+(`components/SocketClient.qml`, #97) and no longer parses `.desktop` files or
+hand-formats config JSON; the old per-call `python3 -c` socket shims are gone.
 
 ## Layout
 
@@ -37,9 +38,9 @@ parses `.desktop` files or hand-formats config JSON.
 | `config.rs` | Kernel codes, name tables, bindings, `settings.json` I/O |
 | `apps.rs` | `.desktop` scan/parse → `list-apps` JSON (cross-platform) |
 | `recents.rs` | Recents file I/O → `record-launch` / `get-recents` (cross-platform) |
-| `device.rs` | SDL GUID + DB matching, device/keyboard discovery |
+| `device.rs` | SDL GUID + DB matching, fleet discovery, fd-ownership registry, stable wire ids, player-slot allocator |
 | `state.rs` | Control messages + pure input logic (velocity, deadzone, combos) |
-| `input.rs` | Linux input runtime (evdev/uinput) — single state owner |
+| `input.rs` | Linux input runtime (evdev/uinput) — single state owner; multi-pad `Fleet` |
 | `bluetooth.rs` | **Linux-only.** BlueZ actor via `bluer` — scan/pair/connect/trust + `bt:*` events |
 | `network.rs` | **Linux-only.** NetworkManager **read** actor via `zbus` — connectivity / AP list / `net:*` events |
 | `power.rs` | **Linux-only.** logind suspend + UPower battery via `zbus` — `power:*` events |
@@ -50,6 +51,38 @@ parses `.desktop` files or hand-formats config JSON.
 
 `apps.rs`, `recents.rs`, and `health.rs`'s response parser are pure Rust —
 fully unit-tested on macOS.
+
+## Gamepad fleet (input-unification Phase 4, #98/#101)
+
+`input.rs` owns a `Fleet { pads: HashMap<RawFd, PadDevice>, slots: SlotAllocator }`.
+Each physical pad is a `PadDevice` keyed by its event-stream fd, carrying its own
+held buttons, stick calibration, per-pad timers, and a stable player slot. Shared
+output resources (the virtual uinput keyboard/mouse, the broadcast bus, the remap
+table, the capture state) live in a `Shared` struct borrowed by every per-pad
+method, so there is still a single state owner and no `Arc<Mutex>` across `.await`.
+
+- **Discovery** (`device::find_gamepads`) returns *all* DB-matched pads; the fleet
+  dedups against pads it already holds by **device path** (an already-grabbed pad
+  re-enumerates at the same path but a fresh fd, so fd-ownership alone can't dedup
+  the physical pad). Foreign injectors (ydotoold) are rejected by the
+  DB-match-or-reject gate; our own uinput devices are skipped by fd.
+- **Hot-join/leave + stable slots (#101):** join → lowest-free slot
+  (`SlotAllocator`) → grab → calibrate → `controller-wake` + `pad:connected`.
+  Leave → free slot (reused in connection order) → drop virtual pad →
+  `controller-disconnected` + `pad:disconnected`. P1 keeps slot 0 across a P2
+  reconnect. `SlotAllocator` is pure and unit-tested.
+- **Shared focus (shell mode):** combos / Home-hold are detected
+  **per-pad-complete** — a single pad must hold the whole key set, so two pads
+  each holding *half* a combo never trigger it. A fleet-level latch publishes
+  `intent:home-hold` once even when two pads hold Home simultaneously. For a
+  single connected pad this is byte-identical to the pre-fleet behavior.
+- **Wire compat:** `status` reports the fleet aggregate (`connected` = any pad,
+  `grabbed` = any pad) — identical to the old reply for one pad. `get-pads`
+  exposes per-pad `{id,index,name,grabbed}` for the UI.
+
+The per-pad `virtual_pad` / `battery` / `led_index` fields are reserved here and
+wired by the Phase 5 game presenter and the Phase 5.5 rumble/battery/LED
+ride-alongs.
 
 ## Phase 3 — D-Bus backbone (`bluetooth.rs` / `network.rs` / `power.rs`)
 
@@ -129,18 +162,46 @@ raw Unix sockets (no crate, no system deps).
 1. `cargo build --release`
 2. Install `target/release/game-shell-input` to `/opt/game-shell/bin/`
 
-No launch-line edit is needed: `scripts/game-shell-session.sh` auto-prefers the
-binary on the next session when it's present, and falls back to the Python daemon
-if the binary is absent or exits immediately at startup.
+`scripts/game-shell-session.sh` spawns the binary directly — it is the sole
+backend (the Python rollback was retired in #96).
 
 Honors `GAME_SHELL_SOCK`, `GAMEPAD_VENDOR`/`GAMEPAD_PRODUCT` (exact-pin override),
 and `GAME_SHELL_GAMECONTROLLERDB` (fuller controller DB).
 
+## Logging & debugging
+
+Logs go to stderr via `tracing`, filtered by `RUST_LOG` (default `info`). Tiers:
+
+| Level | Shows |
+|-------|-------|
+| `info` (default) | startup/actors, pad join/leave + grab, **presenter ↔ Shell/Game transitions** (the grab-handoff that's most bug-prone), warnings/errors |
+| `debug` | every **published broadcast event** at the `publish()` chokepoint — `intent:*`, combos, `pad:*`, `input-mode:*`, `controller-wake`, status pushes |
+| `trace` | every **raw evdev event** from each pad (slot + type/code/value) and every `emit_key`/`emit_mouse_button` to the shared virtual devices |
+
+```bash
+# Full input pipeline trace for one run (scoped to the input module):
+RUST_LOG=game_shell_input::input=trace /opt/game-shell/bin/game-shell-input
+# High-level event flow only (intents/combos/pad events), less noise:
+RUST_LOG=game_shell_input::input=debug ...
+```
+
+The live **`subscribe`** IPC stream is the other debug surface — it shows the
+daemon's outbound events in real time without restarting:
+
+```bash
+printf 'subscribe\n' | socat - UNIX-CONNECT:"$GAME_SHELL_SOCK"
+```
+
+Inject a control-surface intent by hand (e.g. to test the keyboard escape path):
+
+```bash
+printf 'intent home\n' | socat - UNIX-CONNECT:"$GAME_SHELL_SOCK"   # -> ok
+```
+
 ## Status
 
-The Python daemon stays the default until this is hardware-verified. Phase 3
-(zbus/Bluetooth/Wi-Fi-read/power) and Phase 4 (Hyprland + Sunshine `health`) are
-implemented above but **require on-device verification** — the Linux-only modules
-(D-Bus, `hyprland`) don't compile or run on macOS/CI, and `health`'s live fetch
-needs a reachable Sunshine host. **HDMI-CEC remains deferred** (still a
-`cec-client` shell-out in `AVController.qml`) as a follow-up.
+Phase 3 (zbus/Bluetooth/Wi-Fi-read/power) and Phase 4 (Hyprland + Sunshine
+`health`) **require on-device verification** — the Linux-only modules (D-Bus,
+`hyprland`) don't compile or run on macOS/CI, and `health`'s live fetch needs a
+reachable Sunshine host. **HDMI-CEC remains deferred** (still a `cec-client`
+shell-out in `AVController.qml`) as a follow-up.

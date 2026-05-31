@@ -1,6 +1,6 @@
 # IPC Protocol Specification
 
-The gamepad input daemon (`input/gamepad-input.py`) communicates with QML components over a Unix domain socket using a newline-delimited text protocol.
+The input/backend daemon (`game-shell-input`, Rust source in `rust/`) communicates with QML components over a Unix domain socket using a newline-delimited text protocol.
 
 ## Socket Connection
 
@@ -14,7 +14,7 @@ The gamepad input daemon (`input/gamepad-input.py`) communicates with QML compon
 
 The daemon removes any existing socket file on startup and creates a new one. Clients connect, send one command per line, and read the response. The `subscribe` command is the exception — it holds the connection open and streams events.
 
-Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, and `power-battery`, and the Phase 4 query replies `hypr-active`, `hypr-clients`, and `sunshine-status`. JSON only ever appears as such a body — never as the framing itself.
+Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, and `power-battery`, and the Phase 4 query replies `hypr-active`, `hypr-clients`, and `sunshine-status`. JSON only ever appears as such a body — never as the framing itself.
 
 ## Client-to-Daemon Commands
 
@@ -42,6 +42,59 @@ Query current connection and grab state.
 | grab | `grabbed` or `released` |
 
 Example: `connected:grabbed\n`
+
+> **Fleet aggregate (Phase 4).** With multi-pad support the daemon tracks a
+> *fleet* of pads. `status` is the fleet aggregate: `connected` if **any** pad is
+> present, `grabbed` if **any** pad is grabbed. For a single connected pad this
+> is byte-identical to the pre-fleet reply (`connected:grabbed` /
+> `disconnected:released`). Use `get-pads` for per-pad detail.
+
+### `get-pads`
+
+Return the connected gamepad fleet as a compact JSON array, one object per pad in
+ascending player-slot order. Each pad has a stable player `index` (#101) that
+survives another pad reconnecting (P1 stays slot 0 across a P2 unplug/replug).
+
+**Response:** Single-line JSON array of `{id,index,name,grabbed}` objects.
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Stable wire id (from evdev `uniq`/`phys`, else `vp:vendor:product:path`) — follows a physical pad across reconnects |
+| `index` | Player slot (0 = P1, 1 = P2, …); lowest free slot reused on reconnect |
+| `name` | Device display name |
+| `grabbed` | Whether the daemon currently holds the exclusive grab |
+
+Example: `[{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wireless Controller","grabbed":true}]\n`
+
+Empty fleet → `[]\n`.
+
+### `list-input-devices`
+
+Enumerate **every controller-like input device** on the host — anything that
+advertises `BTN_SOUTH` **or** carries a `js*` handler — as a compact JSON array.
+A **diagnostics enumerator** (it replaces `ControllerSettings`' old
+`/proc/bus/input/devices` python reader), distinct from `get-pads`: it lists
+ungrabbed and virtual devices too, not just the grabbed fleet. The runtime marks
+`grabbed=true` only for devices whose devnode path the fleet currently owns.
+
+**Response:** Single-line JSON array of device objects, one per device, in
+ascending devnode-path order:
+
+```json
+[{"name":"Xbox 360 Controller","path":"/dev/input/event18","vendor":"045e","product":"028e","phys":"usb-0000:00:14.0-1/input0","handlers":["event18","js0"],"grabbed":true}]
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `name` | string | Device display name (evdev name) |
+| `path` | string | The `/dev/input/eventN` devnode |
+| `vendor` | string | 4-hex-digit lowercase vendor id (e.g. `"045e"`) |
+| `product` | string | 4-hex-digit lowercase product id (e.g. `"028e"`) |
+| `phys` | string | evdev physical path (`""` if none) |
+| `handlers` | array | Handler names from `/proc/bus/input/devices` (e.g. `["event18","js0"]`); falls back to just the event-node name when `/proc` is unavailable |
+| `grabbed` | bool | True only for devices the fleet currently owns |
+
+An empty result is `[]`.
 
 ### `subscribe`
 
@@ -378,25 +431,79 @@ Battery present:
 
 On a non-Linux build: `error:unsupported on this platform\n`.
 
-### `kbd-log on` / `kbd-log off`
+### `intent <name>`
 
-Toggle daemon-side logging of keyboard key events. When enabled, every initial keydown (auto-repeats excluded) emits a log line like:
+Inject a shell *intent* into the broadcast bus — the daemon's first-class,
+headless **control surface**. Any accepted `intent <name>` re-broadcasts to all
+`subscribe` clients as an `intent:<name>` event (see
+[Intents](#intents)). The daemon does not know or care who issued it, so the
+keyboard global-escape (Hyprland `Super` bind), screenshot/automation, and the
+daemon's own gamepad logic all ride the **identical** path.
+
+`<name>` is a single whitespace-trimmed token validated against a **closed
+vocabulary**. Unknown names are rejected; the command **touches no device** (it
+is a pure broadcast).
+
+| Intent | Meaning |
+|--------|---------|
+| `home` | Global return-to-shell escape (keyboard `Super`, automation). Always leaves the running app. Distinct from the gamepad neutrals below. |
+| `home-tap` | Gamepad Home neutral — a short Home press. QML routes it (typically to `menu` when the shell is focused). |
+| `home-hold` | Gamepad Home neutral — a long Home press. QML routes it (typically to the return-to-shell / reset path). |
+| `menu` | Toggle the navigation drawer. |
+| `nav-up` / `nav-down` / `nav-left` / `nav-right` | Directional menu navigation. |
+| `select` | Confirm / activate the focused element. |
+| `back` | Cancel / go back. |
+| `settings` | Open settings. |
+| `power` | Open the power menu. |
+
+`home` is the global escape; `home-tap`/`home-hold` are the **neutral** gamepad
+Home signals (QML, which owns focus, decides what each means). This split keeps
+the daemon free of any focus/state knowledge.
+
+| Condition | Response |
+|-----------|----------|
+| `<name>` in the closed vocabulary | `ok\n` (and an `intent:<name>` event is broadcast) |
+| `<name>` outside the vocabulary | `error:unknown intent '<name>'\n` (no event) |
+| Missing/empty `<name>` body | `error:usage: intent <name>\n` |
+
+**Example (automation):**
 
 ```
-game-shell-input: kbd-key code=125 raw=KEY_LEFTMETA display='Meta' source=mapped
+echo "intent home" | nc -U "$GAME_SHELL_SOCK"
 ```
 
-`source` is one of:
+### `rumble <id> <ms>`
 
-| Value | Meaning |
-|---|---|
-| `mapped` | Friendly name came from the explicit `KEY_DISPLAY_NAMES` table |
-| `fallback` | Raw kernel name found, display computed by stripping `KEY_` prefix and titlecasing |
-| `unknown` | The evdev tables don't recognize this code at all |
+Fire a rumble (haptic `FF_RUMBLE`) effect on the pad whose stable wire `id` (the
+`get-pads` / `pad:*` id) is `<id>`, for `<ms>` milliseconds. Part of the fleet
+*outputs* ride-along (#99). The shell fires this on meaningful events (e.g. a
+launch confirmation); the daemon itself also pulses a connecting pad.
 
-This lets us build a history of pressed keys over time and find unmapped or mis-mapped keys to fold back into `KEY_DISPLAY_NAMES`. Off by default — the shell's debug overlay flips it on when it opens and off when it closes, so normal use doesn't accumulate keystroke history.
+`<id>` is a single whitespace-trimmed token (the wire id, which may itself
+contain `:`); `<ms>` is a non-negative integer.
 
-**Response:** `ok\n`
+This is a **best-effort, cap-gated no-op**:
+
+- a no-op (still `ok`) if no pad has that wire id,
+- a no-op if the pad has no force feedback (`EV_FF` / `FF_RUMBLE`),
+- a no-op if the persisted **`rumbleEnabled`** setting is `false` (default
+  `true`).
+
+| Condition | Response |
+|-----------|----------|
+| Accepted (fired, or a cap-gated no-op) | `ok\n` |
+| Missing/incomplete `<id> <ms>`, or non-integer `<ms>` | `error:usage: rumble <id> <ms>\n` |
+
+**Example (automation):**
+
+```
+echo "rumble uniq:e4:17:d8:01:02:03 200" | nc -U "$GAME_SHELL_SOCK"
+```
+
+> **`rumbleEnabled` setting.** A QML-owned boolean in `settings.json`
+> (default `true`) gating all daemon-fired rumble — both the `rumble` command and
+> the connect pulse. Read by the daemon via `get-config`; toggled like any other
+> QML-owned key via `set-config`.
 
 ## Phase 4 Commands (Hyprland + Sunshine)
 
@@ -519,22 +626,85 @@ Subscribers (registered via `subscribe`) receive these events as newline-termina
 
 | Event | Trigger |
 |-------|---------|
-| `controller-wake` | Gamepad discovered and grabbed on (re)connect |
-| `controller-disconnected` | Gamepad `OSError` during event read (USB disconnect) |
+| `controller-wake` | A gamepad was discovered and grabbed on (re)connect (fires per joining pad) |
+| `controller-disconnected` | A gamepad stream errored during event read (USB disconnect; fires per leaving pad) |
+| `pad:connected:<json>` | A pad joined the fleet and was assigned a player slot. Payload: compact `{id,index,name}` object (#101) |
+| `pad:disconnected:<id>` | A pad left the fleet; its slot is freed for reuse. Payload: the pad's stable wire `id` |
+| `pad:index:<json>` | A pad's player-indicator LED was lit to match its slot at assignment (#101 LED). Payload: compact `{id,index}` object. Emitted for pads with a controllable LED — via `EV_LED`, or via the `/sys/class/leds` xpad fallback (Xbox 360 pads expose their ring through sysfs, not `EV_LED`); a no-op for pads with neither |
+| `pad:battery:<json>` | A pad's battery level/charging state changed (#100). Payload: compact `{id,level,charging}` object (`level` 0–100, `charging` bool). Only emitted for pads that report a battery (wireless); wired pads emit none |
+
+`controller-wake` / `controller-disconnected` are the legacy single-pad signals
+and still fire for every join/leave (so existing QML wake handling is unchanged).
+The `pad:*` events carry the fleet-aware per-pad detail (stable id + player
+index). Example: `pad:connected:{"id":"uniq:e4:17:...","index":0,"name":"Xbox Wireless Controller"}\n`.
+
+**Fleet outputs (ride-along, #99/#100/#101).** On top of join/leave, the daemon
+drives three per-pad *outputs*, each cap-gated and degrading to a clean no-op
+when the pad lacks the hardware:
+
+- **LED (#101):** at slot assignment the daemon lights the pad's player LED and
+  emits `pad:index:{id,index}`. It tries `EV_LED` (LED code == player slot)
+  first, then falls back to the `/sys/class/leds` xpad node (Xbox 360 pads expose
+  their player ring through sysfs, not `EV_LED`). No controllable LED → no
+  event.
+- **Battery (#100):** the daemon polls the pad's `power_supply` sysfs and emits
+  `pad:battery:{id,level,charging}` on change (and once at connect). Wired pads
+  report no battery → no event.
+- **Rumble (#99):** a short haptic pulse on connect, plus the `rumble <id> <ms>`
+  command. Gated by `FF_RUMBLE` support and the `rumbleEnabled` setting; there is
+  no rumble *event* (it's an output, not a notification).
+
+Example wire lines:
+
+```
+pad:index:{"id":"uniq:e4:17:...","index":0}
+pad:battery:{"id":"uniq:e4:17:...","level":80,"charging":false}
+```
 
 ### Home Button
 
+The gamepad Home button (`BTN_MODE`) is **always intercepted** by the daemon and
+surfaced as a neutral [intent](#intents) on the broadcast stream — in **both**
+the shell and game presenters (so the shell overlay can come up over a running
+game). It is never mapped to a key and never forwarded to a game's virtual pad.
+
 | Event | Trigger |
 |-------|---------|
-| `home-press` | `BTN_MODE` released before the 2-second hold threshold |
-| `combo:home-hold` | `BTN_MODE` held for 2 seconds |
+| `intent:home-tap` | `BTN_MODE` released before the 2-second hold threshold |
+| `intent:home-hold` | `BTN_MODE` held for 2 seconds |
+
+The legacy `home-press` / `combo:home-hold` events were removed in Phase 5 — QML
+now consumes only the `intent:*` vocabulary.
+
+### Intents
+
+Every accepted [`intent <name>`](#intent-name) command re-broadcasts here as an
+`intent:<name>` event. This is the global control-surface stream: keyboard
+global-escape, automation, and (in later phases) the daemon's own gamepad logic
+all surface through it, so QML consumes **one** vocabulary regardless of source.
+
+| Event | Payload (`<name>`) |
+|-------|--------------------|
+| `intent:<name>` | One of `home`, `home-tap`, `home-hold`, `menu`, `nav-up`, `nav-down`, `nav-left`, `nav-right`, `select`, `back`, `settings`, `power` |
+
+`intent:home` is the global return-to-shell escape; `intent:home-tap` /
+`intent:home-hold` are the neutral gamepad Home signals (QML maps them by the
+focus it owns). `intent:menu` toggles the navigation drawer. The daemon's own
+gamepad Home handling publishes `intent:home-tap` / `intent:home-hold` directly,
+so QML has exactly one shell-intent vocabulary regardless of source.
 
 ### Combo Events
 
 | Event | Trigger | Details |
 |-------|---------|---------|
 | `combo:end-session` | `BTN_MODE` + `BTN_EAST` (Home+B) held for 3 seconds | Timed combo |
-| `combo:force-quit` | `BTN_SELECT` + `BTN_MODE` + `BTN_TL` + `BTN_TR` (Back+Home+LB+RB) all held | Instant, no hold timer. When ungrabbed, also emits `Ctrl+Alt+Shift+Q` via uinput to quit Moonlight |
+| `combo:force-quit` | `BTN_SELECT` + `BTN_MODE` + `BTN_TL` + `BTN_TR` (Back+Home+LB+RB) all held | Instant, no hold timer. In the **game presenter** (an app/stream owns the screen) also emits `Ctrl+Alt+Shift+Q` via uinput to quit Moonlight; the shell presenter has no app to quit |
+| `combo:suspend-stream` | `BTN_START` + `BTN_TL` + `BTN_TR` (Start+LB+RB) all held, and **not** the force-quit combo | Instant, no hold timer. Gamepad-only safety combo; QML routes it to a stream suspend |
+
+All three combos are **gamepad-button** based (matched against the fleet's held
+buttons), never keyboard chords — they survived the Phase 2 keyboard-snoop
+deletion unchanged. Any pad in the fleet can fire them (shared/deduped at the
+fleet level).
 
 ### Input Mode
 
@@ -550,14 +720,15 @@ Mode events are only sent on transitions (not re-sent if already in that mode).
 | Event | Format |
 |-------|--------|
 | `buttons:<held>` | Space-and-plus-separated list of currently held controller inputs |
-| `keys:<held>` | Space-and-plus-separated list of currently held keyboard keys |
 
 `buttons:` is sent on every controller button down/up, trigger threshold crossing, and stick axis change. The `<held>` portion is empty when nothing is held (i.e., `buttons:\n`). Includes button friendly names, D-pad directions, stick directions, and trigger state.
 
-`keys:` is sent on every keyboard key down/up from any discovered evdev keyboard device. The daemon reads these devices without `EVIOCGRAB` — keys still reach focused windows normally; this is a read-only snoop for the debug overlay. Names use a friendly display map (e.g. `KEY_LEFTMETA` → `Meta`, `KEY_UP` → `↑`) with a fallback that strips the `KEY_` prefix and titlecases the rest. Empty held set emits `keys:\n`.
+> **Keyboard keys are NOT a daemon event.** The daemon no longer snoops the
+> keyboard (Phase 2 — the keyboard belongs to the compositor + QML). The shell's
+> debug overlay reads held keyboard keys directly from Wayland `Keys` in QML;
+> there is no `keys:` event and no `kbd-log` command.
 
 Example: `buttons:Home + B + LT + L→ + R↑\n`
-Example: `keys:Ctrl + Shift + A\n`
 
 Button display names used in the `buttons:` event:
 
@@ -641,9 +812,10 @@ hypr:fullscreen:0
 | `confirm` | `BTN_START` (Start) | `KEY_ENTER` | Yes |
 
 `BTN_MODE` (Home) is **not** a mapped action. It is handled directly to broadcast
-`home-press` (tap) / `combo:home-hold` (hold) on the socket — mapping it to a key
-would leak `KEY_HOMEPAGE` to whatever app has keyboard focus. It is still a valid
-*target* for `set-binding` (it is in the remappable set), but no action defaults to it.
+`intent:home-tap` (tap) / `intent:home-hold` (hold) on the socket — mapping it to a
+key would leak `KEY_HOMEPAGE` to whatever app has keyboard focus. It is still a
+valid *target* for `set-binding` (it is in the remappable set), but no action
+defaults to it.
 
 ### Remappable Buttons
 
@@ -683,25 +855,34 @@ LB and RB emit mouse left-click and right-click respectively (both in grabbed an
 
 Left and right triggers (`ABS_Z`, `ABS_RZ`) are treated as digital: held when analog value > 100, released otherwise. They appear in the `buttons:` debug event as `LT`/`RT` but do not emit any keyboard or mouse events.
 
-## Grabbed vs Ungrabbed Behavior
+## Presenters: Shell vs Game
 
-| Feature | Grabbed | Ungrabbed |
-|---------|---------|-----------|
-| Button-to-keyboard mapping | Active | Inactive |
-| D-pad → arrow keys | Active | Inactive |
-| Left stick → arrow keys | Active | Inactive |
-| Right stick → mouse cursor | Active | Active |
-| LB/RB → mouse clicks | Active | Active |
-| Combo detection (end-session, force-quit) | Active | Active |
-| Home button hold detection | Active | Inactive |
-| `home-press` event | Active | Inactive |
-| `buttons:` debug events | Active | Active |
-| Input mode tracking | Active | Active |
-| Capture mode | Active | Inactive |
+The daemon **keeps the physical `EVIOCGRAB` in both modes** (Phase 5) — no
+controller input ever leaks to the compositor. The `grab` IPC selects the
+**shell presenter**, `release` selects the **game presenter**; the two differ
+only in where the pad's input goes.
+
+| Feature | Shell presenter (`grab`) | Game presenter (`release`) |
+|---------|--------------------------|----------------------------|
+| Physical pad grabbed | Yes | Yes |
+| Per-player clean virtual gamepad | — | One per pad (`game-shell-virtual-pad-<slot>`) |
+| Button-to-keyboard mapping | Active | — (raw buttons forwarded to the virtual pad) |
+| D-pad / left stick → arrow keys | Active | — (forwarded as raw axes) |
+| Right stick → mouse cursor | Active | — (forwarded as raw axis) |
+| LB/RB → mouse clicks | Active | — (forwarded as raw buttons) |
+| Combo detection (end-session, force-quit, suspend) | Active | Active |
+| Home → `intent:home-tap` / `intent:home-hold` | Active (intercepted) | Active (intercepted, never forwarded) |
+| `buttons:` debug events | Active | — |
+| Input mode tracking | Active | — |
+| Capture mode | Active | — |
 | Force-quit `Ctrl+Alt+Shift+Q` emission | No (not needed) | Yes |
 
-On grab: clears held keys, resets triggers, cancels combos, sets input mode to `controller`.
-On release: resets all stick state (releases held keys, cancels repeat tasks), clears held keys, resets triggers, cancels combos.
+On entering the shell presenter: each pad's clean virtual gamepad is torn down;
+held keys/triggers reset and combos cancel on the underlying grab.
+On entering the game presenter: each pad gets a clean virtual gamepad mirroring
+its capabilities (keys, axes with calibration, `input_id`). The game reads the
+virtual pad; the daemon still intercepts Home so the shell can come up over a
+running game.
 
 ## Settings Persistence
 
@@ -747,4 +928,4 @@ On disconnect (`OSError` during event read), the daemon sends `controller-discon
 
 ## Known Issues
 
-- **`BTN_MODE` is socket-only**: The Home button is not mapped to a keyboard key. It drives `home-press` (tap) and `combo:home-hold` (hold) subscriber events directly. Mapping it to `KEY_HOMEPAGE` was intentionally avoided because that keycode leaks to focused apps (browsers treat it as "go to home page"). `BTN_MODE` is still a valid `set-binding` *target*, but no action defaults to it.
+- **`BTN_MODE` is socket-only**: The Home button is not mapped to a keyboard key. It drives `intent:home-tap` (tap) and `intent:home-hold` (hold) subscriber events directly, intercepted in both presenters. Mapping it to `KEY_HOMEPAGE` was intentionally avoided because that keycode leaks to focused apps (browsers treat it as "go to home page"). `BTN_MODE` is still a valid `set-binding` *target*, but no action defaults to it.

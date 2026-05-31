@@ -10,8 +10,9 @@ import QtQuick
 // Process children to do socket I/O.
 //
 // Ownership: the input daemon is the SOLE writer of settings.json. This store
-// holds the QML-relevant keys (themeMode, streamingViewMode, controllerDebug)
-// and hands them to the daemon via `set-config`; the daemon does the
+// holds the QML-relevant keys (themeMode, streamingViewMode, controllerDebug,
+// rumbleEnabled) and hands them to the daemon via `set-config`; the daemon does
+// the
 // read-modify-write, preserving foreign keys it owns (notably keyBindings).
 // `keyBindings` here is a read-through mirror kept in sync over IPC.
 //
@@ -27,6 +28,7 @@ Item {
     property string themeMode: "dark"             // "auto" | "light" | "dark"
     property string streamingViewMode: "servers"  // "servers" | "apps"
     property bool controllerDebug: false
+    property bool rumbleEnabled: true             // gates daemon-fired rumble (#99)
 
     // === Daemon-owned mirror (authoritative copy lives in the daemon) ===
     property var keyBindings: ({})
@@ -42,27 +44,26 @@ Item {
     // --- Load: read settings via the daemon's `get-config` IPC (no write) ---
     // The daemon is the sole settings.json writer; this asks it for the current
     // document as a compact single-line JSON object.
-    Process {
+    SocketClient {
         id: loadProc
-        command: ["python3", "-c", store._ipc("get-config")]
-        stdout: SplitParser {
-            onRead: line => {
-                try {
-                    var obj = JSON.parse(line);
-                    if (obj.themeMode === "auto" || obj.themeMode === "light" || obj.themeMode === "dark")
-                        store.themeMode = obj.themeMode;
-                    // Migration: prefer streamingViewMode, fall back to the
-                    // legacy moonlightViewMode key for existing settings files.
-                    var viewMode = obj.streamingViewMode !== undefined ? obj.streamingViewMode : obj.moonlightViewMode;
-                    if (viewMode === "servers" || viewMode === "apps")
-                        store.streamingViewMode = viewMode;
-                    if (typeof obj.controllerDebug === "boolean")
-                        store.controllerDebug = obj.controllerDebug;
-                    if (obj.keyBindings && typeof obj.keyBindings === "object")
-                        store.keyBindings = obj.keyBindings;
-                } catch (e) {
-                    console.log("SettingsStore: failed to parse settings:", e);
-                }
+        onResponseReceived: line => {
+            try {
+                var obj = JSON.parse(line);
+                if (obj.themeMode === "auto" || obj.themeMode === "light" || obj.themeMode === "dark")
+                    store.themeMode = obj.themeMode;
+                // Migration: prefer streamingViewMode, fall back to the
+                // legacy moonlightViewMode key for existing settings files.
+                var viewMode = obj.streamingViewMode !== undefined ? obj.streamingViewMode : obj.moonlightViewMode;
+                if (viewMode === "servers" || viewMode === "apps")
+                    store.streamingViewMode = viewMode;
+                if (typeof obj.controllerDebug === "boolean")
+                    store.controllerDebug = obj.controllerDebug;
+                if (typeof obj.rumbleEnabled === "boolean")
+                    store.rumbleEnabled = obj.rumbleEnabled;
+                if (obj.keyBindings && typeof obj.keyBindings === "object")
+                    store.keyBindings = obj.keyBindings;
+            } catch (e) {
+                console.log("SettingsStore: failed to parse settings:", e);
             }
         }
     }
@@ -73,23 +74,22 @@ Item {
     // passed as argv to python (not interpolated into the source), so app/enum
     // values can never break the command string. `moonlightViewMode:null` drops
     // the legacy key, matching the previous behavior.
-    Process {
+    SocketClient {
         id: saveProc
-        command: ["true"]
     }
 
     function load() {
-        loadProc.running = true;
+        loadProc.request("get-config");
     }
     function save() {
         var body = JSON.stringify({
             "themeMode": store.themeMode,
             "streamingViewMode": store.streamingViewMode,
             "controllerDebug": store.controllerDebug,
+            "rumbleEnabled": store.rumbleEnabled,
             "moonlightViewMode": null
         });
-        saveProc.command = ["python3", "-c", store._ipcArg("set-config"), body];
-        saveProc.running = true;
+        saveProc.request("set-config", body);
     }
 
     function setThemeMode(mode) {
@@ -114,77 +114,67 @@ Item {
         settingsChanged("controllerDebug", enabled);
     }
 
+    function setRumbleEnabled(enabled) {
+        rumbleEnabled = enabled;
+        save();
+        settingsChanged("rumbleEnabled", enabled);
+    }
+
     // === Binding IPC (respects GAME_SHELL_SOCK; no hardcoded socket path) ===
     function getBindings() {
-        getBindingsProc.running = true;
+        getBindingsProc.request("get-bindings");
     }
 
     function setBinding(action, button) {
-        setBindingProc.command = ["python3", "-c", store._ipc("set-binding " + action + " " + button)];
-        setBindingProc.running = true;
+        setBindingProc.request("set-binding " + action + " " + button);
     }
 
     function captureNext() {
-        captureProc.running = true;
+        captureProc.request("capture-next");
     }
 
     function cancelCapture() {
-        cancelCaptureProc.running = true;
+        cancelCaptureProc.request("capture-cancel");
     }
 
-    // Build a one-shot Unix-socket request/response python one-liner. The daemon
-    // keeps the connection open after replying (it loops waiting for the next
-    // command), so we read until the first newline — the response terminator —
-    // rather than until EOF, which would block until the socket timeout.
-    function _ipc(cmd) {
-        return "import socket,os;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(b'" + cmd + "\\n');buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
-    }
+    // All daemon IPC goes over native Quickshell sockets (SocketClient, #97).
+    // The set-config body (a JSON string) is passed as the request body so
+    // arbitrary JSON never needs shell/argv quoting. (Phase 8 retired the
+    // python3 socket shims.)
 
-    // Like _ipc, but the request body is sys.argv[1] (a JSON string passed as a
-    // separate argv element). This keeps arbitrary JSON out of the python source
-    // literal — no quoting/escaping bugs — and is used for `set-config`.
-    function _ipcArg(cmd) {
-        return "import socket,os,sys;s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(20);s.connect(os.environ.get('GAME_SHELL_SOCK','/run/user/'+str(os.getuid())+'/game-shell-input.sock'));s.sendall(('" + cmd + " '+sys.argv[1]+'\\n').encode());buf=b'';exec(\"while b'\\\\n' not in buf:\\n c=s.recv(65536)\\n if not c: break\\n buf+=c\");s.close();print(buf.split(b'\\n',1)[0].decode())";
-    }
-
-    Process {
+    SocketClient {
         id: getBindingsProc
-        command: ["python3", "-c", store._ipc("get-bindings")]
-        stdout: SplitParser {
-            onRead: line => {
-                try {
-                    var b = JSON.parse(line);
-                    store.keyBindings = b;
-                    store.bindingsReceived(b);
-                } catch (e) {
-                    console.log("SettingsStore: failed to parse bindings:", e);
-                }
+        onResponseReceived: line => {
+            try {
+                var b = JSON.parse(line);
+                store.keyBindings = b;
+                store.bindingsReceived(b);
+            } catch (e) {
+                console.log("SettingsStore: failed to parse bindings:", e);
             }
         }
     }
 
-    Process {
+    SocketClient {
         id: setBindingProc
-        // command set dynamically in setBinding(); re-fetch so the mirror stays current
-        onExited: store.getBindings()
+        // command issued dynamically in setBinding(); re-fetch so the mirror
+        // stays current once the daemon acknowledges.
+        onResponseReceived: response => store.getBindings()
+        onRequestFailed: store.getBindings()
     }
 
-    Process {
+    SocketClient {
         id: captureProc
-        command: ["python3", "-c", store._ipc("capture-next")]
-        stdout: SplitParser {
-            onRead: line => {
-                if (line.startsWith("captured:"))
-                    store.bindingCaptured(line.substring(9));
-                else if (line === "timeout" || line === "cancelled")
-                    store.captureCancelled();
-            }
+        onResponseReceived: line => {
+            if (line.startsWith("captured:"))
+                store.bindingCaptured(line.substring(9));
+            else if (line === "timeout" || line === "cancelled")
+                store.captureCancelled();
         }
     }
 
-    Process {
+    SocketClient {
         id: cancelCaptureProc
-        command: ["python3", "-c", store._ipc("capture-cancel")]
     }
 
     Component.onCompleted: load()
