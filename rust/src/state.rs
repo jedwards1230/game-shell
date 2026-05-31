@@ -55,6 +55,15 @@ pub enum Control {
         ms: u32,
         reply: Reply,
     },
+    /// `key <name>`: synthesize a single keystroke (press+release) on the shared
+    /// virtual keyboard. The runtime maps `name` via `config::key_for_action`
+    /// and emits the keycode; an unknown name replies `error:unknown key
+    /// '<name>'`. Unlike `Intent`, this touches the device — it is the headless
+    /// nav surface (parity with the gamepad d-pad / `wtype`).
+    Key {
+        name: String,
+        reply: Reply,
+    },
     Shutdown,
 }
 

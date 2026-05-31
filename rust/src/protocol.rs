@@ -64,6 +64,17 @@ pub enum Command {
     /// `rumble` with a missing/incomplete `<id> <ms>` body, or a non-integer
     /// `<ms>`.
     RumbleUsage,
+    /// `key <name>` — synthesize a single keystroke (press+release) on the
+    /// shared virtual keyboard, the headless counterpart to a gamepad d-pad/A/B
+    /// tap or a `wtype -k`. `<name>` is one token in the closed key vocabulary
+    /// (`up`/`down`/`left`/`right`/`select`/`back`); the runtime maps it to a
+    /// keycode (`config::key_for_action`) and rejects unknown names. Unlike
+    /// `intent`, this **does** touch the device — it is the socket nav surface
+    /// for automation/screenshot tours, kept distinct from the pure-broadcast
+    /// `intent` control surface.
+    Key(String),
+    /// `key` with a missing/empty `<name>` body.
+    KeyUsage,
     /// Scan installed `.desktop` apps; reply is a compact JSON array.
     /// Stateless (no input-runtime round-trip).
     ListApps,
@@ -159,24 +170,17 @@ pub enum Command {
 /// - `home-tap` / `home-hold` — gamepad Home neutrals (QML routes tap->menu,
 ///   hold->home/reset from the focus it owns).
 /// - `menu` — nav-drawer toggle.
-/// - `nav-up` / `nav-down` / `nav-left` / `nav-right` — directional navigation.
-/// - `select` / `back` — confirm / cancel.
 /// - `settings` — open settings.
 /// - `power` — power menu.
-pub const INTENT_VOCAB: &[&str] = &[
-    "home",
-    "home-tap",
-    "home-hold",
-    "menu",
-    "nav-up",
-    "nav-down",
-    "nav-left",
-    "nav-right",
-    "select",
-    "back",
-    "settings",
-    "power",
-];
+///
+/// These are the *high-level, focus-independent* actions QML interprets by
+/// state. Directional focus moves + confirm/cancel are **not** here: they are
+/// keyboard-layer concerns served by real key events (the gamepad d-pad/A/B that
+/// the daemon synthesizes, `wtype`, or the `key <name>` IPC command), not the
+/// broadcast bus. Earlier revisions listed `nav-up/down/left/right`/`select`/
+/// `back` here, but nothing produced or consumed them — they were a dead
+/// parallel path, removed in favor of `key <name>`.
+pub const INTENT_VOCAB: &[&str] = &["home", "home-tap", "home-hold", "menu", "settings", "power"];
 
 /// True if `name` is in the closed intent vocabulary.
 pub fn is_known_intent(name: &str) -> bool {
@@ -261,6 +265,18 @@ impl Command {
                         Command::IntentUsage
                     } else {
                         Command::Intent(body.to_string())
+                    };
+                }
+                // `key <name>`: a single key-name token (whitespace-trimmed). A
+                // missing body is a usage error. `command_body` enforces the word
+                // boundary so e.g. `keyX` is not mistaken for `key`. The
+                // closed-vocabulary check + keycode mapping happen in the input
+                // runtime (parsing stays validation-free), mirroring `intent`.
+                if let Some(body) = command_body(cmd, "key") {
+                    return if body.is_empty() {
+                        Command::KeyUsage
+                    } else {
+                        Command::Key(body.to_string())
                     };
                 }
                 // `rumble <id> <ms>`: two whitespace-separated tokens — the pad
@@ -534,6 +550,17 @@ pub fn resp_rumble_usage() -> String {
 /// vocabulary.
 pub fn resp_unknown_intent(name: &str) -> String {
     format!("error:unknown intent '{name}'")
+}
+
+/// Usage line for a `key` issued without a `<name>` body.
+pub fn resp_key_usage() -> String {
+    "error:usage: key <name>".to_string()
+}
+
+/// Error reply for a `key <name>` whose name is outside the closed key
+/// vocabulary (`config::key_for_action` returned `None`).
+pub fn resp_unknown_key(name: &str) -> String {
+    format!("error:unknown key '{name}'")
 }
 
 /// Generic error reply for a malformed config/recents body.
@@ -842,8 +869,8 @@ mod tests {
         );
         // Body is whitespace-trimmed.
         assert_eq!(
-            Command::parse("  intent   nav-up  "),
-            Command::Intent("nav-up".into())
+            Command::parse("  intent   menu  "),
+            Command::Intent("menu".into())
         );
         // Bare command (no name) -> usage.
         assert_eq!(Command::parse("intent"), Command::IntentUsage);
@@ -853,22 +880,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_key_command() {
+        // Valid token -> Key (vocabulary is NOT checked at parse time).
+        assert_eq!(Command::parse("key up"), Command::Key("up".into()));
+        assert_eq!(Command::parse("key select"), Command::Key("select".into()));
+        // An unknown-but-well-formed token still parses; the runtime rejects it.
+        assert_eq!(
+            Command::parse("key frobnicate"),
+            Command::Key("frobnicate".into())
+        );
+        // Body is whitespace-trimmed.
+        assert_eq!(
+            Command::parse("  key   down  "),
+            Command::Key("down".into())
+        );
+        // Bare command (no name) -> usage.
+        assert_eq!(Command::parse("key"), Command::KeyUsage);
+        assert_eq!(Command::parse("key   "), Command::KeyUsage);
+        // Word boundary: `keyX` is NOT key.
+        assert_eq!(Command::parse("keyX"), Command::Unknown);
+    }
+
+    #[test]
     fn intent_event_wire_strings_round_trip() {
         // Each closed-vocabulary intent renders as `intent:<name>`.
-        for name in [
-            "home",
-            "home-tap",
-            "home-hold",
-            "menu",
-            "nav-up",
-            "nav-down",
-            "nav-left",
-            "nav-right",
-            "select",
-            "back",
-            "settings",
-            "power",
-        ] {
+        for &name in INTENT_VOCAB {
             assert_eq!(
                 Event::Intent(name.to_string()).to_string(),
                 format!("intent:{name}")

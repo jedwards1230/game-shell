@@ -249,9 +249,13 @@ async fn dispatch(control_tx: &mpsc::Sender<Control>, dbus: &DbusSenders, cmd: C
         Command::Rumble { id, ms } => {
             request(control_tx, move |reply| Control::Rumble { id, ms, reply }).await
         }
+        Command::Key(name) => {
+            request(control_tx, move |reply| Control::Key { name, reply }).await
+        }
         // Handled without a round-trip to the runtime:
         Command::IntentUsage => return protocol::resp_intent_usage(),
         Command::RumbleUsage => return protocol::resp_rumble_usage(),
+        Command::KeyUsage => return protocol::resp_key_usage(),
         Command::SetBindingUsage => return protocol::resp_set_binding_usage(),
         Command::Unknown => return protocol::resp_unknown(),
         // Subscribe is handled by the caller before dispatch.
@@ -467,6 +471,17 @@ mod tests {
                     // absent but still replies `ok`; the fake mirrors that.
                     let _ = reply.send(protocol::resp_ok());
                 }
+                Control::Key { name, reply } => {
+                    // Mirror the runtime: a known key maps to a code (and would
+                    // tap the virtual keyboard), an unknown one is rejected. The
+                    // fake doesn't emit; it only checks the vocabulary.
+                    let resp = if crate::config::key_for_action(&name).is_some() {
+                        protocol::resp_ok()
+                    } else {
+                        protocol::resp_unknown_key(&name)
+                    };
+                    let _ = reply.send(resp);
+                }
                 Control::Shutdown => break,
             }
         }
@@ -606,6 +621,16 @@ mod tests {
             send_line(&mut s, "rumble uniq:test").await,
             "error:usage: rumble <id> <ms>"
         );
+
+        // Key surface: a known token round-trips the runtime (ok); an unknown
+        // token is rejected; a bare command is a stateless usage error.
+        assert_eq!(send_line(&mut s, "key up").await, "ok");
+        assert_eq!(send_line(&mut s, "key select").await, "ok");
+        assert_eq!(
+            send_line(&mut s, "key sideways").await,
+            "error:unknown key 'sideways'"
+        );
+        assert_eq!(send_line(&mut s, "key").await, "error:usage: key <name>");
 
         // get-pads round-trips the runtime and returns the fleet JSON array.
         assert_eq!(

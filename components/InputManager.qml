@@ -29,9 +29,6 @@ Item {
     signal intentHomeTap        // gamepad Home neutral — short press
     signal intentHomeHold       // gamepad Home neutral — long press (reset)
     signal intentMenu           // toggle nav drawer
-    signal intentNav(string direction)  // up | down | left | right
-    signal intentSelect
-    signal intentBack
     signal intentSettings
     signal intentPower
 
@@ -292,7 +289,10 @@ Item {
     // Map a closed-vocabulary intent name to its QML signal. `home` is the
     // global return-to-shell escape (keyboard Super+Escape / automation); the
     // rest fan out 1:1. `menu` (bare Super) is the nav drawer; `home-hold`
-    // (Super+Backspace / gamepad Home-hold) is the reset.
+    // (Super+Backspace / gamepad Home-hold) is the reset. Directional focus
+    // moves + confirm/cancel are NOT here — they arrive as real key events
+    // (gamepad d-pad/A/B synthesized by the daemon, `wtype`, or the daemon's
+    // `key <name>` IPC) and are handled by each surface's KeyNavigation/Keys.
     function _handleIntent(name) {
         switch (name) {
         case "home":
@@ -306,24 +306,6 @@ Item {
             break;
         case "menu":
             root.intentMenu();
-            break;
-        case "nav-up":
-            root.intentNav("up");
-            break;
-        case "nav-down":
-            root.intentNav("down");
-            break;
-        case "nav-left":
-            root.intentNav("left");
-            break;
-        case "nav-right":
-            root.intentNav("right");
-            break;
-        case "select":
-            root.intentSelect();
-            break;
-        case "back":
-            root.intentBack();
             break;
         case "settings":
             root.intentSettings();

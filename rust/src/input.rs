@@ -34,8 +34,8 @@ use crate::config::{self, Binding};
 use crate::device::{self, ControllerDb, SlotAllocator, VirtualRegistry};
 use crate::protocol::{
     is_known_intent, pad_connected_json, resp_cancelled, resp_captured, resp_invalid_button,
-    resp_ok, resp_pads, resp_status, resp_timeout, resp_unknown_action, resp_unknown_intent, Event,
-    InputMode,
+    resp_ok, resp_pads, resp_status, resp_timeout, resp_unknown_action, resp_unknown_intent,
+    resp_unknown_key, Event, InputMode,
 };
 use crate::state::{self, Control, Reply};
 use evdev::uinput::VirtualDevice;
@@ -1717,6 +1717,23 @@ fn handle_control(sh: &mut Shared, fleet: &mut Fleet, ctrl: Control) -> bool {
                 }
             }
             let _ = reply.send(resp_ok());
+        }
+        Control::Key { name, reply } => {
+            // Synthesize a keystroke (press+release) on the shared virtual
+            // keyboard — the headless counterpart to a gamepad d-pad/A/B tap or
+            // a `wtype -k`, reaching whatever surface holds Wayland focus. Unlike
+            // `intent`, this deliberately touches the device. Unknown names are
+            // rejected without emitting.
+            match config::key_for_action(&name) {
+                Some(code) => {
+                    sh.emit_key(code, 1);
+                    sh.emit_key(code, 0);
+                    let _ = reply.send(resp_ok());
+                }
+                None => {
+                    let _ = reply.send(resp_unknown_key(&name));
+                }
+            }
         }
         Control::Shutdown => return false,
     }

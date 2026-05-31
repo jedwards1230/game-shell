@@ -5,9 +5,10 @@ screenshot batch. Keep this updated as views are added or changed.
 
 ## How to capture
 
-See the `game-shell-dev` skill ("Driving the UI for Screenshots"). In short:
-- Inject navigation with `wtype -k <Left|Right|Up|Down|Return|Escape|Tab>` (reaches the focused shell surface).
-- The **left nav drawer** opens via the gamepad **Home** button (tap), the keyboard **Tab**, or a bare **Super** press on the K400. Super is a Hyprland bind → `super-intent.sh` → the daemon control surface (`intent:menu`) — the daemon no longer snoops the keyboard (it's not a "home-press" anymore). `wtype -k Tab` reaches it (bare-Super can't be synthesized by `wtype`). (Super+Escape = return-to-shell escape; Super+Backspace = reset.)
+See the `game-shell-dev` skill ("Driving the UI for Screenshots"). In short there
+are **two CLI channels** (see [IPC_PROTOCOL.md](IPC_PROTOCOL.md)):
+- **Directional nav / select / back = real key events.** Either `wtype -k <Left|Right|Up|Down|Return|Escape>` (Wayland virtual keyboard) **or** the daemon's `key <name>` IPC (`key up|down|left|right|select|back` over the socket). Both reach the focused surface's `KeyNavigation`. There is **no `Tab` drawer key** — `wtype -k Tab` does nothing useful.
+- **Drawer / settings / power / home = the `intent` control surface** (socket): `echo "intent menu" | nc -U /run/user/1000/game-shell-input.sock` toggles the **left nav drawer**; `intent settings` / `intent power` / `intent home` open those. (At the TV the drawer also opens via gamepad **Home** tap or a bare **Super** press — Hyprland bind → `super-intent.sh` → `intent menu`. Super+Escape = escape; Super+Backspace = reset.)
 - Screenshots are 4K (~2000 tokens each) — shoot in **tiers** (below), not all at once.
 
 ## Home screen index map (QuickActions, top-right)
@@ -40,7 +41,7 @@ Left/Right move; Return activates; Down drops focus into the app rows.
 ## C. Overlays & dialogs
 | # | View | How to reach | Capturability |
 |---|------|--------------|---------------|
-| C12 | Left nav drawer (`NavigationDrawer`) | gamepad Home / bare Super / `wtype -k Tab` | Tab now reaches it via wtype |
+| C12 | Left nav drawer (`NavigationDrawer`) | `intent menu` (socket) — or gamepad Home / bare Super at the TV | socket-reachable (NOT `wtype` — no Tab handler) |
 | C13 | Notification center | QuickActions idx 0 → Return | wtype |
 | C14 | Notification center — empty | as above, no notifications | wtype |
 | C15 | Notification toast (`NotificationToast`) | trigger a notification | transient; timing-sensitive |
@@ -78,12 +79,12 @@ capturable with a live stream/app.
 ---
 
 ## Capturability summary
-- **wtype-reachable now:** A1–A9, B10–B11, C13–C14, C16, C19, all of D, E, F.
-- **Drawer (C12):** now `wtype -k Tab`-reachable (or gamepad Home / bare Super at the TV).
+- **Key-driven (nav/select/back via `wtype -k` or `key <name>`):** A1–A9, B10–B11, C13–C14, C16, C19, all of D, E, F.
+- **Drawer (C12):** `intent menu` over the socket (or gamepad Home / bare Super at the TV) — **not** `wtype` (no Tab handler).
 - **Needs a real condition:** C15 (toast timing), C17 (stream conflict), C18 (stream overlay), G (live stream/app).
 
 ## Suggested tiered batch
 1. **Tier 1 — static views, dark mode:** A1–A9, B10–B11, D20–D30 + settings substates, C13/C14/C16/C19.
 2. **Tier 2 — light mode** re-shoot of the core set (E).
 3. **Tier 3 — input-mode** variants (F) where visually distinct.
-4. **Tier 4 — manual/condition:** drawer (C12, `wtype -k Tab` or a TV press), then condition-dependent (C15/C17/C18/G).
+4. **Tier 4 — manual/condition:** drawer (C12, `intent menu` over the socket or a TV press), then condition-dependent (C15/C17/C18/G).

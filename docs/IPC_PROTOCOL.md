@@ -450,15 +450,21 @@ is a pure broadcast).
 | `home-tap` | Gamepad Home neutral — a short Home press. QML routes it (typically to `menu` when the shell is focused). |
 | `home-hold` | Gamepad Home neutral — a long Home press. QML routes it (typically to the return-to-shell / reset path). |
 | `menu` | Toggle the navigation drawer. |
-| `nav-up` / `nav-down` / `nav-left` / `nav-right` | Directional menu navigation. |
-| `select` | Confirm / activate the focused element. |
-| `back` | Cancel / go back. |
 | `settings` | Open settings. |
 | `power` | Open the power menu. |
 
 `home` is the global escape; `home-tap`/`home-hold` are the **neutral** gamepad
 Home signals (QML, which owns focus, decides what each means). This split keeps
 the daemon free of any focus/state knowledge.
+
+> **Directional nav / select / back are NOT intents.** They are *keyboard-layer*
+> concerns served by real key events — the gamepad d-pad/A/B (which the daemon
+> synthesizes to `KEY_*`), `wtype -k`, or the [`key <name>`](#key-name) command —
+> and handled by each surface's `KeyNavigation`/`Keys`. Earlier revisions listed
+> `nav-up/down/left/right`, `select`, `back` here, but nothing produced or
+> consumed them (a focus move has no state-dependent decision for QML to make);
+> they were removed in favor of `key <name>`. The intent surface is only the
+> high-level, focus-*independent* actions above.
 
 | Condition | Response |
 |-----------|----------|
@@ -504,6 +510,42 @@ echo "rumble uniq:e4:17:d8:01:02:03 200" | nc -U "$GAME_SHELL_SOCK"
 > (default `true`) gating all daemon-fired rumble — both the `rumble` command and
 > the connect pulse. Read by the daemon via `get-config`; toggled like any other
 > QML-owned key via `set-config`.
+
+### `key <name>`
+
+Synthesize a single keystroke (press + release) on the daemon's **shared virtual
+keyboard** — the headless counterpart to a gamepad d-pad/A/B tap or a `wtype -k`.
+It reaches whatever surface currently holds Wayland focus, exactly like the
+gamepad's own nav (the daemon already maps the d-pad to these same `KEY_*`
+codes). This is the **socket-driven navigation surface** for automation and
+screenshot tours, so a script can drive the entire UI over one connection.
+
+Unlike [`intent`](#intent-name), `key` **does touch the device** — that is the
+whole point. The two surfaces stay distinct: `intent` is pure-broadcast *control*
+(state actions QML interprets), `key` is *synthesized input* (focus moves QML
+never sees as intents).
+
+`<name>` is a single whitespace-trimmed token in a **closed vocabulary**:
+
+| Name | Key | Use |
+|------|-----|-----|
+| `up` / `down` / `left` / `right` | `KEY_UP` / `KEY_DOWN` / `KEY_LEFT` / `KEY_RIGHT` | Move focus (`KeyNavigation`). |
+| `select` | `KEY_ENTER` | Confirm / activate the focused element (A). |
+| `back` | `KEY_ESC` | Cancel / go back (B). |
+
+| Condition | Response |
+|-----------|----------|
+| `<name>` in the closed vocabulary | `ok\n` (keystroke emitted) |
+| `<name>` outside the vocabulary | `error:unknown key '<name>'\n` (nothing emitted) |
+| Missing/empty `<name>` body | `error:usage: key <name>\n` |
+
+**Example (automation — open Settings from home, then walk down the sidebar):**
+
+```
+echo "intent settings" | nc -U "$GAME_SHELL_SOCK"   # control surface
+echo "key down"         | nc -U "$GAME_SHELL_SOCK"   # synthesized input
+echo "key select"       | nc -U "$GAME_SHELL_SOCK"
+```
 
 ## Phase 4 Commands (Hyprland + Sunshine)
 
@@ -685,7 +727,7 @@ all surface through it, so QML consumes **one** vocabulary regardless of source.
 
 | Event | Payload (`<name>`) |
 |-------|--------------------|
-| `intent:<name>` | One of `home`, `home-tap`, `home-hold`, `menu`, `nav-up`, `nav-down`, `nav-left`, `nav-right`, `select`, `back`, `settings`, `power` |
+| `intent:<name>` | One of `home`, `home-tap`, `home-hold`, `menu`, `settings`, `power` |
 
 `intent:home` is the global return-to-shell escape; `intent:home-tap` /
 `intent:home-hold` are the neutral gamepad Home signals (QML maps them by the

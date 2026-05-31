@@ -66,6 +66,25 @@ pub const KEY_LEFTMETA: u16 = 125;
 pub const KEY_RIGHTMETA: u16 = 126;
 pub const KEY_HOMEPAGE: u16 = 172;
 
+/// Map a `key <name>` IPC token to the keycode it taps on the shared virtual
+/// keyboard. The closed vocabulary is the directions + confirm/cancel the shell
+/// navigates by — the *same* keys the gamepad d-pad/A/B already synthesize — so
+/// headless automation can drive focus over the one socket (parity with the
+/// pad, without the dead `intent:nav-*` broadcast). `select` -> Enter, `back`
+/// -> Esc. Returns `None` for an unknown token (the runtime replies
+/// `error:unknown key '<name>'`).
+pub fn key_for_action(name: &str) -> Option<u16> {
+    Some(match name {
+        "up" => KEY_UP,
+        "down" => KEY_DOWN,
+        "left" => KEY_LEFT,
+        "right" => KEY_RIGHT,
+        "select" => KEY_ENTER,
+        "back" => KEY_ESC,
+        _ => return None,
+    })
+}
+
 // Relative axes
 pub const REL_X: u16 = 0x00;
 pub const REL_Y: u16 = 0x01;
