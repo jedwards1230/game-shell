@@ -347,8 +347,10 @@ pub enum Command {
     /// exactly (re-ungrab for `Handoff`). The base presenter is remembered by
     /// the input runtime, so the toggle carries no other argument. In-memory
     /// only; replies `ok`.
+    ShellFocus(bool),
     OverlayFocus(bool),
     /// `overlay-focus` with a missing/invalid argument (not `on`/`off`).
+    ShellFocusUsage,
     OverlayFocusUsage,
     /// `controllerdb-status` — return the current controller DB status as a
     /// compact JSON object: `{source, entryCount, lastDownloaded, upstreamUrl,
@@ -819,6 +821,13 @@ impl Command {
                 // over a running app. The body must be exactly `on` or `off`;
                 // a missing/other body is a usage error. `command_body`
                 // enforces the word boundary so `overlay-focusX` stays Unknown.
+                if let Some(body) = command_body(cmd, "shell-focus") {
+                    return match body.trim() {
+                        "on" => Command::ShellFocus(true),
+                        "off" => Command::ShellFocus(false),
+                        _ => Command::ShellFocusUsage,
+                    };
+                }
                 if let Some(body) = command_body(cmd, "overlay-focus") {
                     return match body {
                         "on" => Command::OverlayFocus(true),
@@ -1109,6 +1118,11 @@ pub fn resp_intent_usage() -> String {
 }
 
 /// Usage line for an `overlay-focus` issued without a valid `on`/`off` arg.
+pub fn resp_shell_focus_usage() -> String {
+    "error:usage: shell-focus on|off".to_string()
+}
+
+/// Usage line for an `overlay-focus` issued without an `on`/`off` body.
 pub fn resp_overlay_focus_usage() -> String {
     "error:usage: overlay-focus on|off".to_string()
 }

@@ -780,10 +780,24 @@ pub fn app_intent(wm_class: &str) -> String {
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct UiState {
-    /// Whether quickshell is currently the active (focused) Hyprland window.
-    /// `None` when the active-window query is unavailable (non-Linux or no
-    /// Hyprland socket).
+    /// Whether quickshell is currently the active (focused) Hyprland *window*.
+    ///
+    /// **This is always `Some(false)` on a working system, and that is not a
+    /// bug — it is why the field is misleading.** The shell is a
+    /// wlr-layer-shell surface, so it never appears in `j/activewindow` at all
+    /// (see `hyprland::needs_fullscreen`); no class it could report would ever
+    /// equal "quickshell". Do NOT read this as "is the shell on screen" — that
+    /// question cannot be answered from compositor focus. It is retained only so
+    /// the wire shape stays stable for existing consumers.
+    #[deprecated(
+        note = "structurally always false: the shell is a layer surface and never appears in activewindow"
+    )]
     pub quickshell_focused: Option<bool>,
+    /// Whether an *app toplevel* currently holds compositor focus — i.e. some
+    /// window is focused at all. This is the honest half of the question: it says
+    /// nothing about whether the shell's layer surface is drawn above it, which
+    /// only the shell itself knows (`shell-focus` IPC).
+    pub app_window_focused: bool,
     /// Class of the currently focused window (from Hyprland's `j/activewindow`).
     /// `None` when nothing is focused or the query fails.
     pub active_window_class: Option<String>,
@@ -828,12 +842,16 @@ pub async fn get_ui_state() -> UiState {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_owned());
-        let quickshell_focused = class.as_deref().map(|c| {
-            // quickshell registers as class "quickshell" in Hyprland.
-            c.eq_ignore_ascii_case("quickshell")
-        });
+        // Retained for wire compatibility only — see the field docs. A layer
+        // surface never appears in `j/activewindow`, so this can never be true.
+        let quickshell_focused = class
+            .as_deref()
+            .map(|c| c.eq_ignore_ascii_case("quickshell"));
+        let app_window_focused = class.is_some();
+        #[allow(deprecated)]
         UiState {
             quickshell_focused,
+            app_window_focused,
             active_window_class: class,
             active_window_title: title,
             shell_running,
@@ -842,8 +860,10 @@ pub async fn get_ui_state() -> UiState {
     }
 
     #[cfg(not(target_os = "linux"))]
+    #[allow(deprecated)]
     UiState {
         quickshell_focused: None,
+        app_window_focused: false,
         active_window_class: None,
         active_window_title: None,
         shell_running,

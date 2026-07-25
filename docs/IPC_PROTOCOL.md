@@ -40,6 +40,25 @@ This is the presenter the shell enters when a stream launches; `grab` is the inv
 
 **Response:** `ok\n`
 
+### `shell-focus on|off`
+
+Declare whether the **shell owns (or shares) the screen**. This is the shell's authoritative statement of screen ownership, and the daemon cannot derive it for itself.
+
+**Why it must be told:** the shell is a **wlr-layer-shell surface**, not an xdg toplevel. Hyprland's `activewindow` only ever tracks toplevels, so the shell never appears in it (`hyprctl layers` is where it shows up). Taking exclusive keyboard focus does not clear the active *toplevel* either. The consequence is that while the shell is on screen, `activewindow` keeps naming whatever app was focused last — typically a backgrounded, still-fullscreen Steam. Anything that asks the compositor "what is the user looking at?" gets a stale answer.
+
+Two subsystems used to ask exactly that, and both misbehaved:
+
+- **Follow-focus** resolved the stale class and flipped the presenter to `Game`, handing the pad to a virtual gamepad while the user was on the home screen. Symptom: the controller appears connected but does nothing in the shell — or, in the mirror case (daemon in `Shell` while an app holds focus), pad motion is converted to nav **keys** and injected into that app, so it navigates by itself with a held direction reading as "stuck scrolling".
+- **The kiosk fullscreen backstop** resolved the same stale window and issued `dispatch focuswindow` on it, actively yanking the screen to a backgrounded app. Symptom: launch Steam, and a prewarmed Plex comes to the front instead.
+
+While `on`: `route_presenter()` dispatches pad events to the **shell** handler regardless of the base presenter, `should_grab()` forces the grab even over `Handoff`, follow-focus is **suppressed entirely** (`focus_presenter_target()` returns `None`), and the Hyprland actor's fullscreen backstop stands down. Toggling `off` restores the base presenter's routing and grab **exactly** and re-enables both. `sh.presenter` is never touched — it remembers the base routing to restore.
+
+**Re-assert it freely.** The handler is idempotent, and `shell/shell.qml` re-sends the current value on a ~3s heartbeat (plus on every change). Every edge-triggered signal here has a way to be missed — an app that closes to background without a close event (Steam), a launch that times out, a daemon restart mid-session — and a missed edge otherwise wedges the pad against the wrong surface indefinitely. The heartbeat bounds any desync to one tick. The daemon defaults to `true` at startup (the shell boots owning the screen), so a restart lands in the safe state until the next heartbeat corrects it.
+
+Derived in `shell/shell.qml` from `shellOwnsScreen` — the same predicate that drives the `PanelWindow`'s `visible` **and** `WlrLayershell.keyboardFocus`, so what is drawn, what holds the keyboard, and what the daemon believes cannot diverge.
+
+**Response:** `ok\n` (`error:usage: shell-focus on|off` on a bad body)
+
 ### `overlay-focus on|off`
 
 Route pad input to the **shell** while a modal shell overlay (the overlay nav drawer or the Session QAM) is open **over a running app**. Without this, the base presenter keeps driving the app — Game forwards to the virtual pad, Handoff leaves the node ungrabbed for SDL/Steam — so pressing **A** on the drawer leaks into the app instead of activating the drawer item.

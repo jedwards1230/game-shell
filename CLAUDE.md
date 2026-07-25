@@ -332,6 +332,21 @@ miss; the decision logic is pure in `components/resumeFocus.js`. The daemon acto
 instance on each reconnect (`session_env::resolve_hypr_signature` scans
 `$XDG_RUNTIME_DIR/hypr/` before trusting an inherited signature) so a killed +
 restarted Hyprland doesn't leave it silently deaf.
+**Screen ownership is declared, never inferred.** The shell is a
+**wlr-layer-shell surface**, so it never appears in Hyprland's `activewindow` —
+which keeps naming the last-focused *toplevel* (a backgrounded, still-fullscreen
+app) the whole time the shell is on screen. Nothing may ask the compositor "what
+is the user looking at?". Instead `shell.qml` owns one predicate,
+**`shellOwnsScreen`**, that drives the `PanelWindow`'s `visible` AND its
+`WlrLayershell.keyboardFocus` (so "drawn but unfocused" is unrepresentable) and
+is pushed to the daemon as **`shell-focus on|off`** (see
+[docs/IPC_PROTOCOL.md](docs/IPC_PROTOCOL.md)). While the shell owns the screen the
+daemon routes the pad to the shell key-map, suppresses follow-focus, and stands
+the kiosk fullscreen backstop down — the three consumers that previously acted on
+the stale active window. The shell re-asserts it on a ~3s heartbeat, so a missed
+edge (an app that closes to background, a timed-out launch, a daemon restart)
+self-heals within a tick instead of wedging.
+
 **HDMI-CEC** lives in the daemon (`cec-*` IPC, deployed and verified on gaming-client
 with static-linked libcec — no system `libcec`/`libcec-dev` at build or runtime).
 CEC startup/wake focus is gated by `cecFocusOnStartup` (default `false`) and

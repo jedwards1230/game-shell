@@ -224,6 +224,30 @@ pub(crate) struct Shared {
     /// `false`; in-memory only.
     overlay_focus: bool,
 
+    /// Whether the SHELL currently owns (or shares) the screen (`shell-focus
+    /// on|off`). The shell's own authoritative declaration, mirroring its
+    /// `visible:` binding — the daemon cannot derive it, because the shell is a
+    /// wlr-layer-shell surface that never appears in Hyprland's `activewindow`,
+    /// so compositor focus keeps naming a backgrounded toplevel while the shell
+    /// is on screen.
+    ///
+    /// While `true`, [`Self::presenter`] is left untouched (it remembers the base
+    /// routing) but pad events route to the SHELL key-map via [`route_presenter`],
+    /// every pad is force-grabbed via [`should_grab`], and follow-focus is
+    /// suppressed entirely ([`focus_presenter_target`]) so a stale `activewindow`
+    /// class cannot hand the pad to a backgrounded app.
+    ///
+    /// Defaults `true` — the shell boots owning the screen, matching
+    /// [`Presenter::Shell`]. This default is also what makes a daemon restart
+    /// mid-session safe: it comes up shell-owned, and the shell's heartbeat
+    /// re-asserts the truth within one tick. In-memory only.
+    shell_focus: bool,
+
+    /// Publishes [`Self::shell_focus`] to the Hyprland actor, whose kiosk
+    /// fullscreen backstop must not force-focus a stale active window while the
+    /// shell owns the screen (see `hyprland::kiosk_may_enforce`).
+    shell_focus_tx: watch::Sender<bool>,
+
     /// Whether our logind session is the foreground (active) one. Maintained by
     /// `Control::SetSessionActive` (the `session` actor). While `false` the
     /// physical `EVIOCGRAB` is dropped on every pad and their events are ignored,
@@ -422,6 +446,7 @@ pub async fn run_supervised(
     config_changed: std::sync::Arc<tokio::sync::Notify>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
     active_window_rx: watch::Receiver<String>,
+    shell_focus_tx: watch::Sender<bool>,
 ) {
     // Bounded respawns: enough to ride out a transient fault, few enough that a
     // hard-looping panic gives up quickly and stays visibly down.
@@ -439,6 +464,7 @@ pub async fn run_supervised(
             std::sync::Arc::clone(&config_changed),
             std::sync::Arc::clone(&metrics),
             active_window_rx.clone(),
+            shell_focus_tx.clone(),
         ))
         .catch_unwind()
         .await;
@@ -523,6 +549,7 @@ pub async fn run(
     config_changed: std::sync::Arc<tokio::sync::Notify>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
     mut active_window_rx: watch::Receiver<String>,
+    shell_focus_tx: watch::Sender<bool>,
 ) {
     let (internal_tx, mut internal_rx) = mpsc::channel::<Internal>(256);
 
@@ -582,6 +609,8 @@ pub async fn run(
         home_hold_active: false,
         presenter: Presenter::Shell,
         overlay_focus: false,
+        shell_focus: true,
+        shell_focus_tx,
         session_active: true,
         // Per-app contracts + the Meta/combo timing knobs are read once at
         // startup (like every other config.toml section); `global()` is populated
@@ -869,6 +898,15 @@ async fn handle_control(sh: &mut Shared, fleet: &mut Fleet, ctrl: Control) -> bo
             sh.active_game = id;
             let _ = reply.send(resp_ok());
         }
+        Control::ShellFocus { on, reply } => {
+            // The shell declared whether it owns (or shares) the screen. Flip
+            // routing to the shell key-map + force-grab (on) / restore the base
+            // presenter's grab (off) without touching `sh.presenter`, and gate
+            // follow-focus so a stale `activewindow` class cannot hand the pad to
+            // a backgrounded app while the shell is on screen.
+            set_shell_focus(sh, fleet, on);
+            let _ = reply.send(resp_ok());
+        }
         Control::OverlayFocus { on, reply } => {
             // #262: a modal shell overlay opened/closed over a running app.
             // Flip routing to the shell key-map + force-grab (on) / restore the
@@ -1001,7 +1039,7 @@ fn handle_internal(sh: &mut Shared, fleet: &mut Fleet, internal: Internal) {
             // publishes `home-tap` (the controllable overlay drawer over the app).
             if !sh.home_hold_active {
                 sh.home_hold_active = true;
-                let routed = route_presenter(sh.overlay_focus, sh.presenter);
+                let routed = route_presenter(sh.shell_focus, sh.overlay_focus, sh.presenter);
                 sh.publish(Event::Intent(hold_fire_intent(routed).into()));
             }
         }
@@ -1030,7 +1068,7 @@ fn handle_internal(sh: &mut Shared, fleet: &mut Fleet, internal: Internal) {
             // the app (in order) via the current routed presenter and disarm. If
             // the presenter changed since arming, a transition already reset the
             // buffer, so this is a no-op.
-            let routed = route_presenter(sh.overlay_focus, sh.presenter);
+            let routed = route_presenter(sh.shell_focus, sh.overlay_focus, sh.presenter);
             pad.replay_combo_buffer(sh, routed);
             pad.disarm_combo_guard(sh);
         }
