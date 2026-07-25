@@ -396,6 +396,11 @@ async fn dispatch_stateless(cmd: &Command, db_state: &SharedControllerDbState) -
         // steam-launch. Unconfigured/unreachable degrades to a JSON error status.
         Command::SteamQuit(appid) => Some(steam::handle_steam_quit(*appid).await),
         Command::SteamQuitUsage => Some(protocol::resp_steam_quit_usage()),
+        // Steam host suspend — put the gaming PC to sleep. Bare command, same
+        // stateless/cross-platform category as steam-quit. The host may REFUSE
+        // (running game / live stream); that reply carries the reason and
+        // `refused: true` rather than being flattened into a generic error.
+        Command::SteamSuspend => Some(steam::handle_steam_suspend().await),
         // Steam sidecar roster + active-host selection (the widget's server
         // picker). `steam-hosts` is a cheap config read; `steam-set-host`
         // persists to settings.json, so its blocking file I/O runs off the
@@ -490,6 +495,12 @@ async fn dispatch(
         // than after the next 10s/30s poll. Fire-and-forget: the set reply is
         // already resolved and must not block on the probe.
         if matches!(cmd, Command::SteamSetHost(_)) && !resp.starts_with("error:") {
+            // Proactive Wake-on-LAN for the newly-selected host, gated on
+            // [steam].wake_active_host_on_start (default OFF). Spawned
+            // fire-and-forget: the reply above is already resolved and a wake
+            // must never delay or fail it. Runs BEFORE the probe is awaited so a
+            // sleeping host has the packet in flight while we check it.
+            tokio::spawn(crate::wol::wake_active_host_if_enabled("steam-set-host"));
             let status = crate::service_health::probe_steam().await;
             let _ = events_tx.send(Event::ServiceHealth(crate::service_health::health_json(
                 "steam", status,
@@ -648,6 +659,7 @@ async fn dispatch(
         | Command::SteamBigPicture
         | Command::SteamQuit(_)
         | Command::SteamQuitUsage
+        | Command::SteamSuspend
         | Command::SteamHosts
         | Command::SteamSetHost(_)
         | Command::SteamSetHostUsage

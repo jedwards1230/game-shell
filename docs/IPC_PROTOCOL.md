@@ -1327,6 +1327,32 @@ Gracefully terminate a running Steam game on the host (proxies `POST /quit` with
 **Reply (compact single-line JSON status):** `{"status":"ok"}` / `{"status":"error",…}`.
 A missing / non-numeric `<appid>` body returns `error:usage: steam-quit <appid>\n`.
 
+#### `steam-suspend`
+
+Put the **Steam host machine** to sleep (proxies `POST /sleep` to the sidecar — no
+body). Bare command, like `steam-bigpicture`, so there is no usage error.
+
+Not to be confused with **`power-suspend`**, which suspends the **local TV box**
+via logind. This one suspends the *remote gaming PC*.
+
+The host decides whether sleeping is safe and may **refuse** — it answers HTTP 200
+with `{"ok":false,"reason":…}` while a game is running or a Sunshine session is
+live/resumable (see [HOST_SETUP.md](HOST_SETUP.md)). A refusal is a normal answer,
+not a failure, so it is surfaced rather than flattened:
+
+**Reply (compact single-line JSON status):**
+
+| Outcome | Reply |
+|---------|-------|
+| accepted | `{"status":"ok"}` |
+| refused by the host | `{"status":"error","reason":"<the host's reason>","refused":true}` |
+| unreachable / bad token / decode failure | `{"status":"error","reason":"steam-suspend failed: …","refused":false}` |
+| steam unconfigured | `{"status":"disabled","reason":"steam not configured"}` |
+
+The host's `reason` is passed through **verbatim** (it is written to be shown to a
+person); `refused` lets a consumer branch without string-matching it. `"ok"` means
+the suspend was accepted and dispatched, not that the machine is already asleep.
+
 ### Moonlight local-config "forget" (creds-free unpair)
 
 #### `moonlight-forget <host>`

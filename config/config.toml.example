@@ -101,14 +101,32 @@
 # (persisted as `steamServer` in settings.json; default = the first entry).
 # Names must be unique and non-empty; a per-entry token_file overrides the
 # shared [steam].token_file above.
+#
+# Optional per-entry `mac`: the host's Ethernet MAC, pinned for Wake-on-LAN.
+# PREFERRED over discovery when set. Without it the daemon can only learn the MAC
+# from the live neighbor table (`ip neigh`) or its persisted host-macs.json cache
+# — so a host that has slept long enough to age out of the neighbor table with a
+# cold cache cannot be woken at all (`wol` replies reason "no-mac"). Colon or dash
+# separated; an unparseable value aborts daemon startup rather than failing
+# silently at wake time.
 #[[steam.hosts]]
 #name = "desktop-1"
 #url = "http://192.0.2.1:47995"
+#mac = "aa:bb:cc:dd:ee:ff"
 #[[steam.hosts]]
 #name = "desktop-2"
 #url = "http://192.0.2.2:47995"
+#mac = "aa:bb:cc:dd:ee:ff"          # same NIC on a dual-boot box ⇒ same MAC
 #token_file = "~/.config/tv-shell/steam-token-desktop-2"
 #token_file = "~/.config/tv-shell/steam-token"
+#
+# Proactively send a Wake-on-LAN packet to the ACTIVE host (only that one — never
+# the whole [[steam.hosts]] list) at daemon startup and whenever `steam-set-host`
+# switches the selection. Default false: waking a machine is a side effect on
+# someone else's hardware, so it stays opt-in. Fail-soft — a failed wake is logged
+# and never blocks startup or the IPC reply. Pair it with `mac` above, otherwise a
+# long-asleep host still can't be resolved.
+#wake_active_host_on_start = false
 
 # --- Observability: logs + metrics (optional) --------------------------------
 # See docs/OBSERVABILITY.md for the full emit contract (metric catalogue, etc.).

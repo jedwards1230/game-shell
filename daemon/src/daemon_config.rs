@@ -34,6 +34,12 @@
 //! [steam]                     # Steam library row (optional)
 //! url = "http://gaming-pc:47995"
 //! token_file = "~/.config/tv-shell/steam-token"  # or: token = "…"
+//! wake_active_host_on_start = false   # WoL the ACTIVE host on start / host switch
+//!
+//! [[steam.hosts]]             # …or named sidecars instead of the single `url`
+//! name = "desktop-1"
+//! url = "http://192.0.2.10:47995"
+//! mac = "aa:bb:cc:dd:ee:ff"   # static WoL MAC (preferred over `ip neigh`/cache)
 //!
 //! [dev]                       # operator escape hatch
 //! allow_insecure_lan = false  # see validate(): permit LAN + dev + no-auth on purpose
@@ -237,6 +243,14 @@ pub struct SteamConfig {
     /// the legacy single `url`; the active one is selected at runtime via the
     /// `steam-set-host` IPC (persisted as `steamServer` in settings.json).
     pub hosts: Vec<SteamHostConfig>,
+    /// Fire a Wake-on-LAN magic packet at the **active** host (only that one,
+    /// never the whole `hosts` list) at daemon startup and whenever
+    /// `steam-set-host` changes the selection. Default **false** — waking a
+    /// machine is a side effect on someone else's hardware, so it stays opt-in.
+    ///
+    /// Fail-soft: a failed proactive wake is logged and otherwise ignored; it
+    /// never blocks startup or the `steam-set-host` reply.
+    pub wake_active_host_on_start: bool,
 }
 
 /// One named `[[steam.hosts]]` sidecar entry.
@@ -251,6 +265,17 @@ pub struct SteamHostConfig {
     pub url: String,
     /// Per-host token file; absent ⇒ the shared `[steam].token_file` applies.
     pub token_file: Option<String>,
+    /// Static Ethernet MAC (`aa:bb:cc:dd:ee:ff`, `-` separators also accepted)
+    /// for Wake-on-LAN. Optional, and **preferred over discovery when present**.
+    ///
+    /// Without it the daemon can only learn the MAC from the live neighbor table
+    /// (`ip neigh`) or its persisted `host-macs.json` cache — and a host that has
+    /// slept long enough to age out of the neighbor table with a cold cache
+    /// simply cannot be woken (`wol` replies `{"status":"error",
+    /// "reason":"no-mac"}`). Pinning the MAC here removes that failure mode
+    /// entirely. Validated at startup by [`DaemonConfig::validate`], so a typo
+    /// fails loudly instead of silently at wake time.
+    pub mac: Option<String>,
 }
 
 /// `[observability]` — logs + metrics emission (#268).
@@ -568,6 +593,10 @@ impl DaemonConfig {
                 name: crate::sidecar::url_host(url).unwrap_or_else(|| "default".to_string()),
                 url: url.to_string(),
                 token_file: None,
+                // The legacy single-`url` form has no place to declare a MAC;
+                // static-MAC config is a `[[steam.hosts]]` feature. WoL still
+                // works here via neighbor-table/cache discovery, as before.
+                mac: None,
             }],
             None => Vec::new(),
         }
@@ -637,6 +666,19 @@ impl DaemonConfig {
             }
             if !steam_names.insert(h.name.as_str()) {
                 anyhow::bail!("config: duplicate [[steam.hosts]] name {:?}", h.name);
+            }
+            // A configured `mac` is the PREFERRED Wake-on-LAN source, so a typo
+            // must fail loudly at startup rather than silently degrade to
+            // neighbor-table/cache discovery on the one wake that needed it.
+            if let Some(mac) = &h.mac {
+                if crate::wol::Mac::parse(mac).is_none() {
+                    anyhow::bail!(
+                        "config: [[steam.hosts]] {:?} has an unparseable mac {:?} \
+                         (expected six hex octets, e.g. \"aa:bb:cc:dd:ee:ff\")",
+                        h.name,
+                        mac
+                    );
+                }
             }
         }
 
@@ -949,6 +991,75 @@ mod tests {
 
         // A non-integer timing value is a hard parse error (not silently ignored).
         assert!(DaemonConfig::parse("[input]\nmeta_hold_ms = \"soon\"\n").is_err());
+    }
+
+    #[test]
+    fn steam_host_mac_parses_and_normalizes_into_hosts() {
+        let c = DaemonConfig::parse(
+            r#"
+            [[steam.hosts]]
+            name = "desktop-1"
+            url = "http://192.0.2.10:47995"
+            mac = "AA-BB-CC-DD-EE-FF"
+
+            [[steam.hosts]]
+            name = "desktop-1-windows"
+            url = "http://192.0.2.20:47995"
+        "#,
+        )
+        .unwrap();
+        c.validate().unwrap();
+        let hosts = c.steam_hosts();
+        assert_eq!(hosts[0].mac.as_deref(), Some("AA-BB-CC-DD-EE-FF"));
+        // `mac` is optional — an entry without one keeps the discovery behavior.
+        assert_eq!(hosts[1].mac, None);
+    }
+
+    #[test]
+    fn steam_host_mac_absent_is_the_unchanged_default() {
+        // The legacy single-`url` form has nowhere to declare a MAC, and
+        // normalizes to a host with `mac: None` (WoL still discovers as before).
+        let c = DaemonConfig::parse("[steam]\nurl = \"http://gaming-pc:47995\"\n").unwrap();
+        c.validate().unwrap();
+        let hosts = c.steam_hosts();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].mac, None);
+    }
+
+    #[test]
+    fn unparseable_steam_host_mac_is_refused_at_startup() {
+        // A configured MAC is the PREFERRED WoL source, so a typo must abort
+        // startup rather than silently degrade on the one wake that needed it.
+        for bad in ["not-a-mac", "aa:bb:cc:dd:ee", "zz:bb:cc:dd:ee:ff", ""] {
+            let c = DaemonConfig::parse(&format!(
+                "[[steam.hosts]]\nname = \"d1\"\nurl = \"http://h:1\"\nmac = \"{bad}\"\n"
+            ))
+            .unwrap();
+            let err = c
+                .validate()
+                .expect_err("an unparseable mac must fail validation");
+            let msg = err.to_string();
+            assert!(msg.contains("mac"), "{msg}");
+            assert!(msg.contains("d1"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn proactive_wake_flag_defaults_off() {
+        // Waking someone else's machine is a side effect — it stays opt-in.
+        assert!(!DaemonConfig::default().steam.wake_active_host_on_start);
+        assert!(
+            !DaemonConfig::parse("[steam]\nurl = \"http://h:1\"\n")
+                .unwrap()
+                .steam
+                .wake_active_host_on_start
+        );
+        assert!(
+            DaemonConfig::parse("[steam]\nwake_active_host_on_start = true\n")
+                .unwrap()
+                .steam
+                .wake_active_host_on_start
+        );
     }
 
     #[test]

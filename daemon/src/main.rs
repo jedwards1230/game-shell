@@ -18,7 +18,7 @@
 #[cfg(target_os = "linux")]
 use tv_shell_input::{
     bluetooth, http, hyprland, input, ipc, network, power, protocol, session, session_env, state,
-    watch,
+    watch, wol,
 };
 
 #[cfg(all(target_os = "linux", feature = "mcp"))]
@@ -198,6 +198,13 @@ fn main() -> anyhow::Result<()> {
                 tv_shell_input::service_health::run(health_events).await;
             });
         }
+
+        // Proactive Wake-on-LAN for the ACTIVE Steam host, gated on
+        // [steam].wake_active_host_on_start (default OFF — waking someone else's
+        // machine is opt-in). Fire-and-forget like the actors above: it resolves
+        // to a log line whether it wakes the host, finds nothing configured, or
+        // can't resolve a MAC, and can never delay or fail startup.
+        tokio::spawn(wol::wake_active_host_if_enabled("startup"));
 
         // Initialize the controller DB state once at startup. The IPC server
         // shares it across connections (Arc<RwLock<_>>).

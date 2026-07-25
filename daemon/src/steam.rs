@@ -10,7 +10,7 @@
 //! cross-platform sidecar that runs **on the gaming PC** (a *different machine*;
 //! see `docs/HOST_SETUP.md`). This daemon module is an **HTTP client** to that
 //! host: it proxies the host's `GET /library` / `GET /status` / `POST /launch` /
-//! `POST /open-bpm` / `POST /quit` over the LAN via the reusable
+//! `POST /open-bpm` / `POST /quit` / `POST /sleep` over the LAN via the reusable
 //! [`crate::sidecar::Sidecar`] client. It does **not** spawn, supervise, or
 //! restart the host — the host is deployed independently on the gaming PC.
 //!
@@ -35,7 +35,7 @@ use crate::daemon_config::SteamHostConfig;
 use crate::service_health::ServiceStatus;
 use crate::sidecar::{url_host, Sidecar};
 use serde_json::{json, Value};
-use tv_shell_protocol::{LibraryEntry, LibraryResponse, StatusResponse};
+use tv_shell_protocol::{LibraryEntry, LibraryResponse, SleepResponse, StatusResponse};
 
 /// Recently-played rail cap. The rows only show a handful at 4K.
 const RECENT_LIMIT: usize = 12;
@@ -48,6 +48,11 @@ const MAX_STATUS_BODY: u64 = 64 * 1024;
 /// `/library` is legitimately larger (one entry per game); 10 MiB covers ~1000
 /// games while still refusing a rogue host's unbounded body.
 const MAX_LIBRARY_BODY: u64 = 10 * 1024 * 1024;
+
+/// `/sleep` answers `{ok, reason}` — tiny, like `/status`. Same rationale for the
+/// cap: a misconfigured/compromised host must not be able to stream an unbounded
+/// body into memory.
+const MAX_SLEEP_BODY: u64 = 64 * 1024;
 
 /// The ACTIVE Steam host: the configured host whose name matches the persisted
 /// `steamServer` selection (settings.json, written by `steam-set-host`), else
@@ -226,6 +231,66 @@ pub async fn handle_steam_quit(appid: u32) -> String {
             .to_string()
         }
     }
+}
+
+/// IPC entry point for `steam-suspend`. POSTs to the host's `/sleep` (no body) to
+/// put the gaming PC to sleep, and returns a compact-JSON status object. Mirrors
+/// [`handle_steam_quit`]; degrades to `disabled` when steam is unconfigured.
+///
+/// Three outcomes, deliberately distinguishable by a QML consumer:
+/// - accepted  → `{"status":"ok"}`
+/// - REFUSED   → `{"status":"error","reason":"<host's reason>","refused":true}`
+/// - failed    → `{"status":"error","reason":"steam-suspend failed: …","refused":false}`
+///
+/// The refusal is the interesting one. The host answers HTTP **200** with
+/// `{"ok":false,"reason":…}` when suspending would strand a running game or a
+/// live stream, so it can't be told from success by status code alone — hence
+/// [`crate::sidecar::Sidecar::post_json`] rather than the body-discarding `post`.
+/// The host's reason is passed through **verbatim** (it is written to be shown to
+/// a person), and `refused` lets a caller branch without string-matching it.
+pub async fn handle_steam_suspend() -> String {
+    let Some(sc) = sidecar() else {
+        return json!({
+            "status": ServiceStatus::Disabled.as_str(),
+            "reason": "steam not configured",
+        })
+        .to_string();
+    };
+    match sc
+        .post_json::<SleepResponse>("/sleep", None, MAX_SLEEP_BODY)
+        .await
+    {
+        Ok(resp) => suspend_reply(&resp),
+        Err(e) => {
+            tracing::debug!("steam-suspend failed: {e}");
+            json!({
+                "status": ServiceStatus::Error.as_str(),
+                "reason": format!("steam-suspend failed: {e}"),
+                "refused": false,
+            })
+            .to_string()
+        }
+    }
+}
+
+/// Pure reply builder for [`handle_steam_suspend`] — maps the host's
+/// [`SleepResponse`] onto the daemon's compact-JSON status shape. A refusal with
+/// no `reason` (a host that answered but said nothing) still reports as refused,
+/// with a generic message, rather than being mistaken for success.
+fn suspend_reply(resp: &SleepResponse) -> String {
+    if resp.ok {
+        return json!({ "status": ServiceStatus::Ok.as_str() }).to_string();
+    }
+    let reason = resp
+        .reason
+        .as_deref()
+        .unwrap_or("the host refused to suspend");
+    json!({
+        "status": ServiceStatus::Error.as_str(),
+        "reason": reason,
+        "refused": true,
+    })
+    .to_string()
 }
 
 /// IPC entry point for `steam-hosts`. Lists the configured tv-shell-host
@@ -425,6 +490,7 @@ mod tests {
             name: name.to_string(),
             url: url.to_string(),
             token_file: None,
+            mac: None,
         }
     }
 
@@ -454,6 +520,41 @@ mod tests {
         // URLs and tokens never leave the daemon.
         assert!(entries[0].get("url").is_none());
         assert!(entries[0].get("token_file").is_none());
+    }
+
+    #[test]
+    fn suspend_reply_ok_when_host_accepted() {
+        let out = parse(&suspend_reply(&SleepResponse {
+            ok: true,
+            reason: None,
+        }));
+        assert_eq!(out["status"], "ok");
+        // The accepted shape matches steam-quit's exactly — no extra fields.
+        assert!(out.get("reason").is_none());
+        assert!(out.get("refused").is_none());
+    }
+
+    #[test]
+    fn suspend_reply_surfaces_the_hosts_refusal_verbatim() {
+        // The refusal reason is written for a person; it must reach the caller
+        // unmangled, and `refused` must let QML branch without string-matching.
+        let out = parse(&suspend_reply(&SleepResponse {
+            ok: false,
+            reason: Some("a game is running on the host".into()),
+        }));
+        assert_eq!(out["status"], "error");
+        assert_eq!(out["reason"], "a game is running on the host");
+        assert_eq!(out["refused"], true);
+    }
+
+    #[test]
+    fn suspend_reply_refusal_without_a_reason_is_still_a_refusal() {
+        // A host that answered `{"ok":false}` with no reason must NOT be read as
+        // success; it degrades to a generic message, still flagged refused.
+        let out = parse(&suspend_reply(&SleepResponse::default()));
+        assert_eq!(out["status"], "error");
+        assert_eq!(out["refused"], true);
+        assert!(!out["reason"].as_str().unwrap().is_empty());
     }
 
     #[test]

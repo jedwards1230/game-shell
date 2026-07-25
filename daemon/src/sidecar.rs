@@ -230,6 +230,54 @@ impl Sidecar {
         let _ = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
         Ok(())
     }
+
+    /// `POST {base}{path}` like [`Self::post`], but DECODES the response body into
+    /// `T` instead of discarding it.
+    ///
+    /// Use this for an action endpoint whose reply carries a decision the daemon
+    /// must act on rather than just a 2xx — `/sleep`, whose `{ok, reason}` body
+    /// distinguishes "suspended" from "refused, because a game is running". Both
+    /// are HTTP 200, so `post`'s status-only contract would silently swallow the
+    /// refusal. Same size-cap and error vocabulary as [`Self::get_json`].
+    pub async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Option<&Value>,
+        max_bytes: u64,
+    ) -> Result<T, SidecarError> {
+        let url = format!("{}{}", self.base, path);
+        let client = build_client().map_err(SidecarError::Http)?;
+        let mut req = client
+            .post(&url)
+            .header("Authorization", self.bearer())
+            .header("Accept", "application/json");
+        if let Some(body) = body {
+            req = req
+                .header("Content-Type", "application/json")
+                .body(body.to_string());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(SidecarError::Http)?
+            .error_for_status()
+            .map_err(SidecarError::Http)?;
+        if let Some(len) = resp.content_length() {
+            if len > max_bytes {
+                return Err(SidecarError::TooLarge(len));
+            }
+        }
+        // `Content-Length` is optional (and forgeable), so the early-reject above
+        // is only a fast path — stream with a hard cap, matching `get_json`.
+        let bytes = match read_body_capped(resp, max_bytes)
+            .await
+            .map_err(SidecarError::Http)?
+        {
+            Ok(bytes) => bytes,
+            Err(seen) => return Err(SidecarError::TooLarge(seen)),
+        };
+        serde_json::from_slice(&bytes).map_err(SidecarError::Json)
+    }
 }
 
 /// The host part (IP or hostname, no port/path) of an `http(s)://` base URL —

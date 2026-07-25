@@ -260,6 +260,18 @@ pub enum Command {
     /// `steam-quit` with a missing/non-numeric `<appid>` body.
     SteamQuitUsage,
 
+    /// `steam-suspend` -> put the Steam host machine to sleep (proxies
+    /// `POST /sleep` to tv-shell-host — no body). **Bare command, so there is no
+    /// `…Usage` variant**: unlike `steam-quit`/`steam-launch` it takes no
+    /// argument, matching `steam-bigpicture`.
+    ///
+    /// The host may REFUSE (a game is running, a stream is live), which is a
+    /// normal answer rather than a failure — the reply carries the host's reason
+    /// plus a `refused` flag: `{"status":"ok"}` /
+    /// `{"status":"error","reason":…,"refused":true|false}`. Stateless +
+    /// cross-platform.
+    SteamSuspend,
+
     /// `steam-hosts` -> compact JSON `{status,active,hosts:[{name,host}]}`
     /// listing the configured tv-shell-host sidecars (`[[steam.hosts]]` in
     /// config.toml, or the legacy single `[steam].url`) and which one is
@@ -526,6 +538,7 @@ impl Command {
             "plex-hubs" => Command::PlexHubs,
             "steam-library" => Command::SteamLibrary,
             "steam-bigpicture" => Command::SteamBigPicture,
+            "steam-suspend" => Command::SteamSuspend,
             "steam-hosts" => Command::SteamHosts,
             // Phase 4 bare commands (no body).
             "hypr-active" => Command::HyprActive,
@@ -2219,6 +2232,18 @@ mod tests {
             resp_steam_launch_usage(),
             "error:usage: steam-launch <appid>"
         );
+    }
+
+    #[test]
+    fn parses_steam_suspend_bare() {
+        assert_eq!(Command::parse("steam-suspend"), Command::SteamSuspend);
+        assert_eq!(Command::parse("  steam-suspend  "), Command::SteamSuspend);
+        // Word boundary: `steam-suspendX` is NOT steam-suspend.
+        assert_eq!(Command::parse("steam-suspendX"), Command::Unknown);
+        // It takes no argument, so a trailing token is not the command either.
+        assert_eq!(Command::parse("steam-suspend now"), Command::Unknown);
+        // And it must not be confused with the LOCAL (TV box) suspend.
+        assert_ne!(Command::parse("power-suspend"), Command::SteamSuspend);
     }
 
     #[test]
