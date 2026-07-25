@@ -156,7 +156,7 @@ fn main() -> anyhow::Result<()> {
         // connection and pushes events onto the shared broadcast bus. They log
         // and never panic the daemon if BlueZ/NetworkManager/logind/UPower are
         // absent, so spawning them unconditionally is safe.
-        let dbus = spawn_dbus_actors(&events_tx, &control_tx, &active_window_tx);
+        let dbus = spawn_dbus_actors(&events_tx, &control_tx, &active_window_tx, &shell_focus_rx);
 
         // Spawn the file-watch actor. It inotify-watches settings.json for
         // external edits and signals the input runtime via config_changed.
@@ -340,6 +340,12 @@ fn main() -> anyhow::Result<()> {
 /// `active_window_tx` is the sender half of the coalescing focused-window watch
 /// channel, handed to the Hyprland actor so `activewindow` changes drive the
 /// input runtime's follow-focus presenter (latest-wins, never dropped).
+///
+/// `shell_focus_rx` is the receiver half of the shell screen-ownership watch
+/// channel (published by the input runtime on `shell-focus`), handed to the same
+/// actor so its kiosk fullscreen backstop stands down while the shell owns the
+/// screen — otherwise it force-focuses whatever stale toplevel `activewindow`
+/// still names.
 #[cfg(target_os = "linux")]
 fn spawn_dbus_actors(
     events_tx: &tokio::sync::broadcast::Sender<protocol::Event>,
@@ -348,6 +354,7 @@ fn spawn_dbus_actors(
     #[cfg_attr(not(feature = "cec"), allow(unused_variables))]
     control_tx: &tokio::sync::mpsc::Sender<state::Control>,
     active_window_tx: &tokio::sync::watch::Sender<String>,
+    shell_focus_rx: &tokio::sync::watch::Receiver<bool>,
 ) -> ipc::DbusSenders {
     use tokio::sync::mpsc;
 
