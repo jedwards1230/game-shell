@@ -29,8 +29,49 @@ It never touches Sunshine config, so other Moonlight clients are unaffected.
 |--------|---------------|-------------|---------|
 | GET    | `/library`    | Bearer      | Enumerate installed Steam games (VDF/ACF) |
 | POST   | `/launch`     | Bearer      | Navigate Big Picture to a game's page (user presses Play) |
+| POST   | `/open-bpm`   | Bearer      | Open Big Picture's HOME screen (no game selected). No body |
+| POST   | `/quit`       | Bearer      | Gracefully stop the running game for `{ appid }` (SIGTERM to its process group, like Steam's Stop) |
+| POST   | `/sleep`      | Bearer      | Suspend the host to RAM. No body. May be **refused** — see below |
 | GET    | `/status`     | Bearer      | `{ version, running_appid, streaming }` |
 | GET    | `/art/{appid}`| **public**  | Local cover art (no bearer — QML `Image.source` can't send one; art isn't sensitive) |
+
+### `POST /sleep`
+
+No request body. The response is always the same two fields:
+
+```jsonc
+{ "ok": true,  "reason": null }                      // accepted — suspend dispatched
+{ "ok": false, "reason": "a game is running on the host" }   // refused
+```
+
+**A refusal is HTTP 200 with `ok: false`, not an error status** — "I decided not
+to" is a normal answer, so the caller shows `reason` to the user instead of
+retrying a transport failure. `reason` is always present (JSON `null` on
+success), so a consumer binds one field either way.
+
+The host refuses while:
+
+- a Steam game is running (`running_appid` is set), or
+- Sunshine reports a live session — **active *or merely resumable***, the same
+  `serverinfo` signal `/status`'s `streaming` field uses. A resumable session
+  counts: sleeping would strand a client that still lists this host.
+
+When both are true the running-game reason wins (deterministic, so the message
+never depends on probe ordering). `ok: true` means the suspend was **accepted and
+dispatched to the OS**, not that the machine is already asleep — the process may
+be frozen before any confirmation could be sent.
+
+On Linux the suspend is `systemctl suspend`. On Windows it is a `powershell`
+shell-out to .NET `Application.SetSuspendState`, *not*
+`rundll32 powrprof.dll,SetSuspendState` — that entry point ignores its arguments
+and **hibernates** whenever hibernation is enabled. See `host/src/power.rs`.
+
+> ⚠️ **`/sleep` raises the blast radius of a leaked bearer token.** Before this
+> endpoint the token bought Steam library enumeration and game launch/quit;
+> it now also buys the ability to **suspend the machine** — a trivial denial of
+> service against the gaming PC and anyone streaming from it. Nothing else about
+> the security model changed (still plaintext HTTP + a static shared secret on a
+> trusted LAN), but rotate the token accordingly if it leaks.
 
 ## Environment
 

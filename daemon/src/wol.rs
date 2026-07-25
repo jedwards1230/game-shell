@@ -7,13 +7,26 @@
 //!
 //! The hard part is resolving the host's MAC *while it is asleep*: the kernel
 //! ARP/neighbor entry goes STALE and may be evicted entirely once the host stops
-//! answering. So we resolve opportunistically — `ip neigh show` every call (the
-//! host is normally online, and thus present in the neighbor table, shortly
-//! before it goes to sleep, keeping the cache warm) and persist the learned
-//! `host → MAC` mapping to a sibling of `settings.json`
-//! (`~/.config/tv-shell/host-macs.json`, NOT inside the user-authored config).
-//! On a lookup miss we fall back to the cached MAC, so a wake works even from a
-//! cold neighbor table.
+//! answering. Three sources are consulted, in this order (see [`pick_mac`]):
+//!
+//!   1. **A statically configured MAC** — `[[steam.hosts]] mac` in `config.toml`.
+//!      Authoritative, needs no discovery at all, and is the only source that
+//!      survives "the host has been asleep for days AND the cache is cold" — the
+//!      exact hole that made a wake impossible before.
+//!   2. **The live neighbor table** (`ip neigh show`) — the host is normally
+//!      online, and thus present in that table, shortly before it sleeps, so this
+//!      keeps the cache warm for the wake that comes *after*. A hit is persisted.
+//!   3. **The persisted cache** — the learned `host → MAC` mapping, stored beside
+//!      `settings.json` (`~/.config/tv-shell/host-macs.json`, NOT inside the
+//!      user-authored config).
+//!
+//! Sources 2 and 3 are the pre-existing behavior and are unchanged when no `mac`
+//! is configured.
+//!
+//! Waking is normally **reactive** (the QML `WakeCard` sends `wol <host>`), but
+//! `[steam].wake_active_host_on_start` (default **off**) additionally fires one
+//! packet at the ACTIVE host — and only that one — at daemon startup and on a
+//! `steam-set-host` switch. See [`wake_active_host_if_enabled`].
 //!
 //! Cross-platform: the magic-packet build + the `ip neigh` parse are pure
 //! functions unit-tested on every platform; only the live `ip neigh` shell-out
@@ -172,32 +185,83 @@ fn ip_neigh_output() -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// Resolve `host` → MAC: first via the live neighbor table (updating the cache on
-/// a hit), falling back to the persisted cache on a miss. `host` is the original
+/// The MAC-source precedence rule, as a pure function: **configured → neighbor
+/// table → cache**.
+///
+/// `neighbor` and `cached` are taken lazily so a configured MAC costs neither the
+/// `ip neigh` shell-out nor the cache file read — the configured value is
+/// authoritative, there is nothing a live lookup could add.
+///
+/// An unparseable `configured` string falls through to discovery rather than
+/// failing the wake: [`crate::daemon_config::DaemonConfig::validate`] already
+/// rejects those at startup, so reaching here with one means the daemon was
+/// started some other way, and degrading to the old behavior beats refusing.
+///
+/// Pure with respect to its inputs — unit-tested, including that a configured MAC
+/// short-circuits both fallbacks.
+fn pick_mac(
+    configured: Option<&str>,
+    neighbor: impl FnOnce() -> Option<Mac>,
+    cached: impl FnOnce() -> Option<Mac>,
+) -> Option<Mac> {
+    configured
+        .and_then(Mac::parse)
+        .or_else(neighbor)
+        .or_else(cached)
+}
+
+/// Resolve `host` → MAC via [`pick_mac`]'s precedence. `host` is the original
 /// IP/hostname the shell passed; `ipv4` is its resolved IPv4 string (the key used
-/// to match the neighbor table). Returns `None` when neither source has a MAC.
-fn resolve_mac(host: &str, ipv4: &str) -> Option<Mac> {
-    // Live lookup: the host is normally online (and thus in the neighbor table)
-    // shortly before it goes to sleep, so this keeps the cache warm for the wake
-    // that happens *after* it has gone to sleep.
-    if let Some(output) = ip_neigh_output() {
-        let table = parse_ip_neigh(&output);
-        if let Some(mac) = table.get(ipv4).copied() {
-            // Warm the cache under both the resolved IPv4 and the original host
-            // string, so a later wake keyed by either resolves.
-            let mut cache = load_cache();
-            cache.insert(ipv4.to_string(), mac.to_canonical());
-            cache.insert(host.to_string(), mac.to_canonical());
-            save_cache(&cache);
-            return Some(mac);
-        }
-    }
-    // Miss: fall back to the cached MAC (host may already be asleep / evicted).
+/// to match the neighbor table); `configured` is the `[[steam.hosts]] mac` pinned
+/// for this host, if any. Returns `None` when no source has a MAC.
+fn resolve_mac(host: &str, ipv4: &str, configured: Option<&str>) -> Option<Mac> {
+    pick_mac(
+        configured,
+        || neighbor_mac(host, ipv4),
+        || cached_mac(host, ipv4),
+    )
+}
+
+/// Live neighbor-table lookup, warming the persisted cache on a hit. The host is
+/// normally online (and thus in the neighbor table) shortly before it goes to
+/// sleep, so this keeps the cache warm for the wake that happens *after*.
+fn neighbor_mac(host: &str, ipv4: &str) -> Option<Mac> {
+    let output = ip_neigh_output()?;
+    let mac = parse_ip_neigh(&output).get(ipv4).copied()?;
+    // Warm the cache under both the resolved IPv4 and the original host string,
+    // so a later wake keyed by either resolves.
+    let mut cache = load_cache();
+    cache.insert(ipv4.to_string(), mac.to_canonical());
+    cache.insert(host.to_string(), mac.to_canonical());
+    save_cache(&cache);
+    Some(mac)
+}
+
+/// Persisted-cache fallback (the host may already be asleep / evicted from the
+/// neighbor table). Keyed by the resolved IPv4 first, then the original host
+/// string — both are written on a neighbor hit.
+fn cached_mac(host: &str, ipv4: &str) -> Option<Mac> {
     let cache = load_cache();
     cache
         .get(ipv4)
         .or_else(|| cache.get(host))
         .and_then(|s| Mac::parse(s))
+}
+
+/// The statically configured Wake-on-LAN MAC for `host`, matched against the
+/// `[[steam.hosts]]` roster by the host-part of each entry's URL (the same
+/// name-part the shell shows and passes to `wol <host>`). `None` when no entry
+/// matches or the matching entry pins no MAC.
+///
+/// Pure over its inputs — unit-tested without touching the global config.
+fn configured_mac_for<'a>(
+    hosts: &'a [crate::daemon_config::SteamHostConfig],
+    host: &str,
+) -> Option<&'a str> {
+    hosts
+        .iter()
+        .find(|h| crate::sidecar::url_host(&h.url).as_deref() == Some(host))
+        .and_then(|h| h.mac.as_deref())
 }
 
 /// Send a magic packet for `mac` as a UDP broadcast on port 9. Broadcasts to the
@@ -223,23 +287,28 @@ fn err_json(reason: &str) -> String {
     json!({"status": "error", "reason": reason}).to_string()
 }
 
-/// IPC entry point for `wol <host>`. Resolves the host's MAC (neighbor table →
-/// cache), then fires the magic packet. Returns a compact-JSON reply:
-/// `{"status":"ok","mac":"…"}` on success, or `{"status":"error","reason":"…"}`
-/// (`no-host`, `no-ip`, `no-mac`, or `send-failed`) on failure.
+/// IPC entry point for `wol <host>`. Resolves the host's MAC (configured →
+/// neighbor table → cache), then fires the magic packet. Returns a compact-JSON
+/// reply: `{"status":"ok","mac":"…"}` on success, or
+/// `{"status":"error","reason":"…"}` (`no-host`, `no-ip`, `no-mac`, or
+/// `send-failed`) on failure.
 pub async fn handle_wol(host: &str) -> String {
     // Defensive: an empty host shouldn't reach here (the parser routes those to
     // `WolUsage`), but guard anyway.
     if host.is_empty() {
         return err_json("no-host");
     }
+    // Read the pinned MAC (if any) from the typed config before crossing the
+    // blocking boundary — it's a cheap in-memory lookup on the global config.
+    let configured =
+        configured_mac_for(&crate::daemon_config::global().steam_hosts(), host).map(str::to_string);
     // The resolution + UDP send are blocking syscalls; run them off the reactor.
     let host = host.to_string();
     let result = tokio::task::spawn_blocking(move || {
         let Some(ipv4) = resolve_ipv4(&host) else {
             return err_json("no-ip");
         };
-        let Some(mac) = resolve_mac(&host, &ipv4) else {
+        let Some(mac) = resolve_mac(&host, &ipv4, configured.as_deref()) else {
             return err_json("no-mac");
         };
         match send_magic_packet(mac) {
@@ -255,6 +324,46 @@ pub async fn handle_wol(host: &str) -> String {
         tracing::debug!("wol: join error: {e}");
         err_json("send-failed")
     })
+}
+
+/// Proactive Wake-on-LAN for the **active** Steam host, gated on
+/// `[steam].wake_active_host_on_start` (default off).
+///
+/// Called at daemon startup and after a successful `steam-set-host` — the two
+/// moments where the shell is about to start polling a host it may have just
+/// selected, and where finding it asleep costs the user a manual Wake press.
+///
+/// Deliberately targets ONLY the active host resolved by
+/// [`crate::steam::active_host`], never the whole `[[steam.hosts]]` roster:
+/// broadcasting at every configured machine would wake boxes nobody asked for
+/// (including, on a dual-boot host, the OS that isn't selected).
+///
+/// **Fail-soft by construction**: it reuses [`handle_wol`], which never panics
+/// and always returns a status string, and the caller spawns it fire-and-forget —
+/// so a disabled flag, an unconfigured host, an unresolvable MAC, or a failed
+/// send is at most a log line. It can never block startup or an IPC reply.
+///
+/// `trigger` is a short label for the log line (`"startup"` / `"steam-set-host"`).
+pub async fn wake_active_host_if_enabled(trigger: &'static str) {
+    if !crate::daemon_config::global()
+        .steam
+        .wake_active_host_on_start
+    {
+        return;
+    }
+    let Some(host) = crate::steam::active_host() else {
+        tracing::debug!("wol: proactive wake ({trigger}) skipped — no active steam host");
+        return;
+    };
+    let Some(name) = crate::sidecar::url_host(&host.url) else {
+        tracing::debug!(
+            "wol: proactive wake ({trigger}) skipped — steam host {:?} has no host-part in its url",
+            host.name
+        );
+        return;
+    };
+    let reply = handle_wol(&name).await;
+    tracing::info!("wol: proactive wake ({trigger}) for {name}: {reply}");
 }
 
 #[cfg(test)]
@@ -349,5 +458,143 @@ mod tests {
     #[test]
     fn resolve_ipv4_rejects_v6_literal() {
         assert_eq!(resolve_ipv4("::1"), None);
+    }
+
+    // --- MAC-source precedence (configured → neighbor → cache) ---
+
+    const CONFIGURED: Mac = Mac([0x01, 0x01, 0x01, 0x01, 0x01, 0x01]);
+    const NEIGHBOR: Mac = Mac([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    const CACHED: Mac = Mac([0x03, 0x03, 0x03, 0x03, 0x03, 0x03]);
+
+    #[test]
+    fn pick_mac_prefers_configured_and_skips_both_fallbacks() {
+        // A configured MAC wins AND must short-circuit discovery entirely — the
+        // `ip neigh` shell-out and the cache read are the expensive parts, and
+        // there is nothing they could add to an authoritative value.
+        let mut neighbor_called = false;
+        let mut cache_called = false;
+        let got = pick_mac(
+            Some("01:01:01:01:01:01"),
+            || {
+                neighbor_called = true;
+                Some(NEIGHBOR)
+            },
+            || {
+                cache_called = true;
+                Some(CACHED)
+            },
+        );
+        assert_eq!(got, Some(CONFIGURED));
+        assert!(!neighbor_called, "neighbor table must not be consulted");
+        assert!(!cache_called, "MAC cache must not be consulted");
+    }
+
+    #[test]
+    fn pick_mac_falls_back_to_neighbor_when_unconfigured() {
+        // The pre-existing behavior, unchanged when no `mac` is configured.
+        let mut cache_called = false;
+        let got = pick_mac(
+            None,
+            || Some(NEIGHBOR),
+            || {
+                cache_called = true;
+                Some(CACHED)
+            },
+        );
+        assert_eq!(got, Some(NEIGHBOR));
+        assert!(!cache_called, "cache is only the last resort");
+    }
+
+    #[test]
+    fn pick_mac_falls_back_to_cache_when_neighbor_misses() {
+        // The "host already asleep, evicted from the neighbor table" path.
+        assert_eq!(pick_mac(None, || None, || Some(CACHED)), Some(CACHED));
+    }
+
+    #[test]
+    fn pick_mac_none_when_every_source_is_empty() {
+        // This is the acute gap a configured MAC closes: aged-out neighbor entry
+        // + cold cache ⇒ no MAC ⇒ `{"status":"error","reason":"no-mac"}`.
+        assert_eq!(pick_mac(None, || None, || None), None);
+    }
+
+    #[test]
+    fn pick_mac_ignores_unparseable_configured_and_degrades_to_discovery() {
+        // validate() rejects these at startup, so this is belt-and-braces: a bad
+        // configured value must not be worse than having configured nothing.
+        assert_eq!(
+            pick_mac(Some("not-a-mac"), || Some(NEIGHBOR), || Some(CACHED)),
+            Some(NEIGHBOR)
+        );
+        assert_eq!(pick_mac(Some(""), || None, || Some(CACHED)), Some(CACHED));
+    }
+
+    #[test]
+    fn pick_mac_accepts_dash_separated_and_uppercase_configured() {
+        assert_eq!(
+            pick_mac(Some("01-01-01-01-01-01"), || None, || None),
+            Some(CONFIGURED)
+        );
+        assert_eq!(
+            pick_mac(Some("01:01:01:01:01:01"), || None, || None),
+            Some(CONFIGURED)
+        );
+    }
+
+    // --- configured-MAC lookup by host ---
+
+    fn host_cfg(name: &str, url: &str, mac: Option<&str>) -> crate::daemon_config::SteamHostConfig {
+        crate::daemon_config::SteamHostConfig {
+            name: name.to_string(),
+            url: url.to_string(),
+            token_file: None,
+            mac: mac.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn configured_mac_matches_host_by_url_host_part() {
+        let hosts = vec![
+            host_cfg(
+                "linux",
+                "http://192.0.2.10:47995",
+                Some("aa:bb:cc:dd:ee:ff"),
+            ),
+            host_cfg(
+                "windows",
+                "http://192.0.2.20:47995",
+                Some("11:22:33:44:55:66"),
+            ),
+        ];
+        // `wol <host>` passes the URL's name-part, which is what we match on.
+        assert_eq!(
+            configured_mac_for(&hosts, "192.0.2.10"),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+        assert_eq!(
+            configured_mac_for(&hosts, "192.0.2.20"),
+            Some("11:22:33:44:55:66")
+        );
+        // An unknown host, and an entry that pins no MAC, both yield None
+        // (discovery still applies).
+        assert_eq!(configured_mac_for(&hosts, "192.0.2.99"), None);
+        assert_eq!(configured_mac_for(&[], "192.0.2.10"), None);
+        let no_mac = vec![host_cfg("linux", "http://192.0.2.10:47995", None)];
+        assert_eq!(configured_mac_for(&no_mac, "192.0.2.10"), None);
+    }
+
+    #[test]
+    fn configured_mac_matches_hostname_urls_too() {
+        let hosts = vec![host_cfg(
+            "gaming-pc",
+            "http://gaming-pc:47995/",
+            Some("aa:bb:cc:dd:ee:ff"),
+        )];
+        assert_eq!(
+            configured_mac_for(&hosts, "gaming-pc"),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+        // The selector is the URL's HOST part, not the entry's `name`.
+        assert_eq!(configured_mac_for(&hosts, "http://gaming-pc:47995"), None);
     }
 }

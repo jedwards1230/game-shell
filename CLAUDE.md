@@ -358,7 +358,8 @@ daemon is an HTTP *client*, not a process supervisor: it never spawns,
 health-restarts, or otherwise manages the sidecar's lifecycle ("health" =
 reachability via `GET /status`). The reusable client plumbing lives in
 `daemon/src/sidecar.rs`; the daemon↔sidecar JSON contract is single-sourced in the
-`tv-shell-protocol` crate (`LibraryResponse`/`StatusResponse`/`LaunchRequest`),
+`tv-shell-protocol` crate (`LibraryResponse`/`StatusResponse`/`LaunchRequest`/
+`SleepResponse`),
 (de)serialized by both sides so the wire shape can't drift. See
 [docs/HOST_SETUP.md](docs/HOST_SETUP.md).
 

@@ -57,7 +57,8 @@ hand-formats config JSON; the old per-call `python3 -c` socket shims are gone.
 | `plex.rs` | Plex hubs fetch for the home-screen Plex widget — `plex-hubs` IPC (cross-platform, stateless) |
 | `service_health.rs` | Shared remote-service reachability vocabulary (`ServiceStatus`) + HTTP probe + background `health:*` poller (cross-platform) |
 | `sidecar.rs` | Reusable remote-widget-**sidecar** HTTP client: base URL + bearer, reachability probe, typed + size-capped request helpers. The daemon is an HTTP *client* to a sidecar on another machine — **not** a process supervisor (no spawn/health-restart). Cross-platform; `steam` is the first consumer |
-| `steam.rs` | Steam library/launch proxy to the `tv-shell-host` sidecar **over HTTP** (`steam-library`/`steam-launch`/`steam-bigpicture`/`steam-quit` IPC). Deserializes host responses through the shared `tv-shell-protocol` types. Cross-platform, stateless |
+| `steam.rs` | Steam library/launch proxy to the `tv-shell-host` sidecar **over HTTP** (`steam-library`/`steam-launch`/`steam-bigpicture`/`steam-quit`/`steam-suspend` IPC). Deserializes host responses through the shared `tv-shell-protocol` types. Cross-platform, stateless |
+| `wol.rs` | Wake-on-LAN magic-packet sender (`wol <host>` IPC) + the opt-in proactive wake of the ACTIVE steam host (`[steam].wake_active_host_on_start`, default off). MAC precedence: configured `[[steam.hosts]] mac` → `ip neigh` → persisted cache. Cross-platform |
 | `system.rs` | System/storage status reads for the System settings page — `sys-status` / `storage-status` IPC |
 | `session_env.rs` | Session-environment self-discovery (resolves `WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE`, install root) |
 | `daemon_config.rs` | Typed `~/.config/tv-shell/config.toml` parse + startup `validate()` — the single per-machine config source |

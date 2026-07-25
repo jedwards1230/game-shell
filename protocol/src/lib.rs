@@ -3,8 +3,8 @@
 //! These types are the single source of truth for the JSON shape exchanged
 //! between `tv-shell-host` (the cross-platform sidecar that enumerates and
 //! launches Steam games on the gaming PC) and `tv-shell-input` (the daemon on
-//! the TV client that proxies `GET /library` / `POST /launch` / `GET /status`
-//! for the QML shell). The daemon reaches the host over **HTTP on the LAN** — the
+//! the TV client that proxies `GET /library` / `POST /launch` / `GET /status` /
+//! `POST /sleep` for the QML shell). The daemon reaches the host over **HTTP on the LAN** — the
 //! host runs on a separate machine (the gaming PC; see `docs/HOST_SETUP.md`), so
 //! the daemon is an HTTP *client*, not a process supervisor: it does not spawn,
 //! health-restart, or otherwise manage the host's lifecycle. Both sides
@@ -81,6 +81,28 @@ pub struct StatusResponse {
     /// Whether a Moonlight/Sunshine stream is active on the host.
     #[serde(default)]
     pub streaming: bool,
+}
+
+/// Response body for `POST /sleep` — the host's answer to a suspend request.
+///
+/// Two-valued on purpose: `ok: true` means the suspend was accepted and
+/// dispatched to the OS; `ok: false` means the host REFUSED it and `reason`
+/// says why (a game is running, a stream is live). A refusal is an HTTP **200**
+/// with `ok: false`, not an error status — "I decided not to" is a normal
+/// answer, so the daemon can surface the reason instead of a transport failure.
+///
+/// `reason` is always serialized (as JSON `null` on success) so the shape is
+/// identical in both branches and a consumer can bind one field unconditionally.
+/// Both fields default so the daemon's parse survives a host that omits one.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SleepResponse {
+    /// Whether the suspend was accepted (`true`) or refused (`false`).
+    #[serde(default)]
+    pub ok: bool,
+    /// Human-readable refusal reason when `ok` is false; `None` (JSON `null`)
+    /// when the suspend was accepted.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[cfg(test)]
@@ -166,6 +188,43 @@ mod tests {
             json,
             r#"{"version":"0.1.0","running_appid":null,"streaming":false}"#
         );
+    }
+
+    #[test]
+    fn sleep_response_accepted_serializes_reason_null() {
+        // `reason` must be PRESENT as JSON null on the accepted path — a consumer
+        // binds one field in both branches rather than probing for existence.
+        let s = SleepResponse {
+            ok: true,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"ok":true,"reason":null}"#
+        );
+    }
+
+    #[test]
+    fn sleep_response_refusal_roundtrips() {
+        let s = SleepResponse {
+            ok: false,
+            reason: Some("a game is running".to_string()),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"ok":false,"reason":"a game is running"}"#);
+        let back: SleepResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn sleep_response_defaults_on_missing_fields() {
+        // A `{}` body must not fail the parse; it degrades to "refused, no reason
+        // given" (ok defaults false), which is the safe reading of a host that
+        // answered but told us nothing.
+        let back: SleepResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, SleepResponse::default());
+        assert!(!back.ok);
+        assert!(back.reason.is_none());
     }
 
     #[test]

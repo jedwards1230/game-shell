@@ -3,9 +3,9 @@
 //! this one." Moonlight remains the stream engine; this service never touches
 //! Sunshine config, so other Moonlight clients are unaffected.
 //!
-//! Endpoints (`/library`, `/launch`, `/open-bpm`, `/quit`, `/status` require
-//! `Authorization: Bearer <token>`; `/art/{appid}` is intentionally PUBLIC — see
-//! below):
+//! Endpoints (`/library`, `/launch`, `/open-bpm`, `/quit`, `/sleep`, `/status`
+//! require `Authorization: Bearer <token>`; `/art/{appid}` is intentionally
+//! PUBLIC — see below):
 //!   GET  /library      → { games: [LibraryEntry, ...] }   (VDF/ACF enumeration)
 //!   POST /launch       { appid }  → { ok: true }  (navigates Big Picture to the
 //!                                                  game's page; user presses Play)
@@ -16,6 +16,11 @@
 //!                                                  process group, like Steam's
 //!                                                  Stop; { ok: false } if not
 //!                                                  running)
+//!   POST /sleep        (no body)  → { ok, reason }  (suspends the host to RAM;
+//!                                                    REFUSED with { ok: false,
+//!                                                    reason } — still HTTP 200 —
+//!                                                    while a game is running or
+//!                                                    a stream is live)
 //!   GET  /status       → { version, running_appid, streaming }
 //!   GET  /art/{appid}  → image/jpeg of the local Steam library art for `appid`,
 //!                        or 404. PUBLIC (no bearer): cover art isn't sensitive
@@ -30,6 +35,7 @@
 //!   TV_SHELL_HOST_BIND  — listen address (default 0.0.0.0 = all LAN ifaces).
 
 mod launch;
+mod power;
 mod steam;
 
 use axum::{
@@ -42,7 +48,9 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
-use tv_shell_protocol::{LaunchRequest, LibraryEntry, LibraryResponse, StatusResponse};
+use tv_shell_protocol::{
+    LaunchRequest, LibraryEntry, LibraryResponse, SleepResponse, StatusResponse,
+};
 
 /// Default listen port. Picked outside Sunshine/Moonlight's 47984–47990 range to
 /// avoid any collision with a co-hosted Sunshine.
@@ -74,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/launch", post(launch_game))
         .route("/open-bpm", post(open_bpm))
         .route("/quit", post(quit_game))
+        .route("/sleep", post(sleep))
         .route("/status", get(status))
         // PUBLIC — no bearer (cover art isn't sensitive; QML's Image.source can't
         // send an Authorization header). `appid` is typed `u32` so a non-numeric
@@ -223,6 +232,68 @@ async fn quit_game(
         )),
         Err(e) => {
             tracing::warn!("quit {appid} failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// `POST /sleep` — suspend the host machine to RAM. No body (like `/open-bpm`).
+///
+/// The host, not the caller, decides whether sleeping is safe: the same two
+/// signals `/status` publishes — the foreground Steam appid and Sunshine's live/
+/// resumable session flag — are gathered off the reactor via `spawn_blocking`
+/// (matching `status()`) and fed to the pure [`power::suspend_refusal`]. A
+/// refusal is an **HTTP 200 with `{ ok: false, reason }`**, not an error status:
+/// "a game is running" is a normal answer the caller should show a human, not a
+/// transport failure to retry. The response shape is exactly
+/// `{ ok, reason }` in both branches — `reason` is JSON `null` on success, never
+/// omitted — so a consumer binds one field unconditionally.
+///
+/// **Ordering.** `power::suspend()` returns once the OS suspend command has been
+/// *spawned*, never waiting on it, so this handler completes and axum flushes the
+/// JSON before the kernel freezes us (and, on Windows, without pinning a thread
+/// for the entire sleep — `SetSuspendState` blocks until resume). The consequence
+/// is deliberate and documented: `ok: true` means "accepted and dispatched", not
+/// "the machine is now asleep". A failure to even *start* the suspend still
+/// surfaces — as a 500, matching `/launch` and `/open-bpm`.
+async fn sleep(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<SleepResponse>, StatusCode> {
+    authorize(&state, &headers)?;
+    // Both probes touch the OS off-band (a `/proc`/registry read and a blocking
+    // loopback HTTP GET to Sunshine); keep them off the async reactor, exactly as
+    // `status()` does. A panicked probe degrades to its safe value — and the safe
+    // value for "is a game running?" is unknown-so-assume-idle only because the
+    // streaming probe still guards the other half.
+    let running = tokio::task::spawn_blocking(steam::running_appid)
+        .await
+        .unwrap_or(None);
+    let streaming = tokio::task::spawn_blocking(steam::streaming)
+        .await
+        .unwrap_or(false);
+
+    if let Some(reason) = power::suspend_refusal(running, streaming) {
+        tracing::info!("sleep: refused — {reason}");
+        return Ok(Json(SleepResponse {
+            ok: false,
+            reason: Some(reason.to_string()),
+        }));
+    }
+
+    // Spawning the suspend command is a blocking syscall; keep it off the reactor.
+    // It returns as soon as the child is spawned (see `power::suspend`), so this
+    // await is short and the response below still gets flushed.
+    let result = tokio::task::spawn_blocking(power::suspend)
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("suspend task panicked: {e}")));
+    match result {
+        Ok(()) => Ok(Json(SleepResponse {
+            ok: true,
+            reason: None,
+        })),
+        Err(e) => {
+            tracing::warn!("sleep failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
