@@ -403,7 +403,7 @@ pub(crate) fn schedule_focus_change(sh: &mut Shared, class: &str) {
 
 /// Pure per-pad grab invariant predicate: while the session is active a pad's
 /// physical grab must match the presenter policy `expected`
-/// (`should_grab(overlay_focus, presenter)`); while inactive any grab state is
+/// (`should_grab(shell_focus, overlay_focus, presenter)`); while inactive any grab state is
 /// acceptable (pads are intentionally all ungrabbed — see [`PadDevice::grab`]'s
 /// session early-return and the `SetSessionActive` handling). Factored out so the
 /// invariant logic is unit-tested without a `Fleet`/`Shared` (which own uinput
@@ -417,11 +417,11 @@ pub(crate) fn grab_ok(session_active: bool, pad_grabbed: bool, expected: bool) -
 /// controller grab).
 ///
 /// While `session_active`, every pad's `grabbed` flag must equal
-/// `should_grab(overlay_focus, presenter)`. `grab_all`/`keyboard_all`/`release_all`
+/// `should_grab(shell_focus, overlay_focus, presenter)`. `grab_all`/`keyboard_all`/`release_all`
 /// call `pad.grab()` unconditionally, which is consistent with `should_grab`
-/// because `should_grab(_, Shell)`, `should_grab(_, Keyboard)`, and
-/// `should_grab(_, Game)` are all always `true` (only a `Handoff` base with no
-/// overlay ungrabs, and `enter_handoff` already routes each pad through
+/// because `should_grab(_, _, Shell)`, `should_grab(_, _, Keyboard)`, and
+/// `should_grab(_, _, Game)` are all always `true` (only a `Handoff` base with
+/// neither flag ungrabs, and `enter_handoff` already routes each pad through
 /// `should_grab`) — so the unconditional grab is correct by the truth table, and
 /// this asserts exactly that. On a violation it `error!`s (pad id,
 /// expected vs actual, presenter, overlay-focus), bumps a metrics counter, and
@@ -821,14 +821,14 @@ mod presenter_tests {
         // must NOT drop the grab — the app would otherwise read the raw pad node
         // while a shell overlay is open (#262). `handoff_all` sets the presenter
         // to Handoff and leaves `overlay_focus` untouched, then reconciles each
-        // pad against `should_grab(sh.overlay_focus, sh.presenter)`. With an
+        // pad against `should_grab(sh.shell_focus, sh.overlay_focus, sh.presenter)`. With an
         // overlay focused, that pair must resolve to a grab.
         let overlay_focus = true;
         let presenter_after_handoff = Presenter::Handoff;
-        assert!(should_grab(overlay_focus, presenter_after_handoff));
+        assert!(should_grab(false, overlay_focus, presenter_after_handoff));
 
         // Without an overlay, Handoff correctly ungrabs (the raw-node case).
-        assert!(!should_grab(false, presenter_after_handoff));
+        assert!(!should_grab(false, false, presenter_after_handoff));
     }
 
     // --- flip-mask (#295 follow-up: swallow buttons held at shell→app flip) ---

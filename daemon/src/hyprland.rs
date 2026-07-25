@@ -494,9 +494,7 @@ async fn watch_events(
             // is the case that used to slip through — fullscreen was only
             // ever enforced on open.
             "closewindow" => {
-                if kiosk_may_enforce(&shell_focus_rx, "closewindow") {
-                    tokio::spawn(enforce_active_fullscreen());
-                }
+                maybe_enforce_active_fullscreen(&shell_focus_rx, "closewindow");
                 let _ = events_tx.send(Event::HyprCloseWindow(data.trim().to_string()));
             }
             // `movewindowv2>>ADDRESS,WORKSPACEID,WORKSPACENAME` — a window
@@ -504,18 +502,14 @@ async fn watch_events(
             // tiled on either side. No data fields are needed: re-check
             // whichever window is active now.
             "movewindowv2" => {
-                if kiosk_may_enforce(&shell_focus_rx, "movewindowv2") {
-                    tokio::spawn(enforce_active_fullscreen());
-                }
+                maybe_enforce_active_fullscreen(&shell_focus_rx, "movewindowv2");
             }
             // `activewindowv2>>ADDRESS` — focus changed for any reason not
             // already covered above (e.g. a keybind focus-cycle). Re-assert
             // fullscreen on the newly-active window so the invariant holds
             // regardless of *why* focus moved.
             "activewindowv2" => {
-                if kiosk_may_enforce(&shell_focus_rx, "activewindowv2") {
-                    tokio::spawn(enforce_active_fullscreen());
-                }
+                maybe_enforce_active_fullscreen(&shell_focus_rx, "activewindowv2");
             }
             _ => {}
         }
@@ -606,6 +600,15 @@ fn kiosk_may_enforce(shell_focus_rx: &watch::Receiver<bool>, event: &str) -> boo
         return false;
     }
     true
+}
+
+/// Re-assert fullscreen on whatever window is active, unless the shell owns the
+/// screen ([`kiosk_may_enforce`]). Wraps the gate + spawn so callers stay a
+/// single statement inside their match arm.
+fn maybe_enforce_active_fullscreen(shell_focus_rx: &watch::Receiver<bool>, event: &str) {
+    if kiosk_may_enforce(shell_focus_rx, event) {
+        tokio::spawn(enforce_active_fullscreen());
+    }
 }
 
 async fn force_fullscreen(address: &str) {
