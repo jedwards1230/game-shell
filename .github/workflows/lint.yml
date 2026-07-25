@@ -29,11 +29,37 @@ jobs:
         with:
           ref: ${{ github.head_ref }}
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
-        with:
-          version: "6.8.3"
-          cache: true
+      - name: Install Qt 6.8.3
+        # NOT jurplel/install-qt-action. This repo enforces `sha_pinning_required`
+        # on Actions, and that check applies to TRANSITIVE action references: the
+        # action's own composite calls `actions/setup-python@v6` and
+        # `jurplel/install-qt-action/action@v4` unpinned, so pinning our own
+        # `uses:` to a SHA is not sufficient and every QML job was rejected before
+        # running a single step:
+        #
+        #   The actions actions/setup-python@v6 and jurplel/install-qt-action/action@v4
+        #   are not allowed in jedwards1230/tv-shell because all actions must be
+        #   pinned to a full-length commit SHA.
+        #
+        # With `allowed_actions: all` there is no allow-list/exemption to grant
+        # (the selected-actions API 409s), so the action is simply unusable here.
+        # Installing Qt through plain `run:` steps sidesteps the policy entirely —
+        # no action is involved, nothing to pin — while keeping the EXACT Qt
+        # version the gates are calibrated to (.qmllint.ini severities + qmlformat
+        # output both drift between Qt releases, so this must not float to
+        # whatever apt ships).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libglib2.0-0t64 libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1 libfreetype6 libgssapi-krb5-2 \
+            libharfbuzz0b libpng16-16 libmd4c0
+          python3 -m pip install --break-system-packages --quiet 'aqtinstall==3.2.1'
+          aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+            --outputdir "$RUNNER_TEMP/Qt"
+          echo "$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+        env:
+          QT_VERSION: "6.8.3"
 
       - name: Format QML files
         run: |
@@ -75,11 +101,37 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
-        with:
-          version: "6.8.3"
-          cache: true
+      - name: Install Qt 6.8.3
+        # NOT jurplel/install-qt-action. This repo enforces `sha_pinning_required`
+        # on Actions, and that check applies to TRANSITIVE action references: the
+        # action's own composite calls `actions/setup-python@v6` and
+        # `jurplel/install-qt-action/action@v4` unpinned, so pinning our own
+        # `uses:` to a SHA is not sufficient and every QML job was rejected before
+        # running a single step:
+        #
+        #   The actions actions/setup-python@v6 and jurplel/install-qt-action/action@v4
+        #   are not allowed in jedwards1230/tv-shell because all actions must be
+        #   pinned to a full-length commit SHA.
+        #
+        # With `allowed_actions: all` there is no allow-list/exemption to grant
+        # (the selected-actions API 409s), so the action is simply unusable here.
+        # Installing Qt through plain `run:` steps sidesteps the policy entirely —
+        # no action is involved, nothing to pin — while keeping the EXACT Qt
+        # version the gates are calibrated to (.qmllint.ini severities + qmlformat
+        # output both drift between Qt releases, so this must not float to
+        # whatever apt ships).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libglib2.0-0t64 libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1 libfreetype6 libgssapi-krb5-2 \
+            libharfbuzz0b libpng16-16 libmd4c0
+          python3 -m pip install --break-system-packages --quiet 'aqtinstall==3.2.1'
+          aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+            --outputdir "$RUNNER_TEMP/Qt"
+          echo "$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+        env:
+          QT_VERSION: "6.8.3"
 
       - name: Lint QML (load-time defects)
         run: |
