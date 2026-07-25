@@ -76,6 +76,7 @@ jobs:
               - '**/*.qml'
               - '.qmllint.ini'
               - '.github/workflows/lint.yml'
+              - '.github/workflows/lint.yml'
               - '.github/workflows/ci.yml'
             widgets:
               - 'widgets-index.json'
