@@ -27,6 +27,40 @@ ShellRoot {
     readonly property bool overlayOverApp: root.state === "appRunning" && root._layout !== null && (root.overlayDrawerOpen || root._layout.sessionQam.active || root._layout.overlayNavDrawer.active)
     onOverlayOverAppChanged: inputManager.setOverlayFocus(root.overlayOverApp)
 
+    // True exactly when the shell surface should be MAPPED — i.e. the shell owns
+    // (or shares, via an over-app overlay) the screen. This is the single
+    // predicate the PanelWindow derives BOTH `visible` and `keyboardFocus` from,
+    // so the surface can never be drawn while declining keyboard focus. That
+    // divergence was the bug: the old `keyboardFocus` keyed off `root.state`
+    // alone and its comment reasoned the None case was "moot because the surface
+    // is unmapped" — an invariant nothing enforced.
+    //
+    // It is ALSO what the daemon is told (`shell-focus`), because the daemon
+    // cannot work it out: the shell is a wlr-layer-shell surface, so Hyprland's
+    // `activewindow` keeps naming the last-focused toplevel (a backgrounded,
+    // still-fullscreen app) the entire time the shell is on screen. Left to
+    // infer, the daemon's follow-focus hands the pad to that app while the user
+    // is looking at the home screen, and the kiosk fullscreen backstop
+    // force-focuses it out from under the shell.
+    readonly property bool shellOwnsScreen: (root.state !== "appRunning" && root.state !== "streaming" && root.state !== "reconnecting" && root.state !== "launching") || root.overlayDrawerOpen || (root._layout !== null && (root._layout.sessionQam.active || root._layout.overlayNavDrawer.active))
+    onShellOwnsScreenChanged: inputManager.setShellFocus(root.shellOwnsScreen)
+
+    // Re-assert screen ownership on a heartbeat. Every edge-triggered signal in
+    // this system has a way to be missed — an app that closes to background
+    // without a close event (Steam; see appQuirks.js `quitCommand`), a launch
+    // that times out, a daemon restart mid-session — and a missed edge used to
+    // wedge the controller against the wrong surface until someone noticed and
+    // restarted something. The daemon's handler is idempotent, so re-sending the
+    // current truth costs nothing in the steady state and bounds any desync to
+    // one tick instead of forever.
+    Timer {
+        interval: 3000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: inputManager.setShellFocus(root.shellOwnsScreen)
+    }
+
     // #193 launch-overlay state — drives the dedicated Overlay-layer "Launching…"
     // window below. Shown from launchStarted until windowConfirmed (or a safety
     // timeout), so the previous app never bleeds through the launch gap.
@@ -504,7 +538,7 @@ ShellRoot {
             // (otherwise the drawer vanishes in place over an app). Key off the
             // drawers' `.active` bool — NOT `.visible`, which Qt couples to
             // parent-chain visibility and would break this very binding.
-            visible: (root.state !== "appRunning" && root.state !== "streaming" && root.state !== "reconnecting" && root.state !== "launching") || root.overlayDrawerOpen || layout.sessionQam.active || layout.overlayNavDrawer.active
+            visible: root.shellOwnsScreen
 
             anchors {
                 top: true
@@ -547,7 +581,14 @@ ShellRoot {
             // overlay the surface is unmapped, so its focus value (None) is
             // moot. Idle and every other mapped state keep the prior Exclusive
             // value unchanged.
-            WlrLayershell.keyboardFocus: (root.state === "appRunning" && !root.overlayOverApp) ? WlrKeyboardFocus.None : WlrKeyboardFocus.Exclusive
+            // Derived from the SAME predicate as `visible` above, so "mapped but
+            // not focused" is unrepresentable: if the shell is on screen it owns
+            // the keyboard. The previous form keyed off `root.state` separately
+            // and could leave the surface drawn with focus None — the compositor
+            // then kept keyboard focus on the app underneath, and every key
+            // (and every daemon-emitted nav key) landed on that app instead of
+            // the shell the user was looking at.
+            WlrLayershell.keyboardFocus: root.shellOwnsScreen ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
             Binding {
                 target: Components.NotificationManager

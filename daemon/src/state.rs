@@ -75,6 +75,19 @@ pub enum Control {
         id: Option<String>,
         reply: Reply,
     },
+    /// `shell-focus on|off` — the SHELL declared whether it owns (or shares)
+    /// the screen. The daemon cannot derive this: the shell is a
+    /// wlr-layer-shell surface and never appears in Hyprland's `activewindow`,
+    /// so compositor focus keeps naming a backgrounded toplevel while the shell
+    /// is on screen. While `on`, the input runtime routes pad events to the
+    /// SHELL key-map regardless of the base presenter, force-grabs every pad,
+    /// and suppresses follow-focus entirely; `off` restores the remembered base
+    /// presenter's routing + grab exactly. Safe to re-assert (the shell sends it
+    /// on a heartbeat so a missed edge self-heals). In-memory only; reply `ok`.
+    ShellFocus {
+        on: bool,
+        reply: Reply,
+    },
     /// `overlay-focus on|off` — a modal shell overlay opened (`on`) or closed
     /// (`off`) over a running app. While `on`, the input runtime routes pad
     /// events to the SHELL key-map regardless of the base presenter

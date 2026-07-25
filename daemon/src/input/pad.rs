@@ -381,7 +381,7 @@ impl PadDevice {
         // — a modal shell overlay open over a running app forces the Shell
         // handler over any base presenter so the pad drives the overlay, not the
         // app; the base presenter stays remembered in `sh.presenter`.
-        match route_presenter(sh.overlay_focus, sh.presenter) {
+        match route_presenter(sh.shell_focus, sh.overlay_focus, sh.presenter) {
             // Keyboard shares the shell key-map handler — the difference between
             // "shell home focused" and "keyboard-contract app focused" is which
             // surface holds Wayland focus (where the emitted keys land), not how
@@ -431,7 +431,7 @@ impl PadDevice {
             // `handle_meta`. Handled the same in the Shell home and a Keyboard-
             // contract app (both routed here) — only the tap *destination* differs
             // by presenter, which `handle_meta` resolves from `routed`.
-            let routed = route_presenter(sh.overlay_focus, sh.presenter);
+            let routed = route_presenter(sh.shell_focus, sh.overlay_focus, sh.presenter);
             if code == cfg::BTN_MODE {
                 self.handle_meta(sh, value, routed);
                 return;

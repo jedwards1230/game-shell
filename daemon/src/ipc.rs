@@ -562,6 +562,9 @@ async fn dispatch(
             })
             .await
         }
+        Command::ShellFocus(on) => {
+            request(control_tx, move |reply| Control::ShellFocus { on, reply }).await
+        }
         Command::OverlayFocus(on) => {
             request(control_tx, move |reply| Control::OverlayFocus { on, reply }).await
         }
@@ -609,6 +612,7 @@ async fn dispatch(
         }
         // Handled without a round-trip to the runtime:
         Command::IntentUsage => return protocol::resp_intent_usage(),
+        Command::ShellFocusUsage => return protocol::resp_shell_focus_usage(),
         Command::OverlayFocusUsage => return protocol::resp_overlay_focus_usage(),
         Command::RumbleUsage => return protocol::resp_rumble_usage(),
         Command::KeyUsage => return protocol::resp_key_usage(),
@@ -953,7 +957,7 @@ mod tests {
                     // In-memory only; fake just replies ok.
                     let _ = reply.send(protocol::resp_ok());
                 }
-                Control::OverlayFocus { reply, .. } => {
+                Control::ShellFocus { reply, .. } | Control::OverlayFocus { reply, .. } => {
                     // In-memory toggle in the real runtime; the fake just replies ok.
                     let _ = reply.send(protocol::resp_ok());
                 }

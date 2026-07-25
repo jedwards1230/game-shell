@@ -2,7 +2,7 @@ import Quickshell.Io
 import QtQuick
 
 // IPC protocol: see docs/IPC_PROTOCOL.md
-// Commands used: grab, release, handoff, overlay-focus, subscribe, get-pads,
+// Commands used: grab, release, handoff, overlay-focus, shell-focus, subscribe, get-pads,
 //   rumble
 // Events handled: combo:force-quit, combo:end-session, combo:suspend-stream,
 //   input-mode:*, controller-wake, controller-disconnected, intent:* (the
@@ -200,6 +200,17 @@ Item {
     // app. `off` restores the base per-app routing/grab exactly. Driven off the
     // "shell surface mapped over the app" condition in shell.qml so it can't
     // desync from what's on screen. See docs/IPC_PROTOCOL.md `overlay-focus`.
+    // Declare whether the SHELL owns (or shares) the screen. The daemon cannot
+    // derive this — the shell is a layer surface and never appears in Hyprland's
+    // `activewindow` — so while this is `on` the daemon routes the pad to the
+    // shell key-map, force-grabs every pad, and suppresses follow-focus so a
+    // stale active-window class can't hand the pad to a backgrounded app.
+    // Idempotent on the daemon side; shell.qml re-asserts it on a heartbeat so a
+    // missed edge self-heals. See docs/IPC_PROTOCOL.md `shell-focus`.
+    function setShellFocus(on) {
+        inputShellFocus.request(on ? "shell-focus on" : "shell-focus off");
+    }
+
     function setOverlayFocus(on) {
         inputOverlayFocus.request(on ? "overlay-focus on" : "overlay-focus off");
     }
@@ -227,6 +238,10 @@ Item {
 
     SocketClient {
         id: inputOverlayFocus
+    }
+
+    SocketClient {
+        id: inputShellFocus
     }
 
     // Seeds the `pads` model with the current fleet (id,index,name,grabbed) on

@@ -83,6 +83,15 @@ fn main() -> anyhow::Result<()> {
     // `.changed()` (watch only signals values sent AFTER construction).
     let (active_window_tx, active_window_rx) = tokio::sync::watch::channel::<String>(String::new());
 
+    // Shell screen-ownership, published by the input runtime (`shell-focus
+    // on|off`) and consumed by the Hyprland actor's kiosk fullscreen backstop.
+    // A `watch` for the same reason as above: ownership is STATE, and only the
+    // newest value matters. Starts `true` — the shell boots owning the screen,
+    // matching the input runtime's initial `Presenter::Shell`; that also makes a
+    // daemon restart mid-session safe, since the shell's heartbeat re-asserts
+    // the truth within one tick.
+    let (shell_focus_tx, shell_focus_rx) = tokio::sync::watch::channel::<bool>(true);
+
     // Observability counters, shared between the input runtime (which records
     // intents/transitions/pad-join-leave/input-events) and the metrics exporter
     // (textfile writer + `/metrics` HTTP route). Count this start as a restart:
@@ -118,6 +127,7 @@ fn main() -> anyhow::Result<()> {
                 input_config_changed,
                 input_metrics,
                 active_window_rx,
+                shell_focus_tx,
             ));
         })?;
 
@@ -390,8 +400,16 @@ fn spawn_dbus_actors(
         // actor can publish `activewindow` focus changes (latest-wins) for the
         // input runtime's follow-focus presenter (see hyprland.rs::run doc comment).
         let hypr_active_window_tx = active_window_tx.clone();
+        let hypr_shell_focus_rx = shell_focus_rx.clone();
         tokio::spawn(async move {
-            if let Err(e) = hyprland::run(hypr_rx, events_tx, hypr_active_window_tx).await {
+            if let Err(e) = hyprland::run(
+                hypr_rx,
+                events_tx,
+                hypr_active_window_tx,
+                hypr_shell_focus_rx,
+            )
+            .await
+            {
                 tracing::warn!("hyprland actor exited: {e}");
             }
         });

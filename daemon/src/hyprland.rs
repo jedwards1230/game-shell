@@ -165,9 +165,11 @@ pub async fn run(
     mut rx: mpsc::Receiver<HyprReq>,
     events_tx: broadcast::Sender<Event>,
     active_window_tx: watch::Sender<String>,
+    shell_focus_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     {
         let events_tx = events_tx.clone();
+        let shell_focus_rx = shell_focus_rx.clone();
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
             // Count consecutive failed (re)connect attempts so a *persistent*
@@ -183,7 +185,13 @@ pub async fn run(
             let mut consecutive_failures: u32 = 0;
             const ESCALATE_AFTER: u32 = 5;
             loop {
-                match watch_events(events_tx.clone(), active_window_tx.clone()).await {
+                match watch_events(
+                    events_tx.clone(),
+                    active_window_tx.clone(),
+                    shell_focus_rx.clone(),
+                )
+                .await
+                {
                     Ok(()) => {
                         // Socket closed cleanly (Hyprland exited/replaced); the next
                         // attempt re-resolves the live instance (self-heal).
@@ -422,6 +430,7 @@ fn monitor_entry(v: &serde_json::Value) -> serde_json::Value {
 async fn watch_events(
     events_tx: broadcast::Sender<Event>,
     active_window_tx: watch::Sender<String>,
+    shell_focus_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let dir = socket_dir()?;
     let sock = dir.join(".socket2.sock");
@@ -471,7 +480,9 @@ async fn watch_events(
             "openwindow" => {
                 if let Some(address) = openwindow_address(data) {
                     let address = address.to_string();
-                    tokio::spawn(async move { force_fullscreen(&address).await });
+                    if kiosk_may_enforce(&shell_focus_rx, "openwindow") {
+                        tokio::spawn(async move { force_fullscreen(&address).await });
+                    }
                 }
                 let json = parse_openwindow(data);
                 let _ = events_tx.send(Event::HyprOpenWindow(json));
@@ -483,7 +494,9 @@ async fn watch_events(
             // is the case that used to slip through — fullscreen was only
             // ever enforced on open.
             "closewindow" => {
-                tokio::spawn(enforce_active_fullscreen());
+                if kiosk_may_enforce(&shell_focus_rx, "closewindow") {
+                    tokio::spawn(enforce_active_fullscreen());
+                }
                 let _ = events_tx.send(Event::HyprCloseWindow(data.trim().to_string()));
             }
             // `movewindowv2>>ADDRESS,WORKSPACEID,WORKSPACENAME` — a window
@@ -491,14 +504,18 @@ async fn watch_events(
             // tiled on either side. No data fields are needed: re-check
             // whichever window is active now.
             "movewindowv2" => {
-                tokio::spawn(enforce_active_fullscreen());
+                if kiosk_may_enforce(&shell_focus_rx, "movewindowv2") {
+                    tokio::spawn(enforce_active_fullscreen());
+                }
             }
             // `activewindowv2>>ADDRESS` — focus changed for any reason not
             // already covered above (e.g. a keybind focus-cycle). Re-assert
             // fullscreen on the newly-active window so the invariant holds
             // regardless of *why* focus moved.
             "activewindowv2" => {
-                tokio::spawn(enforce_active_fullscreen());
+                if kiosk_may_enforce(&shell_focus_rx, "activewindowv2") {
+                    tokio::spawn(enforce_active_fullscreen());
+                }
             }
             _ => {}
         }
@@ -565,6 +582,32 @@ fn openwindow_address(data: &str) -> Option<&str> {
 /// This is the open-time half of kiosk fullscreen enforcement; the
 /// continuous half — re-asserting fullscreen after a window closes, moves,
 /// or focus otherwise changes — is [`enforce_active_fullscreen`].
+/// Whether the kiosk fullscreen backstop may act right now.
+///
+/// It may NOT while the shell owns the screen. Both entry points below resolve
+/// their target from Hyprland's *active window* — but the shell is a
+/// wlr-layer-shell surface that never appears there, so while the shell is on
+/// screen `activewindow` still names whatever toplevel was focused last: a
+/// backgrounded, already-fullscreen app. Acting on that is not a harmless no-op,
+/// because [`force_fullscreen`] issues a `dispatch focuswindow` *before*
+/// `fullscreen 0 set` — it would actively yank focus (and the screen) to that
+/// stale window out from under the shell. That is the "launched Steam, Plex came
+/// to the front instead" bug: Plex was prewarmed, held the active-window slot,
+/// and the backstop kept re-fullscreening it.
+///
+/// The shell re-asserts `shell-focus` on a heartbeat, so this gate reopens on
+/// its own once the shell genuinely hands the screen to an app.
+fn kiosk_may_enforce(shell_focus_rx: &watch::Receiver<bool>, event: &str) -> bool {
+    if *shell_focus_rx.borrow() {
+        tracing::debug!(
+            event,
+            "hyprland: kiosk fullscreen backstop skipped — the shell owns the screen"
+        );
+        return false;
+    }
+    true
+}
+
 async fn force_fullscreen(address: &str) {
     if let Err(e) = request(&format!("dispatch focuswindow address:{address}")).await {
         tracing::warn!("hyprland: force_fullscreen: failed to focus {address}: {e}");

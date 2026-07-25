@@ -95,7 +95,7 @@ pub(crate) fn enter_handoff(sh: &mut Shared, fleet: &mut Fleet, pinned: bool) {
     // ungrabbing: with an overlay focused, the invariant is that the physical
     // pad stays grabbed even over Handoff (#262), so the app can't read the raw
     // evdev node while a shell overlay is open. Mirrors `set_overlay_focus`.
-    let grab = should_grab(sh.overlay_focus, sh.presenter);
+    let grab = should_grab(sh.shell_focus, sh.overlay_focus, sh.presenter);
     for pad in fleet.pads.values_mut() {
         pad.enter_shell(sh); // drop any virtual pad
         if grab {
@@ -107,27 +107,46 @@ pub(crate) fn enter_handoff(sh: &mut Shared, fleet: &mut Fleet, pinned: bool) {
     check_grab_invariant(sh, fleet);
 }
 
-/// Which presenter's handler processes pad events, given the overlay-focus flag
-/// and the base presenter (#262). Overlay-focus forces [`Presenter::Shell`] over
-/// any base so the pad drives an open modal shell overlay via the shell key-map
-/// rather than the app; otherwise the base presenter routes as usual. Pure, so
-/// the routing decision is unit-tested without a controller.
-pub(crate) fn route_presenter(overlay_focus: bool, presenter: Presenter) -> Presenter {
-    if overlay_focus {
+/// Which presenter's handler processes pad events, given the shell-focus and
+/// overlay-focus flags and the base presenter (#262).
+///
+/// EITHER flag forces [`Presenter::Shell`] over any base:
+///
+/// * `shell_focus` — the shell's layer surface is mapped and owns the screen.
+///   This is the shell's own authoritative declaration, and it must win over the
+///   base presenter because the base is derived from compositor focus, which
+///   **cannot see the shell at all**: the shell is a wlr-layer-shell surface, so
+///   Hyprland's `activewindow` keeps naming whatever *toplevel* was focused last
+///   (a backgrounded Steam, say) the whole time the shell owns the screen. Left
+///   ungated, follow-focus resolves that stale class and flips the pad to the
+///   app while the user is looking at the home screen.
+/// * `overlay_focus` — a modal shell overlay is open *over* a running app, so
+///   the pad drives the overlay rather than the app underneath.
+///
+/// Otherwise the base presenter routes as usual. Pure, so the routing decision
+/// is unit-tested without a controller.
+pub(crate) fn route_presenter(
+    shell_focus: bool,
+    overlay_focus: bool,
+    presenter: Presenter,
+) -> Presenter {
+    if shell_focus || overlay_focus {
         Presenter::Shell
     } else {
         presenter
     }
 }
 
-/// Whether every pad should hold the physical `EVIOCGRAB`, given the
-/// overlay-focus flag and the base presenter (#262). Grabbed in every state
-/// except a [`Presenter::Handoff`] base with no overlay open — the one case
-/// where SDL/Moonlight must read the raw evdev node directly. Overlay-focus
-/// therefore forces the grab even over Handoff. Pure — the grab transitions in
-/// [`set_overlay_focus`] are unit-tested without a controller.
-pub(crate) fn should_grab(overlay_focus: bool, presenter: Presenter) -> bool {
-    overlay_focus || presenter != Presenter::Handoff
+/// Whether every pad should hold the physical `EVIOCGRAB`, given the shell-focus
+/// and overlay-focus flags and the base presenter (#262). Grabbed in every state
+/// except a [`Presenter::Handoff`] base with neither flag set — the one case
+/// where SDL/Moonlight must read the raw evdev node directly. Either flag
+/// therefore forces the grab even over Handoff (the shell owning the screen, or
+/// an overlay open above the app, both mean the pad drives the shell). Pure —
+/// the grab transitions in [`set_overlay_focus`] / [`set_shell_focus`] are
+/// unit-tested without a controller.
+pub(crate) fn should_grab(shell_focus: bool, overlay_focus: bool, presenter: Presenter) -> bool {
+    shell_focus || overlay_focus || presenter != Presenter::Handoff
 }
 
 /// Whether the current presenter means a focused *app* owns the screen (rather
@@ -245,7 +264,7 @@ pub(crate) fn set_overlay_focus(sh: &mut Shared, fleet: &mut Fleet, on: bool) {
         return;
     }
     sh.overlay_focus = on;
-    let grab = should_grab(sh.overlay_focus, sh.presenter);
+    let grab = should_grab(sh.shell_focus, sh.overlay_focus, sh.presenter);
     info!(
         overlay_focus = on,
         base = ?sh.presenter,
@@ -268,6 +287,56 @@ pub(crate) fn set_overlay_focus(sh: &mut Shared, fleet: &mut Fleet, on: bool) {
     check_grab_invariant(sh, fleet);
 }
 
+/// Declare whether the SHELL currently owns (or shares) the screen.
+///
+/// This is the shell's authoritative statement of screen ownership, mirroring
+/// its own `visible:` binding in `shell.qml` — the one place that already knows
+/// "the shell should own or share the screen now". The daemon cannot derive this
+/// itself: the shell is a wlr-layer-shell surface and never appears in
+/// Hyprland's `activewindow`, so compositor focus keeps naming a backgrounded
+/// toplevel while the shell is on screen.
+///
+/// Like [`set_overlay_focus`] this deliberately leaves `sh.presenter` untouched —
+/// it *remembers* the base routing to restore when the shell hands the screen
+/// back to an app — and only reconciles routing ([`route_presenter`]) and the
+/// grab ([`should_grab`]). That keeps it safe to re-assert at any time, which
+/// matters because the shell re-sends it on a heartbeat: a missed edge (an app
+/// that closes to background without a close event, a launch that times out, a
+/// daemon restart mid-session) then self-heals on the next tick instead of
+/// wedging the pad against the wrong surface until someone notices.
+///
+/// Idempotent — a no-op when already in the requested state, so the heartbeat
+/// costs nothing in the steady state.
+pub(crate) fn set_shell_focus(sh: &mut Shared, fleet: &mut Fleet, on: bool) {
+    if sh.shell_focus == on {
+        return;
+    }
+    sh.shell_focus = on;
+    // Publish to the Hyprland actor so the kiosk fullscreen backstop stops
+    // force-focusing a stale active window while the shell owns the screen.
+    let _ = sh.shell_focus_tx.send(on);
+    let grab = should_grab(sh.shell_focus, sh.overlay_focus, sh.presenter);
+    info!(
+        shell_focus = on,
+        base = ?sh.presenter,
+        grab,
+        pads = fleet.pads.len(),
+        "shell-focus toggled"
+    );
+    for pad in fleet.pads.values_mut() {
+        // Same reasoning as `set_overlay_focus`: the routed presenter flips
+        // (app presenter ⇄ Shell) without an enter_shell/enter_game, so drop any
+        // partial combo buffer rather than replay it to the wrong surface.
+        pad.reset_combo_buffer(sh);
+        if grab {
+            pad.grab(sh); // idempotent + session-aware
+        } else {
+            pad.ungrab(sh); // idempotent
+        }
+    }
+    check_grab_invariant(sh, fleet);
+}
+
 /// Apply a settled compositor focus change to the presenter (follow-focus).
 ///
 /// Runs from the [`Internal::FocusSettle`] handler once the focus has held for
@@ -280,9 +349,13 @@ pub(crate) fn set_overlay_focus(sh: &mut Shared, fleet: &mut Fleet, on: bool) {
 /// (each of which asserts [`check_grab_invariant`] on its way out), so the
 /// invariant is checked after any transition this triggers.
 pub(crate) fn apply_focus_change(sh: &mut Shared, fleet: &mut Fleet, class: &str) {
-    if let Some(target) =
-        focus_presenter_target(sh.presenter, sh.handoff_pinned, &sh.contracts, class)
-    {
+    if let Some(target) = focus_presenter_target(
+        sh.presenter,
+        sh.handoff_pinned,
+        sh.shell_focus,
+        &sh.contracts,
+        class,
+    ) {
         info!(
             class = %class,
             from = ?sh.presenter,
@@ -354,7 +427,7 @@ pub(crate) fn grab_ok(session_active: bool, pad_grabbed: bool, expected: bool) -
 /// expected vs actual, presenter, overlay-focus), bumps a metrics counter, and
 /// `debug_assert!`s so it panics in dev/test but never in release.
 pub(crate) fn check_grab_invariant(sh: &Shared, fleet: &Fleet) {
-    let expected = should_grab(sh.overlay_focus, sh.presenter);
+    let expected = should_grab(sh.shell_focus, sh.overlay_focus, sh.presenter);
     for pad in fleet.pads.values() {
         if !grab_ok(sh.session_active, pad.grabbed, expected) {
             error!(
@@ -404,10 +477,27 @@ pub(crate) fn check_grab_invariant(sh: &Shared, fleet: &Fleet) {
 pub(crate) fn focus_presenter_target(
     current: Presenter,
     handoff_pinned: bool,
+    shell_focus: bool,
     contracts: &InputContracts,
     focused_class: &str,
 ) -> Option<Presenter> {
     if current == Presenter::Handoff && handoff_pinned {
+        return None;
+    }
+    // The shell owns the screen: ignore compositor focus entirely.
+    //
+    // The shell is a wlr-layer-shell surface and therefore NEVER appears in
+    // Hyprland's `activewindow` (see `hyprland::needs_fullscreen`). Taking
+    // exclusive keyboard focus does not clear the active *toplevel* either, so
+    // while the shell is up `focused_class` keeps naming whatever app was
+    // focused last — typically a backgrounded, still-fullscreen Steam. Acting on
+    // that stale class is exactly the "controller drives the app while I'm
+    // looking at the home screen" desync: follow-focus flips to Game, the pad is
+    // handed to a virtual gamepad, and the shell goes dead. The empty-class case
+    // below is a genuine signal but not a reliable one, so it can only ever ADD
+    // a Shell transition — it can never be trusted to prove an app owns the
+    // screen.
+    if shell_focus {
         return None;
     }
     let target = if focused_class.is_empty() {
@@ -489,6 +579,7 @@ mod presenter_tests {
             focus_presenter_target(
                 Presenter::Shell,
                 false,
+                false,
                 &default_contracts(),
                 "steam_app_12345"
             ),
@@ -504,6 +595,7 @@ mod presenter_tests {
             focus_presenter_target(
                 Presenter::Shell,
                 false,
+                false,
                 &default_contracts(),
                 "tv.plex.Plex"
             ),
@@ -516,7 +608,13 @@ mod presenter_tests {
         // Steam (Game) focused, user opens Plex: flip Game -> Keyboard, which
         // tears down the virtual pad (breaking Steam's exclusive grab).
         assert_eq!(
-            focus_presenter_target(Presenter::Game, false, &default_contracts(), "tv.plex.Plex"),
+            focus_presenter_target(
+                Presenter::Game,
+                false,
+                false,
+                &default_contracts(),
+                "tv.plex.Plex"
+            ),
             Some(Presenter::Keyboard)
         );
     }
@@ -528,7 +626,7 @@ mod presenter_tests {
         over.insert("tv.plex.Plex".to_string(), InputContract::Gamepad);
         let contracts = InputContracts::new(over);
         assert_eq!(
-            focus_presenter_target(Presenter::Shell, false, &contracts, "tv.plex.Plex"),
+            focus_presenter_target(Presenter::Shell, false, false, &contracts, "tv.plex.Plex"),
             Some(Presenter::Game)
         );
     }
@@ -536,7 +634,7 @@ mod presenter_tests {
     #[test]
     fn game_to_shell_when_focus_empty() {
         assert_eq!(
-            focus_presenter_target(Presenter::Game, false, &default_contracts(), ""),
+            focus_presenter_target(Presenter::Game, false, false, &default_contracts(), ""),
             Some(Presenter::Shell)
         );
     }
@@ -545,14 +643,20 @@ mod presenter_tests {
     fn no_change_when_target_matches_current() {
         // Already Shell, still no toplevel focused -> no-op (no thrash).
         assert_eq!(
-            focus_presenter_target(Presenter::Shell, false, &default_contracts(), ""),
+            focus_presenter_target(Presenter::Shell, false, false, &default_contracts(), ""),
             None
         );
         // Already Game, focus moved to a DIFFERENT gamepad-contract app -> still
         // Game, no-op (switching between two app windows must not flap the
         // presenter, which would thrash the virtual pad).
         assert_eq!(
-            focus_presenter_target(Presenter::Game, false, &default_contracts(), "another_app"),
+            focus_presenter_target(
+                Presenter::Game,
+                false,
+                false,
+                &default_contracts(),
+                "another_app"
+            ),
             None
         );
     }
@@ -567,13 +671,14 @@ mod presenter_tests {
             focus_presenter_target(
                 Presenter::Handoff,
                 true,
+                false,
                 &default_contracts(),
                 "steam_app_moonlight"
             ),
             None
         );
         assert_eq!(
-            focus_presenter_target(Presenter::Handoff, true, &default_contracts(), ""),
+            focus_presenter_target(Presenter::Handoff, true, false, &default_contracts(), ""),
             None
         );
     }
@@ -587,17 +692,23 @@ mod presenter_tests {
         over.insert("com.example.RawPad".to_string(), InputContract::Handoff);
         let contracts = InputContracts::new(over);
         assert_eq!(
-            focus_presenter_target(Presenter::Shell, false, &contracts, "com.example.RawPad"),
+            focus_presenter_target(
+                Presenter::Shell,
+                false,
+                false,
+                &contracts,
+                "com.example.RawPad"
+            ),
             Some(Presenter::Handoff)
         );
         // Now in an UNpinned Handoff, focus returning to the shell moves out.
         assert_eq!(
-            focus_presenter_target(Presenter::Handoff, false, &contracts, ""),
+            focus_presenter_target(Presenter::Handoff, false, false, &contracts, ""),
             Some(Presenter::Shell)
         );
         // ...and focus to a gamepad app moves to Game.
         assert_eq!(
-            focus_presenter_target(Presenter::Handoff, false, &contracts, "steam"),
+            focus_presenter_target(Presenter::Handoff, false, false, &contracts, "steam"),
             Some(Presenter::Game)
         );
     }
@@ -638,20 +749,38 @@ mod presenter_tests {
     fn overlay_focus_routes_to_shell_over_any_base() {
         // ON: the shell handler runs regardless of the base presenter, so the
         // pad drives the modal overlay, not the app (#262).
-        assert_eq!(route_presenter(true, Presenter::Game), Presenter::Shell);
-        assert_eq!(route_presenter(true, Presenter::Handoff), Presenter::Shell);
-        assert_eq!(route_presenter(true, Presenter::Shell), Presenter::Shell);
-        assert_eq!(route_presenter(true, Presenter::Keyboard), Presenter::Shell);
-        // OFF: the base presenter routes as usual (no behavior change).
-        assert_eq!(route_presenter(false, Presenter::Game), Presenter::Game);
         assert_eq!(
-            route_presenter(false, Presenter::Handoff),
+            route_presenter(false, true, Presenter::Game),
+            Presenter::Shell
+        );
+        assert_eq!(
+            route_presenter(false, true, Presenter::Handoff),
+            Presenter::Shell
+        );
+        assert_eq!(
+            route_presenter(false, true, Presenter::Shell),
+            Presenter::Shell
+        );
+        assert_eq!(
+            route_presenter(false, true, Presenter::Keyboard),
+            Presenter::Shell
+        );
+        // OFF: the base presenter routes as usual (no behavior change).
+        assert_eq!(
+            route_presenter(false, false, Presenter::Game),
+            Presenter::Game
+        );
+        assert_eq!(
+            route_presenter(false, false, Presenter::Handoff),
             Presenter::Handoff
         );
-        assert_eq!(route_presenter(false, Presenter::Shell), Presenter::Shell);
+        assert_eq!(
+            route_presenter(false, false, Presenter::Shell),
+            Presenter::Shell
+        );
         // Keyboard passes through (routed to the shell key-map by handle_event).
         assert_eq!(
-            route_presenter(false, Presenter::Keyboard),
+            route_presenter(false, false, Presenter::Keyboard),
             Presenter::Keyboard
         );
     }
@@ -660,17 +789,17 @@ mod presenter_tests {
     fn overlay_focus_forces_grab_over_handoff() {
         // ON: grabbed regardless of base — critical for Handoff, normally
         // ungrabbed, so the app stops seeing raw events (#262).
-        assert!(should_grab(true, Presenter::Handoff));
-        assert!(should_grab(true, Presenter::Game));
-        assert!(should_grab(true, Presenter::Shell));
-        assert!(should_grab(true, Presenter::Keyboard));
+        assert!(should_grab(false, true, Presenter::Handoff));
+        assert!(should_grab(false, true, Presenter::Game));
+        assert!(should_grab(false, true, Presenter::Shell));
+        assert!(should_grab(false, true, Presenter::Keyboard));
         // OFF: the base grab state is restored — only a Handoff base is ungrabbed
         // (re-ungrab so SDL/Moonlight reads the raw node again).
-        assert!(!should_grab(false, Presenter::Handoff));
-        assert!(should_grab(false, Presenter::Game));
-        assert!(should_grab(false, Presenter::Shell));
+        assert!(!should_grab(false, false, Presenter::Handoff));
+        assert!(should_grab(false, false, Presenter::Game));
+        assert!(should_grab(false, false, Presenter::Shell));
         // Keyboard keeps the grab (shell-style emulation; no raw-node handoff).
-        assert!(should_grab(false, Presenter::Keyboard));
+        assert!(should_grab(false, false, Presenter::Keyboard));
     }
 
     #[test]
@@ -951,13 +1080,33 @@ mod presenter_tests {
         // The policy `check_grab_invariant` asserts: after grab_all/keyboard_all/
         // release_all the pads are grabbed (Shell/Keyboard/Game always grab), and
         // should_grab agrees.
-        assert!(grab_ok(true, true, should_grab(false, Presenter::Shell)));
-        assert!(grab_ok(true, true, should_grab(false, Presenter::Keyboard)));
-        assert!(grab_ok(true, true, should_grab(false, Presenter::Game)));
+        assert!(grab_ok(
+            true,
+            true,
+            should_grab(false, false, Presenter::Shell)
+        ));
+        assert!(grab_ok(
+            true,
+            true,
+            should_grab(false, false, Presenter::Keyboard)
+        ));
+        assert!(grab_ok(
+            true,
+            true,
+            should_grab(false, false, Presenter::Game)
+        ));
         // Handoff with no overlay ungrabs, and an ungrabbed pad then satisfies it.
-        assert!(grab_ok(true, false, should_grab(false, Presenter::Handoff)));
+        assert!(grab_ok(
+            true,
+            false,
+            should_grab(false, false, Presenter::Handoff)
+        ));
         // Handoff WITH an overlay keeps the grab (should_grab true).
-        assert!(grab_ok(true, true, should_grab(true, Presenter::Handoff)));
+        assert!(grab_ok(
+            true,
+            true,
+            should_grab(false, true, Presenter::Handoff)
+        ));
     }
 
     #[test]
@@ -971,5 +1120,94 @@ mod presenter_tests {
         // Non-string payload degrades to a placeholder rather than being lost.
         let p: Box<dyn std::any::Any + Send> = Box::new(42u32);
         assert_eq!(panic_payload_str(p.as_ref()), "<non-string panic payload>");
+    }
+}
+
+#[cfg(test)]
+mod shell_focus_tests {
+    use super::*;
+
+    fn default_contracts() -> InputContracts {
+        InputContracts::default()
+    }
+
+    /// The regression this whole change exists for.
+    ///
+    /// The shell is a wlr-layer-shell surface, so while it owns the screen
+    /// Hyprland's `activewindow` keeps naming the last-focused *toplevel* — a
+    /// backgrounded, still-fullscreen Steam. Before the `shell_focus` gate,
+    /// follow-focus resolved that stale class and flipped the pad to Game: the
+    /// user was looking at the home screen while the controller drove Steam
+    /// (repeated nav taps, a held direction reading as "stuck navigating right").
+    #[test]
+    fn stale_active_class_cannot_steal_the_pad_while_shell_owns_screen() {
+        assert_eq!(
+            focus_presenter_target(
+                Presenter::Shell,
+                false,
+                true, // shell owns the screen
+                &default_contracts(),
+                "steam", // ...but the compositor still names Steam
+            ),
+            None,
+            "follow-focus must not leave Shell while the shell owns the screen"
+        );
+    }
+
+    /// The inverse: once the shell hands the screen over, follow-focus resumes.
+    #[test]
+    fn follow_focus_resumes_when_shell_releases_the_screen() {
+        assert_eq!(
+            focus_presenter_target(
+                Presenter::Shell,
+                false,
+                false,
+                &default_contracts(),
+                "steam",
+            ),
+            Some(Presenter::Game)
+        );
+    }
+
+    /// A pinned Handoff still wins over shell-focus (unchanged precedence).
+    #[test]
+    fn pinned_handoff_still_beats_shell_focus() {
+        assert_eq!(
+            focus_presenter_target(Presenter::Handoff, true, true, &default_contracts(), ""),
+            None
+        );
+    }
+
+    #[test]
+    fn shell_focus_routes_every_base_to_the_shell_keymap() {
+        for base in [
+            Presenter::Shell,
+            Presenter::Keyboard,
+            Presenter::Game,
+            Presenter::Handoff,
+        ] {
+            assert_eq!(route_presenter(true, false, base), Presenter::Shell);
+        }
+    }
+
+    /// Handoff normally ungrabs so SDL reads the raw node; the shell owning the
+    /// screen must force the grab back, exactly as overlay-focus does.
+    #[test]
+    fn shell_focus_forces_the_grab_even_over_handoff() {
+        assert!(!should_grab(false, false, Presenter::Handoff));
+        assert!(should_grab(true, false, Presenter::Handoff));
+    }
+
+    /// Neither flag set leaves the base presenter's routing untouched.
+    #[test]
+    fn neither_flag_is_transparent() {
+        assert_eq!(
+            route_presenter(false, false, Presenter::Game),
+            Presenter::Game
+        );
+        assert_eq!(
+            route_presenter(false, false, Presenter::Handoff),
+            Presenter::Handoff
+        );
     }
 }
