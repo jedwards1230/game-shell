@@ -45,6 +45,26 @@ ShellRoot {
     readonly property bool shellOwnsScreen: (root.state !== "appRunning" && root.state !== "streaming" && root.state !== "reconnecting" && root.state !== "launching") || root.overlayDrawerOpen || (root._layout !== null && (root._layout.sessionQam.active || root._layout.overlayNavDrawer.active))
     onShellOwnsScreenChanged: inputManager.setShellFocus(root.shellOwnsScreen)
 
+    // Push the shell's own state machine + media-playing predicate to the daemon
+    // (`shell-state`), which surfaces it on `/status` so Home Assistant can tell
+    // whether htpc-1 is safe to suspend. The daemon can't work either value out:
+    // its compositor-level UiState is explicitly NOT this QML state machine, and
+    // MPRIS playback is read QML-side. `root.state` goes over the wire verbatim.
+    //
+    // media-playing is sourced from IdleInhibitController's `mediaPlaying` — the
+    // SAME predicate that decides whether to hold the Wayland idle-inhibitor.
+    // Recomputing it here would let the daemon and the inhibitor disagree about
+    // what "media playing" means, i.e. suspend mid-playback.
+    //
+    // Pushed on edge below (both change signals fire only on an actual value
+    // change, so this costs nothing on a binding re-evaluation) and re-asserted
+    // on the heartbeat as the self-heal backstop.
+    function _pushShellState() {
+        inputManager.setShellState(root.state, idleInhibit.mediaPlaying);
+    }
+
+    onStateChanged: root._pushShellState()
+
     // Re-assert screen ownership on a heartbeat. Every edge-triggered signal in
     // this system has a way to be missed — an app that closes to background
     // without a close event (Steam; see appQuirks.js `quitCommand`), a launch
@@ -58,7 +78,13 @@ ShellRoot {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: inputManager.setShellFocus(root.shellOwnsScreen)
+        onTriggered: {
+            inputManager.setShellFocus(root.shellOwnsScreen);
+            // Same heartbeat, on purpose: the periodic re-send IS the liveness
+            // signal that lets the daemon's /status distinguish "the shell is
+            // idle" from "the shell is dead".
+            root._pushShellState();
+        }
     }
 
     // #193 launch-overlay state — drives the dedicated Overlay-layer "Launching…"
@@ -156,6 +182,11 @@ ShellRoot {
     Components.IdleInhibitController {
         id: idleInhibit
         shellState: root.state
+
+        // Second edge for the `shell-state` push above: media start/stop must
+        // reach the daemon immediately, not up to a heartbeat late — that window
+        // is exactly "Home Assistant suspends the box as playback begins".
+        onMediaPlayingChanged: root._pushShellState()
     }
 
     // Mute a backgrounded native stream app (Steam Remote Play) so its audio

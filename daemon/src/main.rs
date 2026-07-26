@@ -17,8 +17,8 @@
 // modules aren't dead-code on non-Linux hosts where `main` is cfg-excluded.)
 #[cfg(target_os = "linux")]
 use tv_shell_input::{
-    bluetooth, http, hyprland, input, ipc, network, power, protocol, session, session_env, state,
-    watch, wol,
+    bluetooth, http, hyprland, input, ipc, network, power, protocol, session, session_env,
+    shell_state, state, watch, wol,
 };
 
 #[cfg(all(target_os = "linux", feature = "mcp"))]
@@ -26,6 +26,9 @@ use tv_shell_input::mcp;
 
 #[cfg(target_os = "linux")]
 use tv_shell_input::ipc::{ControllerDbState, SharedControllerDbState};
+
+#[cfg(target_os = "linux")]
+use tv_shell_input::shell_state::SharedShellState;
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
@@ -221,12 +224,19 @@ fn main() -> anyhow::Result<()> {
         let db_state: SharedControllerDbState =
             std::sync::Arc::new(tokio::sync::RwLock::new(ControllerDbState::initial()));
 
+        // Shell-reported UI state cache. The IPC server writes it (`shell-state`
+        // pushes from the QML heartbeat); the HTTP bridge reads it for
+        // `GET /status`. Threaded into both rather than kept in a module-level
+        // static, so it stays testable and single-owner-ish.
+        let ui_state: SharedShellState = shell_state::shared();
+
         let ipc_task = tokio::spawn(ipc::serve(
             sock_path,
             control_tx.clone(),
             events_tx.clone(),
-            dbus,
+            dbus.clone(),
             db_state,
+            ui_state.clone(),
         ));
 
         // LAN HTTP control bridge (#151): opt-in via [http].bind in config.toml.
@@ -250,6 +260,10 @@ fn main() -> anyhow::Result<()> {
                     shutdown.clone(),
                     reexec_flag.clone(),
                     Arc::clone(&metrics),
+                    ui_state.clone(),
+                    // POST /suspend rides the same logind actor as the
+                    // `power-suspend` IPC command — no second suspend path.
+                    dbus.clone(),
                 ));
             }
             Ok(None) => {}

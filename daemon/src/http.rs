@@ -40,7 +40,9 @@
 //! parser and unit tests compile and run on macOS / CI.
 
 use crate::bridge_core;
-use crate::protocol::Event;
+use crate::ipc::DbusSenders;
+use crate::protocol::{self, Command, Event};
+use crate::shell_state::{self, SharedShellState};
 use crate::state::Control;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -93,6 +95,16 @@ pub enum HttpAction {
     /// auth (scrapers don't send tokens) and is always available when the bridge
     /// is bound.
     Metrics,
+    // ── Power-control routes ─────────────────────────────────────────────────
+    /// `GET /status` — the shell's reported UI state + its freshness, as JSON.
+    ///
+    /// Named `ShellStatus`, not `Status`, to stay unambiguous next to the
+    /// pre-existing [`HttpAction::DevStatus`] (`GET /dev/status`, a build/PID
+    /// blob). Authenticated like every route except `/metrics`.
+    ShellStatus,
+    /// `POST /suspend` — suspend this machine via logind, honouring the
+    /// `power-can-suspend` refusal.
+    Suspend,
 }
 
 // ─── Pure parser (unit-testable on any host) ────────────────────────────────
@@ -169,6 +181,8 @@ pub fn parse_query(qs: &str) -> Vec<(String, String)> {
 ///   empty target → [`HttpError::NotFound`]).
 /// - `POST /key/<name>`         → [`HttpAction::Key`] (percent-decoded; empty →
 ///   [`HttpError::NotFound`]).
+/// - `GET /status`              → [`HttpAction::ShellStatus`] (distinct from `/dev/status`)
+/// - `POST /suspend`            → [`HttpAction::Suspend`]
 /// - `GET /dev/status`          → [`HttpAction::DevStatus`]
 /// - `GET /dev/logs`            → [`HttpAction::DevLogs`] (`?lines=N&filter=F`)
 /// - `POST /dev/deploy`         → [`HttpAction::DevDeploy`] (`?ref=<git-ref>`)
@@ -210,6 +224,18 @@ pub fn parse_request_line(method: &str, path: &str) -> Result<HttpAction, HttpEr
         }
     }
 
+    // Shell-status route: GET only. MUST be matched here, above the
+    // POST-or-405 gate below — otherwise a `GET /status` is rejected 405 before
+    // it can ever reach a prefix match. Exact match, so there is no collision
+    // with `/dev/status` (which the `/dev/` branch below owns anyway).
+    if bare_path == "/status" {
+        if method == "GET" {
+            return Ok(HttpAction::ShellStatus);
+        } else {
+            return Err(HttpError::MethodNotAllowed);
+        }
+    }
+
     // Dev routes (#167).
     if bare_path.starts_with("/dev/") {
         let params = parse_query(qs);
@@ -219,6 +245,12 @@ pub fn parse_request_line(method: &str, path: &str) -> Result<HttpAction, HttpEr
     // All remaining routes require POST.
     if method != "POST" {
         return Err(HttpError::MethodNotAllowed);
+    }
+
+    // Suspend this machine. POST-only, so it sits below the gate above (a
+    // `GET /suspend` correctly yields 405, not an accidental power-off).
+    if bare_path == "/suspend" {
+        return Ok(HttpAction::Suspend);
     }
 
     if let Some(rest) = bare_path.strip_prefix("/intent/") {
@@ -303,12 +335,21 @@ pub fn http_response(status: u16, body: &str) -> String {
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Unknown",
     };
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// Render a 200 response with a JSON body.
+pub fn json_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }
@@ -410,6 +451,12 @@ async fn handle_connection(
     shutdown: &tokio_util::sync::CancellationToken,
     reexec_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     metrics: &std::sync::Arc<crate::metrics::Metrics>,
+    // Shell-reported UI state cache, written by the IPC `shell-state` push and
+    // read by `GET /status`.
+    ui_state: &SharedShellState,
+    // D-Bus actor handles, for `POST /suspend`. Empty on non-Linux (see
+    // `ipc::DbusSenders`), which is exactly what keeps this route portable.
+    dbus: &DbusSenders,
 ) {
     // Bound the header read with a short timeout (anti-slowloris); the longer
     // outer DEV_TIMEOUT_SECS budget covers dev-op subprocess execution only.
@@ -565,6 +612,20 @@ async fn handle_connection(
             let resp = handle_metrics(metrics).await;
             let _ = stream.write_all(resp.as_bytes()).await;
         }
+
+        // ── Power-control routes ─────────────────────────────────────────────
+        HttpAction::ShellStatus => {
+            let resp = handle_shell_status(ui_state).await;
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+        HttpAction::Suspend => {
+            // Write + flush the response BEFORE the kernel can freeze us — a
+            // successful logind Suspend can return and then stop the world
+            // mid-write, which would leave the caller hanging.
+            let resp = handle_suspend(dbus).await;
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.flush().await;
+        }
     }
 }
 
@@ -643,11 +704,112 @@ fn handle_dev_logs(lines: usize, filter: Option<&str>) -> String {
 async fn handle_dev_status() -> String {
     let info = bridge_core::get_status().await;
     let json = serde_json::to_string(&info).unwrap_or_else(|e| format!(r#"{{"error":"{e}"}}"#));
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        json.len(),
-        json
-    )
+    json_response(&json)
+}
+
+// ─── Power-control handlers ──────────────────────────────────────────────────
+
+/// `GET /status` — publish the shell's last-reported state plus its freshness.
+///
+/// **Reports; does not decide.** There is deliberately no `busy` field: the
+/// consumer (Home Assistant) owns the suspend policy so the rule can change
+/// without a daemon release. `shell_state` is the LAST-KNOWN value — a consumer
+/// must gate on `stale` before trusting it (a stale `"idle"` means the shell
+/// stopped reporting, not that the box is idle).
+async fn handle_shell_status(ui_state: &SharedShellState) -> String {
+    // Sample the (subprocess) liveness probe BEFORE taking the read lock, so no
+    // lock is ever held across an `.await`.
+    let shell_running = bridge_core::quickshell_running().await;
+    let now = shell_state::now_unix();
+    let snapshot = ui_state.read().await.clone();
+    let status = shell_state::status(&snapshot, now, shell_running);
+    let json = serde_json::to_string(&status).unwrap_or_else(|e| format!(r#"{{"error":"{e}"}}"#));
+    json_response(&json)
+}
+
+/// The outcome of a `POST /suspend`, derived from the daemon's power replies.
+#[derive(Debug, PartialEq, Eq)]
+enum SuspendOutcome {
+    /// logind accepted the suspend request. (Accepted, not completed — the
+    /// process may be frozen before anything further could be observed.)
+    Accepted,
+    /// This machine reports it cannot suspend. A refusal, not a failure: the
+    /// `power-can-suspend` reply deliberately degrades a bus error to `no`, and
+    /// a non-Linux build answers `error:unsupported on this platform` — both
+    /// land here rather than looking like a broken daemon.
+    Refused,
+    /// The suspend call itself failed; carries the daemon's reason with the
+    /// `error:` prefix stripped.
+    Failed(String),
+}
+
+/// Pure decision: map the raw `power-can-suspend` / `power-suspend` IPC replies
+/// onto a [`SuspendOutcome`].
+///
+/// Reply vocabulary (`daemon/src/power.rs`): `power-can-suspend` answers
+/// `yes`/`no`; `power-suspend` answers `ok`, `error:logind unavailable`, or
+/// `error:suspend failed: <e>`. Either can also be
+/// `error:unsupported on this platform` when the actor isn't wired.
+///
+/// `suspend` is `None` when the gate said no and we therefore never asked. That
+/// combination can't occur by construction, but the function stays total: a
+/// `yes` with no attempt is reported as a failure rather than silently "ok".
+fn interpret_suspend(can_suspend: &str, suspend: Option<&str>) -> SuspendOutcome {
+    // Anything other than a plain `yes` is a refusal — including the degraded
+    // `no` a bus error produces and the non-Linux unsupported line.
+    if can_suspend.trim() != "yes" {
+        return SuspendOutcome::Refused;
+    }
+    match suspend.map(str::trim) {
+        Some("ok") => SuspendOutcome::Accepted,
+        Some(reply) => SuspendOutcome::Failed(
+            reply
+                .strip_prefix("error:")
+                .unwrap_or(reply)
+                .trim()
+                .to_string(),
+        ),
+        None => SuspendOutcome::Failed("suspend was not attempted".to_string()),
+    }
+}
+
+/// `POST /suspend` — suspend this machine via the existing `power-suspend` IPC
+/// command (logind `Suspend(false)`); `daemon/src/power.rs` is untouched.
+///
+/// Cross-platform by construction: both commands go through
+/// `ipc::dispatch_dbus`, whose non-Linux stub replies
+/// `error:unsupported on this platform`, so on macOS this route compiles and
+/// answers `409 suspend refused` instead of being `#[cfg]`-ed away.
+async fn handle_suspend(dbus: &DbusSenders) -> String {
+    let can = crate::ipc::dispatch_dbus(dbus, &Command::PowerCanSuspend)
+        .await
+        .unwrap_or_else(protocol::resp_unsupported);
+
+    // Honour the refusal: don't even attempt the suspend when the gate says no.
+    let suspend = if can.trim() == "yes" {
+        Some(
+            crate::ipc::dispatch_dbus(dbus, &Command::PowerSuspend)
+                .await
+                .unwrap_or_else(protocol::resp_unsupported),
+        )
+    } else {
+        None
+    };
+
+    match interpret_suspend(&can, suspend.as_deref()) {
+        SuspendOutcome::Accepted => http_response(200, "ok"),
+        SuspendOutcome::Refused => {
+            tracing::info!("http: /suspend refused (power-can-suspend replied {can:?})");
+            http_response(
+                409,
+                "suspend refused: this system reports it cannot suspend",
+            )
+        }
+        SuspendOutcome::Failed(reason) => {
+            tracing::warn!("http: /suspend failed: {reason}");
+            http_response(500, &format!("suspend failed: {reason}"))
+        }
+    }
 }
 
 // ─── Public serve entry point ────────────────────────────────────────────────
@@ -690,6 +852,8 @@ pub async fn serve(
     shutdown: tokio_util::sync::CancellationToken,
     reexec_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
+    ui_state: SharedShellState,
+    dbus: DbusSenders,
 ) {
     // Treat an empty token as no token at all, so TV_SHELL_HTTP_TOKEN="" fails
     // closed (rejects all) rather than accepting an empty `Bearer ` credential.
@@ -754,6 +918,8 @@ pub async fn serve(
                 let shutdown = shutdown.clone();
                 let reexec_flag = reexec_flag.clone();
                 let metrics = metrics.clone();
+                let ui_state = ui_state.clone();
+                let dbus = dbus.clone();
                 tokio::spawn(async move {
                     // Use DEV_TIMEOUT_SECS (180 s) for all connections.
                     // /dev/build and /dev/deploy need up to ~15 s and ~30 s
@@ -772,6 +938,8 @@ pub async fn serve(
                             &shutdown,
                             &reexec_flag,
                             &metrics,
+                            &ui_state,
+                            &dbus,
                         ),
                     )
                     .await;
@@ -1277,5 +1445,127 @@ mod tests {
             parse_request_line("POST", "/metrics"),
             Err(HttpError::MethodNotAllowed)
         );
+    }
+
+    // ── /status + /suspend (power control) ───────────────────────────────────
+
+    #[test]
+    fn shell_status_get() {
+        assert_eq!(
+            parse_request_line("GET", "/status"),
+            Ok(HttpAction::ShellStatus)
+        );
+        // Query strings are stripped before the path match.
+        assert_eq!(
+            parse_request_line("GET", "/status?foo=bar"),
+            Ok(HttpAction::ShellStatus)
+        );
+    }
+
+    #[test]
+    fn shell_status_is_matched_before_the_post_only_gate() {
+        // Regression guard for the route-ordering trap: `parse_request_line`
+        // rejects every non-POST method before the generic prefix matches, so a
+        // `/status` arm placed below that line would 405 every GET. If this ever
+        // returns MethodNotAllowed, the arm has drifted below the gate.
+        assert_ne!(
+            parse_request_line("GET", "/status"),
+            Err(HttpError::MethodNotAllowed)
+        );
+    }
+
+    #[test]
+    fn shell_status_post_method_not_allowed() {
+        assert_eq!(
+            parse_request_line("POST", "/status"),
+            Err(HttpError::MethodNotAllowed)
+        );
+    }
+
+    #[test]
+    fn shell_status_does_not_shadow_dev_status() {
+        // `/dev/status` keeps its own (differently-shaped) blob.
+        assert_eq!(
+            parse_request_line("GET", "/dev/status"),
+            Ok(HttpAction::DevStatus)
+        );
+    }
+
+    #[test]
+    fn suspend_post() {
+        assert_eq!(
+            parse_request_line("POST", "/suspend"),
+            Ok(HttpAction::Suspend)
+        );
+        assert_eq!(
+            parse_request_line("POST", "/suspend?x=1"),
+            Ok(HttpAction::Suspend)
+        );
+    }
+
+    #[test]
+    fn suspend_get_method_not_allowed() {
+        // A power-off must never be reachable by a bare GET (link prefetch,
+        // browser address bar, naive crawler).
+        assert_eq!(
+            parse_request_line("GET", "/suspend"),
+            Err(HttpError::MethodNotAllowed)
+        );
+    }
+
+    #[test]
+    fn interpret_suspend_truth_table() {
+        // Table-driven so the inputs aren't compile-time constants (a literal
+        // argument trips clippy's assertions_on_constants).
+        let cases: [(&str, Option<&str>, SuspendOutcome); 8] = [
+            // The gate said yes and logind accepted.
+            ("yes", Some("ok"), SuspendOutcome::Accepted),
+            // Replies arrive newline-trimmed already, but be defensive.
+            ("yes\n", Some("ok\n"), SuspendOutcome::Accepted),
+            // Gate refused: a plain `no` (also what a logind bus error degrades
+            // to — `handle_can_suspend` deliberately never errors).
+            ("no", None, SuspendOutcome::Refused),
+            // Gate refused on a non-Linux / unwired build.
+            (
+                "error:unsupported on this platform",
+                None,
+                SuspendOutcome::Refused,
+            ),
+            // Anything unrecognised from the gate is treated as a refusal, not
+            // as permission.
+            ("challenge", None, SuspendOutcome::Refused),
+            // Gate said yes but the suspend call failed — the daemon's reason
+            // survives, with the `error:` prefix stripped.
+            (
+                "yes",
+                Some("error:logind unavailable"),
+                SuspendOutcome::Failed("logind unavailable".into()),
+            ),
+            (
+                "yes",
+                Some("error:suspend failed: boom"),
+                SuspendOutcome::Failed("suspend failed: boom".into()),
+            ),
+            // Unreachable by construction, but the function stays total: a
+            // `yes` with no attempt is a failure, never a silent success.
+            (
+                "yes",
+                None,
+                SuspendOutcome::Failed("suspend was not attempted".into()),
+            ),
+        ];
+        for (can, suspend, want) in cases {
+            assert_eq!(
+                interpret_suspend(can, suspend),
+                want,
+                "interpret_suspend({can:?}, {suspend:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn suspend_refusal_is_409_not_500() {
+        // A refusal must be distinguishable from a broken daemon on the wire.
+        assert!(http_response(409, "suspend refused").starts_with("HTTP/1.1 409 Conflict"));
     }
 }

@@ -14,7 +14,7 @@ The input/backend daemon (`tv-shell-input`, Rust source in `daemon/`) communicat
 
 The daemon removes any existing socket file on startup and creates a new one. Clients connect, send one command per line, and read the response. The `subscribe` command is the exception — it holds the connection open and streams events.
 
-Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, `webapp-list`, `webapp-add`, `get-notifications`, `record-notification`, `set-notifications`, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, `net-throughput`, `net-ping`, and `power-battery`, the Phase 4 query replies `hypr-active`, `hypr-clients`, `hypr-monitors`, and `sunshine-status`, and the CEC query replies `cec-scan`, `cec-health`, and `cec-test`. JSON only ever appears as such a body — never as the framing itself.
+Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, `webapp-list`, `webapp-add`, `get-notifications`, `record-notification`, `set-notifications`, the shell's `shell-state` push, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, `net-throughput`, `net-ping`, and `power-battery`, the Phase 4 query replies `hypr-active`, `hypr-clients`, `hypr-monitors`, and `sunshine-status`, and the CEC query replies `cec-scan`, `cec-health`, and `cec-test`. JSON only ever appears as such a body — never as the framing itself.
 
 ## Client-to-Daemon Commands
 
@@ -58,6 +58,27 @@ While `on`: `route_presenter()` dispatches pad events to the **shell** handler r
 Derived in `shell/shell.qml` from `shellOwnsScreen` — the same predicate that drives the `PanelWindow`'s `visible` **and** `WlrLayershell.keyboardFocus`, so what is drawn, what holds the keyboard, and what the daemon believes cannot diverge.
 
 **Response:** `ok\n` (`error:usage: shell-focus on|off` on a bad body)
+
+### `shell-state <json>`
+
+Push the shell's **own** state so the daemon can report it to remote consumers. Body is a compact single-line JSON object:
+
+```
+shell-state {"state":"streaming","media_playing":true}
+```
+
+- `state` — the shell's state-machine value, one of `idle` / `launching` / `streaming` / `reconnecting` / `appRunning`. The daemon stores and republishes it **verbatim**; it never maps, normalises, or interprets it.
+- `media_playing` — whether any MPRIS player is playing, sourced from the same predicate `IdleInhibitController` uses, so the two cannot disagree about what "media playing" means.
+
+**Why the daemon must be told.** This is QML-internal state. `bridge_core::UiState` answers a *compositor* question (which toplevel holds focus) and is explicitly not this — the shell is a layer surface, so no compositor query can recover what the shell itself is doing. Same reasoning as [`shell-focus`](#shell-focus-onoff), which is why this rides the same channel and the same heartbeat.
+
+**The daemon computes no policy from it.** It caches the value with a receipt timestamp and republishes it, plus a staleness verdict, on the bridge's [`GET /status`](CONTROL_SURFACE.md). Deciding whether a given state means "busy" belongs to the consumer (e.g. a home-automation rule), so that rule can change without a daemon release.
+
+**Re-assert it freely.** `shell/shell.qml` pushes on every change *and* re-sends the current value on the same ~3s heartbeat as `shell-focus`. The heartbeat is what makes staleness meaningful: without a liveness signal the daemon cannot tell "the shell is idle" from "the shell is dead", and reporting a stale `idle` as idle is exactly what would let a consumer suspend a box that is really mid-stream behind a wedged shell. A push older than `3 ×` the heartbeat (9 s) is flagged `stale`.
+
+Stateless and cross-platform — it never reaches the Linux-only input runtime.
+
+**Response:** `ok\n`. A missing body replies `error:usage: shell-state <json-object with state+media_playing>`; malformed JSON replies `error:invalid JSON: <detail>`. Neither panics.
 
 ### `overlay-focus on|off`
 

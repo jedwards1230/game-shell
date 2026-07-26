@@ -352,6 +352,30 @@ pub enum Command {
     /// `overlay-focus` with a missing/invalid argument (not `on`/`off`).
     ShellFocusUsage,
     OverlayFocusUsage,
+
+    /// `shell-state <json>` — the shell pushes its own UI state so the daemon
+    /// can *report* it (the HTTP bridge's `GET /status`). The body is a compact
+    /// single-line JSON object:
+    /// `{"state":"streaming","media_playing":true}`.
+    ///
+    /// `state` is one of the shell's state-machine values
+    /// (`idle`/`launching`/`streaming`/`reconnecting`/`appRunning`) and is
+    /// carried **verbatim as an opaque enum string** — the daemon never maps,
+    /// normalises, or validates it. The variant holds the raw JSON body; it is
+    /// deserialized at the IPC layer (`ipc::dispatch_stateless`), so a malformed
+    /// body is an `error:invalid JSON: …` reply, never a panic.
+    ///
+    /// Re-asserted by `shell/shell.qml` on the same ~3s heartbeat as
+    /// `shell-focus`; that heartbeat is the liveness signal behind `/status`'s
+    /// staleness flag. In-memory only; replies `ok`.
+    ///
+    /// **Deliberately NOT routed to the input runtime.** Unlike `shell-focus`
+    /// (which becomes `Control::ShellFocus` and is consumed by the Linux-only
+    /// input actor), this lands in a cross-platform IPC-layer cache the HTTP
+    /// bridge can read.
+    ShellState(String),
+    /// `shell-state` with a missing/empty body.
+    ShellStateUsage,
     /// `controllerdb-status` — return the current controller DB status as a
     /// compact JSON object: `{source, entryCount, lastDownloaded, upstreamUrl,
     /// error?}`. Stateless (no input-runtime round-trip); served directly by
@@ -817,6 +841,21 @@ impl Command {
                         Command::SetActiveGame(body.to_string())
                     };
                 }
+                // `shell-state <json>`: the shell's own UI state, pushed on its
+                // ~3s heartbeat. The body is a compact single-line JSON object,
+                // kept verbatim here — parsing/validation happens at the IPC
+                // layer, matching `set-config`/`record-launch`. A missing body
+                // is a usage error. `command_body` enforces the word boundary so
+                // `shell-stateX` is not mistaken for this command (and
+                // `shell-state`/`shell-focus` do not prefix each other, so the
+                // order relative to the arm below is irrelevant).
+                if let Some(body) = command_body(cmd, "shell-state") {
+                    return if body.is_empty() {
+                        Command::ShellStateUsage
+                    } else {
+                        Command::ShellState(body.to_string())
+                    };
+                }
                 // `overlay-focus on|off`: a modal shell overlay opened/closed
                 // over a running app. The body must be exactly `on` or `off`;
                 // a missing/other body is a usage error. `command_body`
@@ -1120,6 +1159,11 @@ pub fn resp_intent_usage() -> String {
 /// Usage line for an `overlay-focus` issued without a valid `on`/`off` arg.
 pub fn resp_shell_focus_usage() -> String {
     "error:usage: shell-focus on|off".to_string()
+}
+
+/// Usage line for a `shell-state` issued without a JSON body.
+pub fn resp_shell_state_usage() -> String {
+    "error:usage: shell-state <json-object with state+media_playing>".to_string()
 }
 
 /// Usage line for an `overlay-focus` issued without an `on`/`off` body.
@@ -2305,6 +2349,45 @@ mod tests {
         assert_eq!(
             resp_steam_set_host_usage(),
             "error:usage: steam-set-host <name>"
+        );
+    }
+
+    #[test]
+    fn parses_shell_state_body() {
+        assert_eq!(
+            Command::parse(r#"shell-state {"state":"streaming","media_playing":true}"#),
+            Command::ShellState(r#"{"state":"streaming","media_playing":true}"#.into())
+        );
+        // Surrounding whitespace is trimmed; the JSON body is kept verbatim.
+        assert_eq!(
+            Command::parse(r#"  shell-state   {"state":"idle","media_playing":false}  "#),
+            Command::ShellState(r#"{"state":"idle","media_playing":false}"#.into())
+        );
+        // Missing/empty body -> usage.
+        assert_eq!(Command::parse("shell-state"), Command::ShellStateUsage);
+        assert_eq!(Command::parse("shell-state    "), Command::ShellStateUsage);
+        // Word boundary: `shell-stateX` is NOT shell-state.
+        assert_eq!(Command::parse(r#"shell-stateX {}"#), Command::Unknown);
+        // Parsing is validation-free: a garbage body still parses to the
+        // command (the IPC layer answers `error:invalid JSON: …`), and an
+        // unrecognised state string is NOT rejected here.
+        assert_eq!(
+            Command::parse("shell-state not-json"),
+            Command::ShellState("not-json".into())
+        );
+        assert_eq!(
+            Command::parse(r#"shell-state {"state":"warp9"}"#),
+            Command::ShellState(r#"{"state":"warp9"}"#.into())
+        );
+        // It must not be confused with the sibling `shell-focus` push.
+        assert_eq!(Command::parse("shell-focus on"), Command::ShellFocus(true));
+    }
+
+    #[test]
+    fn shell_state_usage_string() {
+        assert_eq!(
+            resp_shell_state_usage(),
+            "error:usage: shell-state <json-object with state+media_playing>"
         );
     }
 

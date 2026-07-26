@@ -50,6 +50,11 @@ pub mod steam;
 // poller that broadcasts `health:<json>` events. Cross-platform (reqwest + tokio
 // timer), like `plex`/`health`.
 pub mod service_health;
+// Shell-reported UI state cache (`shell-state` IPC in, `GET /status` out) plus
+// its pure staleness predicate. Cross-platform: pure data + tokio::sync, and
+// deliberately NOT routed through the Linux-only input runtime the way
+// `shell-focus` is, so the HTTP bridge can read it.
+pub mod shell_state;
 pub mod state;
 pub mod system;
 // Observability metrics: app-specific counters + Prometheus/OpenMetrics text

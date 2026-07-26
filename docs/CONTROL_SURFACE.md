@@ -46,6 +46,8 @@ then the only gate.
 | POST | `/intent/<name>` | dispatch intent (`<name>` percent-decoded; see vocab below) |
 | POST | `/key/<name>` | synthesize nav key: `up\|down\|left\|right\|select\|back` |
 | GET | `/screenshot[.png]` `[?flash=1]` | `grim -` PNG; `flash=1` paints a post-capture vignette. Capture provenance rides in `X-TvShell-{Sha,Branch,Version,Captured-At}` response headers (body stays pure PNG) |
+| GET | `/status` | JSON `ShellStatus` — the shell's last-pushed state + staleness (see below). Distinct from `/dev/status` |
+| POST | `/suspend` | suspend this machine via logind (`power-can-suspend` gate, then `power-suspend`) |
 | GET | `/dev/status` | JSON `StatusInfo` blob |
 | GET | `/dev/logs` `[?lines=N&filter=str]` | tail `/tmp/qs-log.txt` (lines default 100, max 1000) |
 | POST | `/dev/deploy` `[?ref=git-ref]` | git fetch + checkout + reset (ref default `main`) |
@@ -58,6 +60,50 @@ Returns `200 ok`, `400` (`error:` reply), `401`, `404`, `405`, `500` (grim/dev
 failure), `503` (daemon unavailable). Hardening: 4 KiB header cap, 5 s header
 timeout, 128 concurrent-connection cap (→ 503), 180 s budget for `/dev/*`
 subprocesses (auth checked first).
+
+> ⚠️ **`POST /suspend` widens what a leaked bearer token can do.** Until this
+> route existed, the worst an attacker with the token could do was drive the UI
+> and read the screen. Now the same token powers the machine down — a trivially
+> repeatable denial of service against a box whose whole job is to be on when
+> someone sits down. Treat the token as a device-control credential, keep
+> `auth_enabled = true`, and prefer a loopback/Tailscale bind over `0.0.0.0`.
+> Note this is the *same* token as `[mcp]` (`[http].token_file` is shared), so
+> exposure of either surface exposes both.
+
+### `GET /status` — shell state for automation
+
+Reports what the shell last pushed over [`shell-state`](IPC_PROTOCOL.md), plus a
+staleness verdict:
+
+```json
+{
+  "shell_state": "streaming",
+  "media_playing": true,
+  "stale": false,
+  "age_seconds": 2,
+  "stale_after_seconds": 9,
+  "shell_running": true
+}
+```
+
+**The daemon reports; the caller decides.** There is deliberately no `busy`
+boolean here — what counts as "too busy to suspend" is the consumer's policy, so
+it can change without a daemon release. `shell_state` is the shell's own enum
+string, republished verbatim.
+
+**Always gate on `stale` before acting.** `shell_state` is the *last known*
+value, not a live one. A stale `"idle"` means "the shell stopped reporting", not
+"the box is idle" — acting on it is how you suspend a machine that is actually
+mid-stream behind a wedged shell. `stale` goes `true` once the last push is
+`stale_after_seconds` (3× the shell's ~3 s heartbeat) old, and is `true` from
+startup until the first push ever lands (`shell_state: null`,
+`age_seconds: null`).
+
+`shell_running` is an independent `pgrep -x quickshell` check sharing one
+implementation with `/dev/status`, so the two can never disagree. Together the
+two fields separate "shell is gone" (`shell_running: false`) from "shell is
+alive but silent" (`shell_running: true`, `stale: true`) — different faults with
+different fixes.
 
 > The HTTP `/dev/*` routes are **always registered** when the bridge is bound —
 > they are not behind a separate dev flag (unlike MCP). Gate them by not binding
