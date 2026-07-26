@@ -40,6 +40,7 @@
 //! parser and unit tests compile and run on macOS / CI.
 
 use crate::bridge_core;
+use crate::display_owner::SharedDisplayOwner;
 use crate::ipc::DbusSenders;
 use crate::protocol::{self, Command, Event};
 use crate::shell_state::{self, SharedShellState};
@@ -454,6 +455,11 @@ async fn handle_connection(
     // Shell-reported UI state cache, written by the IPC `shell-state` push and
     // read by `GET /status`.
     ui_state: &SharedShellState,
+    // Passive CEC display-ownership cache, written by the CEC actor and read by
+    // the same `GET /status`. Always present — in a build without
+    // `--features cec` nothing writes it and it reports "unknown", which is the
+    // honest answer.
+    display_owner: &SharedDisplayOwner,
     // D-Bus actor handles, for `POST /suspend`. Empty on non-Linux (see
     // `ipc::DbusSenders`), which is exactly what keeps this route portable.
     dbus: &DbusSenders,
@@ -615,7 +621,7 @@ async fn handle_connection(
 
         // ── Power-control routes ─────────────────────────────────────────────
         HttpAction::ShellStatus => {
-            let resp = handle_shell_status(ui_state).await;
+            let resp = handle_shell_status(ui_state, display_owner).await;
             let _ = stream.write_all(resp.as_bytes()).await;
         }
         HttpAction::Suspend => {
@@ -709,21 +715,53 @@ async fn handle_dev_status() -> String {
 
 // ─── Power-control handlers ──────────────────────────────────────────────────
 
-/// `GET /status` — publish the shell's last-reported state plus its freshness.
+/// The `GET /status` body: the shell-state fields and the CEC display-ownership
+/// fields, flattened into ONE flat JSON object.
+///
+/// Two independent signals, one document: the shell knows what it is rendering,
+/// CEC knows which input the display is showing. They answer different halves of
+/// "is anyone looking at this box?" — an app can be running (`shell_state:
+/// "appRunning"`) while the TV has been switched to another input — and a
+/// consumer generally needs both. Kept flat (`#[serde(flatten)]`) so existing
+/// readers of the shell fields are untouched.
+#[derive(Debug, serde::Serialize)]
+struct StatusBody {
+    #[serde(flatten)]
+    shell: shell_state::ShellStatus,
+    #[serde(flatten)]
+    display: crate::display_owner::DisplayOwnerStatus,
+}
+
+/// `GET /status` — publish the shell's last-reported state plus its freshness,
+/// and who currently owns the display over CEC.
 ///
 /// **Reports; does not decide.** There is deliberately no `busy` field: the
 /// consumer (Home Assistant) owns the suspend policy so the rule can change
 /// without a daemon release. `shell_state` is the LAST-KNOWN value — a consumer
 /// must gate on `stale` before trusting it (a stale `"idle"` means the shell
 /// stopped reporting, not that the box is idle).
-async fn handle_shell_status(ui_state: &SharedShellState) -> String {
+///
+/// The CEC fields carry the OPPOSITE fail-safe from the shell fields, and it
+/// matters: only `cec_display_ownership: "owned_by_other"` is positive evidence
+/// that someone switched the display to another input. `"unknown"` means we have
+/// no evidence at all and must never be read as "nobody is watching" — see
+/// [`crate::display_owner`].
+async fn handle_shell_status(
+    ui_state: &SharedShellState,
+    display_owner: &SharedDisplayOwner,
+) -> String {
     // Sample the (subprocess) liveness probe BEFORE taking the read lock, so no
     // lock is ever held across an `.await`.
     let shell_running = bridge_core::quickshell_running().await;
     let now = shell_state::now_unix();
     let snapshot = ui_state.read().await.clone();
-    let status = shell_state::status(&snapshot, now, shell_running);
-    let json = serde_json::to_string(&status).unwrap_or_else(|e| format!(r#"{{"error":"{e}"}}"#));
+    // Lock-free atomics — no await, nothing held.
+    let owner_snapshot = display_owner.snapshot();
+    let body = StatusBody {
+        shell: shell_state::status(&snapshot, now, shell_running),
+        display: crate::display_owner::status(&owner_snapshot, now),
+    };
+    let json = serde_json::to_string(&body).unwrap_or_else(|e| format!(r#"{{"error":"{e}"}}"#));
     json_response(&json)
 }
 
@@ -853,6 +891,7 @@ pub async fn serve(
     reexec_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
     ui_state: SharedShellState,
+    display_owner: SharedDisplayOwner,
     dbus: DbusSenders,
 ) {
     // Treat an empty token as no token at all, so TV_SHELL_HTTP_TOKEN="" fails
@@ -919,6 +958,7 @@ pub async fn serve(
                 let reexec_flag = reexec_flag.clone();
                 let metrics = metrics.clone();
                 let ui_state = ui_state.clone();
+                let display_owner = display_owner.clone();
                 let dbus = dbus.clone();
                 tokio::spawn(async move {
                     // Use DEV_TIMEOUT_SECS (180 s) for all connections.
@@ -939,6 +979,7 @@ pub async fn serve(
                             &reexec_flag,
                             &metrics,
                             &ui_state,
+                            &display_owner,
                             &dbus,
                         ),
                     )
@@ -1480,6 +1521,34 @@ mod tests {
             parse_request_line("POST", "/status"),
             Err(HttpError::MethodNotAllowed)
         );
+    }
+
+    #[test]
+    fn status_body_flattens_both_halves_into_one_object() {
+        // The wire contract: ONE flat object carrying the shell fields and the
+        // CEC fields side by side. A nested sub-object here would silently break
+        // every existing consumer's flat key lookup.
+        let body = StatusBody {
+            shell: shell_state::status(&shell_state::ShellState::default(), 1_000, false),
+            display: crate::display_owner::status(
+                &crate::display_owner::Snapshot::default(),
+                1_000,
+            ),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        for key in [
+            r#""shell_state":null"#,
+            r#""media_playing":false"#,
+            r#""stale":true"#,
+            r#""cec_display_ownership":"unknown""#,
+            r#""cec_display_owner":null"#,
+            r#""cec_display_owner_tracking":false"#,
+        ] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
+        // Flat, not nested: no sub-object wrappers leaked in.
+        assert!(!json.contains(r#""shell":"#), "got: {json}");
+        assert!(!json.contains(r#""display":"#), "got: {json}");
     }
 
     #[test]

@@ -17,8 +17,8 @@
 // modules aren't dead-code on non-Linux hosts where `main` is cfg-excluded.)
 #[cfg(target_os = "linux")]
 use tv_shell_input::{
-    bluetooth, http, hyprland, input, ipc, network, power, protocol, session, session_env,
-    shell_state, state, watch, wol,
+    bluetooth, display_owner, http, hyprland, input, ipc, network, power, protocol, session,
+    session_env, shell_state, state, watch, wol,
 };
 
 #[cfg(all(target_os = "linux", feature = "mcp"))]
@@ -29,6 +29,9 @@ use tv_shell_input::ipc::{ControllerDbState, SharedControllerDbState};
 
 #[cfg(target_os = "linux")]
 use tv_shell_input::shell_state::SharedShellState;
+
+#[cfg(target_os = "linux")]
+use tv_shell_input::display_owner::SharedDisplayOwner;
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
@@ -159,7 +162,20 @@ fn main() -> anyhow::Result<()> {
         // connection and pushes events onto the shared broadcast bus. They log
         // and never panic the daemon if BlueZ/NetworkManager/logind/UPower are
         // absent, so spawning them unconditionally is safe.
-        let dbus = spawn_dbus_actors(&events_tx, &control_tx, &active_window_tx, &shell_focus_rx);
+        // Passive CEC display-ownership cache. The CEC actor is its only writer
+        // (via `spawn_dbus_actors` below); the HTTP bridge reads the same handle
+        // for `GET /status`. Created here — like `ui_state` — so both ends share
+        // one cell instead of a module-level static, and so a build without
+        // `--features cec` still has something honest to publish.
+        let display_owner: SharedDisplayOwner = display_owner::shared();
+
+        let dbus = spawn_dbus_actors(
+            &events_tx,
+            &control_tx,
+            &active_window_tx,
+            &shell_focus_rx,
+            &display_owner,
+        );
 
         // Spawn the file-watch actor. It inotify-watches settings.json for
         // external edits and signals the input runtime via config_changed.
@@ -261,6 +277,7 @@ fn main() -> anyhow::Result<()> {
                     reexec_flag.clone(),
                     Arc::clone(&metrics),
                     ui_state.clone(),
+                    Arc::clone(&display_owner),
                     // POST /suspend rides the same logind actor as the
                     // `power-suspend` IPC command — no second suspend path.
                     dbus.clone(),
@@ -360,6 +377,9 @@ fn main() -> anyhow::Result<()> {
 /// actor so its kiosk fullscreen backstop stands down while the shell owns the
 /// screen — otherwise it force-focuses whatever stale toplevel `activewindow`
 /// still names.
+///
+/// `display_owner` is the shared CEC display-ownership cell, written by the CEC
+/// actor (under `--features cec`) and read by the HTTP bridge's `GET /status`.
 #[cfg(target_os = "linux")]
 fn spawn_dbus_actors(
     events_tx: &tokio::sync::broadcast::Sender<protocol::Event>,
@@ -369,6 +389,9 @@ fn spawn_dbus_actors(
     control_tx: &tokio::sync::mpsc::Sender<state::Control>,
     active_window_tx: &tokio::sync::watch::Sender<String>,
     shell_focus_rx: &tokio::sync::watch::Receiver<bool>,
+    // Same story as `control_tx`: only the CEC actor writes it, so a default
+    // build never touches it (the HTTP bridge still publishes the empty cell).
+    #[cfg_attr(not(feature = "cec"), allow(unused_variables))] display_owner: &SharedDisplayOwner,
 ) -> ipc::DbusSenders {
     use tokio::sync::mpsc;
 
@@ -441,8 +464,11 @@ fn spawn_dbus_actors(
         // Clone of the input control channel so the CEC actor can inject remote
         // keypresses as nav `Control::Key` events (gated by the lifecycle flag).
         let cec_control_tx = control_tx.clone();
+        let cec_display_owner = display_owner.clone();
         tokio::spawn(async move {
-            if let Err(e) = tv_shell_input::cec::run(cec_rx, events_tx, cec_control_tx).await {
+            if let Err(e) =
+                tv_shell_input::cec::run(cec_rx, events_tx, cec_control_tx, cec_display_owner).await
+            {
                 tracing::warn!("cec actor exited: {e}");
             }
         });

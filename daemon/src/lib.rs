@@ -55,6 +55,12 @@ pub mod service_health;
 // deliberately NOT routed through the Linux-only input runtime the way
 // `shell-focus` is, so the HTTP bridge can read it.
 pub mod shell_state;
+// Passive CEC display-ownership cache (`<Active Source>` in, `GET /status`
+// out) plus its pure tri-state predicate. Cross-platform: plain atomics +
+// serde, deliberately NOT inside the Linux+`cec`-gated `cec` module, so the
+// HTTP bridge can read it in every build (and honestly report "unknown" in a
+// build that has no CEC at all).
+pub mod display_owner;
 pub mod state;
 pub mod system;
 // Observability metrics: app-specific counters + Prometheus/OpenMetrics text

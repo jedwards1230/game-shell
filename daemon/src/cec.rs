@@ -352,7 +352,11 @@ fn scan_devices(conn: &cec_rs::CecConnection) -> Vec<String> {
 /// fails safe (standby skips).
 fn reopen_connection(owner: &OwnerCell) -> Option<cec_rs::CecConnection> {
     tracing::warn!("cec: reopening libcec connection (recovery after transmit failure)");
-    owner_set(owner, cec_rs::CecLogicalAddress::Unknown);
+    owner_set(
+        owner,
+        cec_rs::CecLogicalAddress::Unknown,
+        "connection reopen (claims made while down were missed)",
+    );
     let mut builder = cec_rs::CecConnectionCfgBuilder::default()
         .device_name(osd_device_name())
         .device_types(cec_rs::CecDeviceTypeVec::new(
@@ -600,19 +604,24 @@ fn our_logical_address(conn: &cec_rs::CecConnection) -> cec_rs::CecLogicalAddres
 /// seen yet (a daemon started mid-session), the owner went `<Inactive Source>`,
 /// or the connection was reopened and any claim made while it was down was
 /// missed. Fail-safe by construction — unknown never satisfies [`owns_display`].
-const OWNER_UNSEEN: i32 = -1;
+const OWNER_UNSEEN: i32 = crate::display_owner::OWNER_UNSEEN;
 
 /// Passively-tracked display owner: the logical address (0..=15) of the device
-/// that last broadcast `<Active Source>`, or [`OWNER_UNSEEN`].
+/// that last broadcast `<Active Source>`, or [`OWNER_UNSEEN`], plus the change
+/// timestamp and ever-observed flag [`crate::display_owner`] adds on top.
 ///
-/// **Why an atomic and not the std-mpsc the key-press callback uses:** keys are
-/// a STREAM to forward (hence a channel plus a drainer thread); ownership is a
-/// single CURRENT VALUE with no history to replay. An `AtomicI32` is lock-free,
-/// can never block, and can never re-enter libcec — the very constraints the
-/// callback must satisfy (it fires on libcec's own thread) — and it needs no
-/// reader thread at all. Stored as the 0..=15 wire index rather than the FFI
-/// enum repr so the cell never depends on libcec-sys' integer typedef.
-type OwnerCell = std::sync::Arc<std::sync::atomic::AtomicI32>;
+/// **Why lock-free atomics and not the std-mpsc the key-press callback uses:**
+/// keys are a STREAM to forward (hence a channel plus a drainer thread);
+/// ownership is a single CURRENT VALUE. Atomics are lock-free, can never block,
+/// and can never re-enter libcec — the very constraints the callback must
+/// satisfy (it fires on libcec's own thread) — and need no reader thread at all.
+/// Stored as the 0..=15 wire index rather than the FFI enum repr so the cell
+/// never depends on libcec-sys' integer typedef.
+///
+/// The cell now lives in the cross-platform [`crate::display_owner`] module so
+/// the HTTP bridge can publish it on `GET /status`; the gating behaviour here is
+/// unchanged — it still reads exactly one current value through [`owner_get`].
+type OwnerCell = crate::display_owner::SharedDisplayOwner;
 
 /// Encode a logical address as its 0..=15 wire index, or [`OWNER_UNSEEN`] for
 /// `Unknown` (which is not one of the 16 addressable slots).
@@ -623,22 +632,87 @@ fn logical_to_i32(addr: cec_rs::CecLogicalAddress) -> i32 {
         .map_or(OWNER_UNSEEN, |i| i as i32)
 }
 
+/// Short, greppable log labels parallel to [`LOGICAL_ADDRESSES`].
+const LOGICAL_ADDRESS_LABELS: [&str; 16] = [
+    "tv",
+    "recording1",
+    "recording2",
+    "tuner1",
+    "playback1",
+    "avr",
+    "tuner2",
+    "tuner3",
+    "playback2",
+    "recording3",
+    "tuner4",
+    "playback3",
+    "reserved1",
+    "reserved2",
+    "freeuse",
+    "unregistered",
+];
+
+/// Label a tracked owner value for the journal: the logical-address name, or
+/// `unseen` for [`OWNER_UNSEEN`]. `&'static str` on purpose — this is used from
+/// the libcec callback thread, where an allocation is avoidable noise.
+fn owner_label(idx: i32) -> &'static str {
+    usize::try_from(idx)
+        .ok()
+        .and_then(|i| LOGICAL_ADDRESS_LABELS.get(i).copied())
+        .unwrap_or("unseen")
+}
+
+/// Log one observed display-ownership change.
+///
+/// **Without this line nobody can tell "we correctly report unknown" from "the
+/// receive callback never fires"** — the distinction the whole passive design
+/// rests on. It logs EDGES only (`store_owner` returns `None` for a repeat
+/// broadcast of the same owner), so a chatty bus cannot spam the journal.
+fn log_ownership_change(change: crate::display_owner::Transition, source: &str) {
+    tracing::info!(
+        previous = owner_label(change.previous),
+        current = owner_label(change.current),
+        source,
+        "cec: display ownership {} -> {} ({source})",
+        owner_label(change.previous),
+        owner_label(change.current)
+    );
+}
+
 /// Read the tracked owner. `Relaxed` is sufficient: the cell is a standalone
 /// value that orders no other memory, and a decision racing an in-flight bus
 /// event is inherent to CEC regardless of ordering.
 fn owner_get(cell: &OwnerCell) -> cec_rs::CecLogicalAddress {
-    logical_from_i32(cell.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(cec_rs::CecLogicalAddress::Unknown)
+    logical_from_i32(cell.owner()).unwrap_or(cec_rs::CecLogicalAddress::Unknown)
 }
 
-/// Record the tracked owner (see [`owner_get`] for the ordering rationale).
-fn owner_set(cell: &OwnerCell, addr: cec_rs::CecLogicalAddress) {
-    cell.store(logical_to_i32(addr), std::sync::atomic::Ordering::Relaxed);
+/// Record an ownership value we know LOCALLY rather than from the bus: our own
+/// successful `<Active Source>` claim, or the reset on a connection reopen.
+/// `source` explains the edge in the log. Deliberately does not set the
+/// ever-observed flag — see [`crate::display_owner::DisplayOwner::record_local`].
+fn owner_set(cell: &OwnerCell, addr: cec_rs::CecLogicalAddress, source: &str) {
+    if let Some(change) = cell.record_local(logical_to_i32(addr), crate::shell_state::now_unix()) {
+        log_ownership_change(change, source);
+    }
+}
+
+/// Read our own logical address AND publish it to the ownership cell, so
+/// `GET /status` can say whether the current owner is us. Cheap and
+/// transmit-free (a local libcec config read), so it is refreshed at every gate
+/// evaluation rather than cached once at open.
+fn our_address_tracked(
+    conn: &cec_rs::CecConnection,
+    cell: &OwnerCell,
+) -> cec_rs::CecLogicalAddress {
+    let ours = our_logical_address(conn);
+    cell.set_ours(logical_to_i32(ours));
+    ours
 }
 
 /// Build the libcec command-received callback that maintains `cell`. It runs on
 /// libcec's OWN thread, so — like the key-press callback — it must not block or
-/// re-enter libcec: a single relaxed atomic store satisfies both.
+/// re-enter libcec: relaxed atomic stores satisfy both, and the log line fires
+/// only on a real ownership edge.
 fn owner_tracking_callback(cell: OwnerCell) -> Box<cec_rs::FnCommand> {
     Box::new(move |cmd: cec_rs::CecCommand| {
         // libcec only routes commands with `opcode_set` to this callback, but
@@ -647,7 +721,15 @@ fn owner_tracking_callback(cell: OwnerCell) -> Box<cec_rs::FnCommand> {
             return;
         }
         if let Some(owner) = ownership_from_command(cmd.opcode, cmd.initiator) {
-            owner_set(&cell, owner);
+            let source = match cmd.opcode {
+                cec_rs::CecOpcode::ActiveSource => "received <Active Source>",
+                _ => "received <Inactive Source>",
+            };
+            if let Some(change) =
+                cell.observe(logical_to_i32(owner), crate::shell_state::now_unix())
+            {
+                log_ownership_change(change, source);
+            }
         }
     })
 }
@@ -703,7 +785,7 @@ fn wake_sequence(
 
     // Ownership gate — passive cache only, no probe.
     let observed = owner_get(owner);
-    let ours = our_logical_address(conn);
+    let ours = our_address_tracked(conn, owner);
     if !may_claim_active_source(observed, ours) {
         tracing::info!(
             "cec: lifecycle active-source claim SKIPPED — {observed:?} holds active source (we are {ours:?}); not stealing the display"
@@ -718,7 +800,7 @@ fn wake_sequence(
             // following suspend would see "unseen" and skip a standby we
             // legitimately owe. `ours` being Unknown stores "unseen", which is
             // the honest, fail-safe answer.
-            owner_set(owner, ours);
+            owner_set(owner, ours, "our own wake active-source claim");
             LifecycleOutcome::Done(protocol::resp_ok())
         }
         Err(e) => LifecycleOutcome::Done(protocol::resp_error(&format!(
@@ -748,7 +830,7 @@ fn standby_all(
     owner: &OwnerCell,
 ) -> LifecycleOutcome {
     let observed = owner_get(owner);
-    let ours = our_logical_address(conn);
+    let ours = our_address_tracked(conn, owner);
     if !owns_display(observed, ours) {
         tracing::info!(
             "cec: lifecycle standby SKIPPED — active source is {observed:?}, we are {ours:?}; we do not own the display"
@@ -908,6 +990,7 @@ fn blocking_worker(
     rx: std_mpsc::Receiver<WorkerReq>,
     events_tx: broadcast::Sender<Event>,
     control_tx: mpsc::Sender<Control>,
+    owner: OwnerCell,
 ) {
     // cec-rs 12.0.1: CecConnectionCfg is built via the derive_builder
     // CecConnectionCfgBuilder (owned pattern, so each setter consumes+returns
@@ -945,8 +1028,14 @@ fn blocking_worker(
     // key callback (nothing consumes the cell when lifecycle is off). It stays
     // `OWNER_UNSEEN` until some device broadcasts <Active Source>, so a daemon
     // started mid-session refuses to standby a display it has never seen claimed.
-    let owner: OwnerCell = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(OWNER_UNSEEN));
-    if lifecycle_enabled() {
+    //
+    // The cell is now OWNED BY THE CALLER (`run`, ultimately `main`) so the HTTP
+    // bridge can publish it on `GET /status`; the worker still writes it exactly
+    // as before. `tracking_active` is only asserted once the adapter actually
+    // opens below — a registered callback on a connection that never opened
+    // receives nothing, and reporting it as "listening" would be a lie.
+    let tracking = lifecycle_enabled();
+    if tracking {
         builder = builder.command_received_callback(owner_tracking_callback(owner.clone()));
     }
 
@@ -993,6 +1082,19 @@ fn blocking_worker(
     };
 
     tracing::info!("cec: libcec connection opened");
+
+    // The adapter is live, so the receive callback (if registered) is now really
+    // listening — publish that, plus our own logical address, so `GET /status`
+    // can distinguish "listening, nothing heard" from "not listening at all".
+    owner.set_tracking_active(tracking);
+    let ours = our_address_tracked(&conn, &owner);
+    tracing::info!(
+        tracking,
+        ours = owner_label(logical_to_i32(ours)),
+        "cec: display-ownership tracking {} (we are {:?})",
+        if tracking { "active" } else { "disabled" },
+        ours
+    );
 
     // Spawn the remote-input forwarder thread. The blocking worker thread itself
     // is busy in its `rx.recv()` request loop, so a DEDICATED std thread drains
@@ -1183,7 +1285,8 @@ fn blocking_worker(
                         // claim never returns through the command callback —
                         // so record it, or the next suspend would skip a
                         // standby we legitimately owe.
-                        owner_set(&owner, our_logical_address(&conn));
+                        let ours = our_address_tracked(&conn, &owner);
+                        owner_set(&owner, ours, "our own cec-active-source claim");
                         protocol::resp_ok()
                     }
                     Err(e) => {
@@ -1297,10 +1400,15 @@ async fn forward(
 /// `control_tx` is a clone of the input runtime's control channel: when the
 /// lifecycle flag is on, the worker uses it to inject CEC remote keypresses as
 /// `Control::Key` nav events (see the module docs).
+///
+/// `owner` is the shared display-ownership cell. The worker is its only writer;
+/// the HTTP bridge reads the same handle for `GET /status`, which is why it is
+/// created by `main` rather than in here.
 pub async fn run(
     mut rx: mpsc::Receiver<CecReq>,
     events_tx: broadcast::Sender<Event>,
     control_tx: mpsc::Sender<Control>,
+    owner: OwnerCell,
 ) -> Result<()> {
     // Bounded sync channel from the async loop to the blocking worker.
     let (work_tx, work_rx) = std_mpsc::sync_channel::<WorkerReq>(64);
@@ -1309,7 +1417,7 @@ pub async fn run(
     // connection and (when the lifecycle flag is on) the remote-input forwarder
     // thread that injects CEC keypresses onto `control_tx`.
     let worker_handle =
-        tokio::task::spawn_blocking(move || blocking_worker(work_rx, events_tx, control_tx));
+        tokio::task::spawn_blocking(move || blocking_worker(work_rx, events_tx, control_tx, owner));
 
     tracing::info!("cec actor started");
 
@@ -1552,20 +1660,91 @@ mod tests {
     #[test]
     fn owner_cell_round_trips_and_defaults_to_unseen() {
         use cec_rs::CecLogicalAddress as A;
-        let cell: OwnerCell = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(OWNER_UNSEEN));
+        let cell: OwnerCell = crate::display_owner::shared();
         // Never-seen reads back as Unknown, which fails `owns_display`.
         assert_eq!(owner_get(&cell), A::Unknown);
         for addr in [A::Tv, A::Audiosystem, A::Playbackdevice1, A::Unregistered] {
-            owner_set(&cell, addr);
+            owner_set(&cell, addr, "test");
             assert_eq!(owner_get(&cell), addr, "round-trip {addr:?}");
         }
         // Unknown is not one of the 16 wire slots — it stores as "unseen".
-        owner_set(&cell, A::Unknown);
-        assert_eq!(
-            cell.load(std::sync::atomic::Ordering::Relaxed),
-            OWNER_UNSEEN
-        );
+        owner_set(&cell, A::Unknown, "test");
+        assert_eq!(cell.owner(), OWNER_UNSEEN);
         assert_eq!(owner_get(&cell), A::Unknown);
+    }
+
+    #[test]
+    fn owner_labels_line_up_with_logical_addresses() {
+        // The labels are indexed by the SAME wire index as LOGICAL_ADDRESSES, so
+        // a reordering of one without the other would mislabel every journal
+        // line about ownership.
+        assert_eq!(LOGICAL_ADDRESS_LABELS.len(), LOGICAL_ADDRESSES.len());
+        let cases: [(cec_rs::CecLogicalAddress, &str); 4] = [
+            (cec_rs::CecLogicalAddress::Tv, "tv"),
+            (cec_rs::CecLogicalAddress::Audiosystem, "avr"),
+            (cec_rs::CecLogicalAddress::Playbackdevice1, "playback1"),
+            (cec_rs::CecLogicalAddress::Unregistered, "unregistered"),
+        ];
+        for (addr, want) in cases {
+            assert_eq!(
+                owner_label(logical_to_i32(addr)),
+                want,
+                "label for {addr:?}"
+            );
+        }
+        // Both out-of-range directions degrade to the "nobody" label rather than
+        // panicking on an index.
+        assert_eq!(owner_label(OWNER_UNSEEN), "unseen");
+        assert_eq!(owner_label(16), "unseen");
+    }
+
+    #[test]
+    fn published_tri_state_agrees_with_the_transmit_gates() {
+        // The `/status` tri-state must never contradict the shipped transmit
+        // gates. Walk every (owner, ours) pair over all 16 wire addresses plus
+        // "unseen", so a future edit to either side cannot drift them apart.
+        //
+        // Two relationships, and they are NOT the same shape:
+        //
+        // 1. `owned_by_us` is exactly `owns_display` — both demand positive
+        //    proof that the owner is us.
+        // 2. `owned_by_other` only IMPLIES the wake gate would refuse to claim.
+        //    The converse does not hold, deliberately: when our own address is
+        //    undeterminable, `may_claim_active_source` still refuses (a known
+        //    device holds the screen and it is not provably us — declining to
+        //    transmit is free), while the published tri-state falls back to
+        //    `unknown`, because asserting "someone ELSE is watching" without
+        //    knowing who WE are is exactly the reading that would suspend a box
+        //    mid-movie. Erring apart in this direction is the safe one.
+        use crate::display_owner::{classify, is_addressable, Ownership};
+        let indices: Vec<i32> = std::iter::once(OWNER_UNSEEN).chain(0..16).collect();
+        for &owner_idx in &indices {
+            for &ours_idx in &indices {
+                let owner =
+                    logical_from_i32(owner_idx).unwrap_or(cec_rs::CecLogicalAddress::Unknown);
+                let ours = logical_from_i32(ours_idx).unwrap_or(cec_rs::CecLogicalAddress::Unknown);
+                let verdict = classify(owner_idx, ours_idx);
+                assert_eq!(
+                    verdict == Ownership::OwnedByUs,
+                    owns_display(owner, ours),
+                    "owned_by_us must match owns_display for ({owner:?}, {ours:?})"
+                );
+                if verdict == Ownership::OwnedByOther {
+                    assert!(
+                        !may_claim_active_source(owner, ours),
+                        "owned_by_other must imply the wake gate refuses for ({owner:?}, {ours:?})"
+                    );
+                }
+                // Pin the ONE divergence so it stays a deliberate choice: the
+                // gate refuses but we publish `unknown` if and only if a real
+                // device owns the display and our own address is unknown.
+                if !may_claim_active_source(owner, ours) && verdict != Ownership::OwnedByOther {
+                    assert_eq!(verdict, Ownership::Unknown);
+                    assert!(is_addressable(owner_idx) && !is_addressable(ours_idx),
+                        "the only gate/status divergence is an unknown self-address; got ({owner:?}, {ours:?})");
+                }
+            }
+        }
     }
 
     #[test]
