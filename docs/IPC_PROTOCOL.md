@@ -1599,6 +1599,7 @@ working libcec adapter), the daemon:
 - **Standby on session end:** on a real shutdown (SIGTERM/SIGINT from the
   session wrapper), sends the same standby before exiting. A re-exec restart
   (`/dev/restart-daemon`) is **skipped** so the AV stays awake across it.
+
 - **Remote input -> navigation:** registers a libcec key-press callback so
   TV/AVR **remote buttons** arriving on the CEC bus are injected as the SAME
   synthesized keyboard nav events the gamepad d-pad produces (via the
@@ -1622,6 +1623,32 @@ working libcec adapter), the daemon:
   no new nav vocabulary is introduced. Gated by the **same**
   `[cec] lifecycle` flag as the wake/standby behavior, so a default
   build, a host without the flag, or dev/CI never inject keys.
+
+> **Display-ownership gate (safety invariant, not a setting).** The wake and
+> standby paths above never transmit for a display this box does not own.
+> Ownership is tracked **passively** from received bus traffic — the daemon
+> registers a command-received callback and remembers who last broadcast
+> `<Active Source>` (`<Inactive Source>` clears it) — so the gate keeps working
+> on an adapter whose transmits all fail, and costs the suspend path nothing.
+>
+> - **Standby** runs only on positive proof the last claim was ours. Another
+>   device's claim, or no claim observed at all (a daemon started mid-session, or
+>   a connection reopened after a transmit failure — both reset to "unknown"),
+>   skips it entirely, so suspending this box can't power off a TV someone is
+>   watching on another input.
+> - **The wake active-source claim** is skipped only when a different *known*
+>   device holds active source (requiring "we already hold it" would make the
+>   claim a permanent no-op). The AVR/TV **power-on still runs** — waking an idle
+>   display is what the user asked for; stealing a live input is the harm.
+>
+> A skip replies `ok`, performs zero transmits, is excluded from `cec-health`,
+> and logs an `info` line naming the observed owner and our own address. Manual
+> `cec-active-source` / `cec-power-off` are deliberate user actions and stay
+> unconditional (a successful manual claim does record us as the owner).
+>
+> Limitation: the cache reflects only traffic observed since the connection
+> opened, so a freshly-started daemon is deliberately conservative — it will not
+> standby a display until it has seen a claim.
 
 When **disabled** (the default) the CEC actor still serves the manual `cec-*`
 commands, but performs **none** of the above — it never auto-drives the bus on
