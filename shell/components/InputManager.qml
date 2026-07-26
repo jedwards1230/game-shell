@@ -2,8 +2,8 @@ import Quickshell.Io
 import QtQuick
 
 // IPC protocol: see docs/IPC_PROTOCOL.md
-// Commands used: grab, release, handoff, overlay-focus, shell-focus, subscribe, get-pads,
-//   rumble
+// Commands used: grab, release, handoff, overlay-focus, shell-focus, shell-state,
+//   subscribe, get-pads, rumble
 // Events handled: combo:force-quit, combo:end-session, combo:suspend-stream,
 //   input-mode:*, controller-wake, controller-disconnected, intent:* (the
 //   control-surface stream — the SOLE shell-intent vocabulary; the legacy
@@ -214,6 +214,31 @@ Item {
     function setOverlayFocus(on) {
         inputOverlayFocus.request(on ? "overlay-focus on" : "overlay-focus off");
     }
+
+    // Declare the QML shell's OWN state to the daemon, so its `/status` (and
+    // through it Home Assistant) can decide whether the box is safe to suspend.
+    // The daemon cannot observe any of this: its compositor-level `UiState` is
+    // explicitly NOT QML-internal state, and MPRIS playback is read on the QML
+    // side (see IdleInhibitController).
+    //
+    // Wire contract (fixed, daemon deserialises the body with serde):
+    //   shell-state {"state":"streaming","media_playing":true}
+    // `state` is the shell state-machine value passed VERBATIM — one of
+    // idle | launching | streaming | reconnecting | appRunning; never mapped or
+    // renamed. `media_playing` is snake_case on the wire regardless of the QML
+    // argument's name. The body passes through SocketClient verbatim with no
+    // shell quoting, so JSON.stringify is safe here. Daemon replies ok/error:*.
+    //
+    // Pushed on edge (state or media-playing actually changed) AND re-asserted
+    // on shell.qml's ~3s shell-focus heartbeat, which doubles as the liveness
+    // signal that lets `/status` tell "the shell is idle" from "the shell is
+    // dead". See docs/IPC_PROTOCOL.md `shell-state`.
+    function setShellState(shellState, mediaPlaying) {
+        inputShellState.request("shell-state", JSON.stringify({
+            "state": shellState,
+            "media_playing": mediaPlaying
+        }));
+    }
     function startListening() {
         comboListener.start();
         // Seed the fleet snapshot once the subscriber is up; pad:* deltas keep
@@ -242,6 +267,10 @@ Item {
 
     SocketClient {
         id: inputShellFocus
+    }
+
+    SocketClient {
+        id: inputShellState
     }
 
     // Seeds the `pads` model with the current fleet (id,index,name,grabbed) on

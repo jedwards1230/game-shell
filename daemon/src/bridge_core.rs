@@ -256,19 +256,30 @@ pub struct StatusInfo {
     pub hypr_sig_present: bool,
 }
 
+/// Whether `pgrep -x quickshell` exits zero — i.e. a shell process exists at
+/// all. Deliberately independent of the shell's own `shell-state` heartbeat:
+/// together the two distinguish "shell is gone" from "shell is alive but
+/// silent". A missing/failing `pgrep` reads as "not running".
+///
+/// Shared by `get_status` (`GET /dev/status`) and the bridge's `GET /status`,
+/// so the two can never disagree about what "running" means.
+pub async fn quickshell_running() -> bool {
+    matches!(
+        tokio::process::Command::new("pgrep")
+            .args(["-x", "quickshell"])
+            .output()
+            .await,
+        Ok(o) if o.status.success()
+    )
+}
+
 /// Assemble the [`StatusInfo`] by querying the environment and running git.
 pub async fn get_status() -> StatusInfo {
     let root = crate::session_env::install_root();
 
     let (sha, _branch) = git_sha_and_branch(&root).await;
 
-    let shell_running = matches!(
-        tokio::process::Command::new("pgrep")
-            .args(["-x", "quickshell"])
-            .output()
-            .await,
-        Ok(o) if o.status.success()
-    );
+    let shell_running = quickshell_running().await;
 
     StatusInfo {
         sha,

@@ -7,10 +7,11 @@
 //! on non-Linux hosts even though the input runtime is Linux-only.
 
 use crate::protocol::{self, Command, Event};
+use crate::shell_state::SharedShellState;
 use crate::state::Control;
 use crate::{
     apps, bridge_core, config, controllerdb, health, moonlight, netinfo, notifications, plex,
-    recents, steam, system, webapps, wol,
+    recents, shell_state, steam, system, webapps, wol,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
@@ -98,6 +99,10 @@ pub async fn serve(
     events_tx: broadcast::Sender<Event>,
     dbus: DbusSenders,
     db_state: SharedControllerDbState,
+    // Shell-reported UI state (`shell-state`). Written here, read by the HTTP
+    // bridge's `GET /status` — hence a shared handle rather than a module-level
+    // static, so both servers can be constructed independently in tests.
+    ui_state: SharedShellState,
 ) -> Result<()> {
     let _ = std::fs::remove_file(&sock_path);
     // Create the socket private from the instant it exists. Binding then
@@ -124,9 +129,10 @@ pub async fn serve(
                 let events_tx = events_tx.clone();
                 let dbus = dbus.clone();
                 let db_state = db_state.clone();
+                let ui_state = ui_state.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_client(stream, control_tx, events_tx, dbus, db_state).await
+                        handle_client(stream, control_tx, events_tx, dbus, db_state, ui_state).await
                     {
                         tracing::debug!("client connection ended: {e}");
                     }
@@ -179,6 +185,7 @@ async fn handle_client(
     events_tx: broadcast::Sender<Event>,
     dbus: DbusSenders,
     db_state: SharedControllerDbState,
+    ui_state: SharedShellState,
 ) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(4096));
 
@@ -190,7 +197,8 @@ async fn handle_client(
                 return stream_events(framed, events_tx).await;
             }
             cmd => {
-                let response = dispatch(&control_tx, &events_tx, &dbus, &db_state, cmd).await;
+                let response =
+                    dispatch(&control_tx, &events_tx, &dbus, &db_state, &ui_state, cmd).await;
                 framed.send(response).await?;
             }
         }
@@ -198,12 +206,33 @@ async fn handle_client(
     Ok(())
 }
 
+/// Wire body of a `shell-state` push:
+/// `{"state":"streaming","media_playing":true}`.
+///
+/// Both fields are **required**. A partial body is rejected with
+/// `error:invalid JSON: …` rather than defaulted, because defaulting
+/// `media_playing` to `false` would report "nothing playing" to a consumer whose
+/// suspend rule depends on it. A rejected push simply isn't recorded, so the
+/// reading ages out and `/status` reports `stale` — the safe failure direction.
+///
+/// `state` is a plain `String`, not a Rust enum: the shell's vocabulary is
+/// passed through verbatim (see [`Command::ShellState`]).
+#[derive(serde::Deserialize)]
+struct ShellStatePush {
+    state: String,
+    media_playing: bool,
+}
+
 /// Handle the stateless Phase 2 commands (app discovery + config/recents I/O).
 /// These never touch the input runtime, so they are served directly here.
 /// Filesystem work runs on a blocking thread so the IPC reactor isn't stalled.
 /// Returns `None` for commands that aren't stateless (caller falls through to
 /// the input-runtime dispatch).
-async fn dispatch_stateless(cmd: &Command, db_state: &SharedControllerDbState) -> Option<String> {
+async fn dispatch_stateless(
+    cmd: &Command,
+    db_state: &SharedControllerDbState,
+    ui_state: &SharedShellState,
+) -> Option<String> {
     match cmd {
         Command::ListApps => Some(spawn_blocking_string(apps::list_apps_json).await),
         Command::GetConfig => {
@@ -421,6 +450,27 @@ async fn dispatch_stateless(cmd: &Command, db_state: &SharedControllerDbState) -
         }
         Command::MoonlightForgetUsage => Some(protocol::resp_moonlight_forget_usage()),
 
+        // --- Shell-reported UI state (`shell-state`) ---
+        // Stateless in the same sense as `controllerdb-status`: it never touches
+        // the input runtime. Deliberately NOT a `Control::*` round-trip — unlike
+        // `shell-focus`, whose consumer is the Linux-only input actor, this state
+        // exists to be *reported* by the cross-platform HTTP bridge, so it lands
+        // in an IPC-layer cache both servers hold. The write is a short in-memory
+        // lock (no I/O), so no spawn_blocking and no lock is held across an await.
+        Command::ShellState(body) => Some(match parse_body::<ShellStatePush>(body) {
+            Ok(push) => {
+                let now = shell_state::now_unix();
+                let mut cache = ui_state.write().await;
+                // `push.state` is stored verbatim: the daemon does not map,
+                // normalise, or validate the shell's enum vocabulary.
+                cache.record(push.state, push.media_playing, now);
+                protocol::resp_ok()
+            }
+            // Malformed JSON is an error reply, never a panic.
+            Err(resp) => resp,
+        }),
+        Command::ShellStateUsage => Some(protocol::resp_shell_state_usage()),
+
         // --- #159: controllerdb-status / controllerdb-refresh ---
         Command::ControllerDbStatus => {
             let state = db_state.read().await;
@@ -478,9 +528,10 @@ async fn dispatch(
     events_tx: &broadcast::Sender<Event>,
     dbus: &DbusSenders,
     db_state: &SharedControllerDbState,
+    ui_state: &SharedShellState,
     cmd: Command,
 ) -> String {
-    if let Some(resp) = dispatch_stateless(&cmd, db_state).await {
+    if let Some(resp) = dispatch_stateless(&cmd, db_state, ui_state).await {
         // A successful set-config mutated settings.json; the input runtime caches
         // some of those keys (rumbleEnabled, #108), so nudge it to refresh. Fire
         // and forget — set-config's reply is already resolved and must not block
@@ -664,6 +715,11 @@ async fn dispatch(
         | Command::SteamQuit(_)
         | Command::SteamQuitUsage
         | Command::SteamSuspend
+        // The shell-state push is stateless + cross-platform (an IPC-layer
+        // cache, consumed by `dispatch_stateless`) — NOT an input-runtime or
+        // D-Bus command.
+        | Command::ShellState(_)
+        | Command::ShellStateUsage
         | Command::SteamHosts
         | Command::SteamSetHost(_)
         | Command::SteamSetHostUsage
@@ -724,8 +780,13 @@ async fn dispatch(
 ///
 /// On non-Linux builds the D-Bus actors don't exist, so every routed command
 /// (except the usage error) replies `error:unsupported on this platform`.
+///
+/// `pub(crate)` because the HTTP bridge's `POST /suspend` route reuses it for
+/// `power-can-suspend`/`power-suspend`: routing through the same function is
+/// what keeps that route compiling (and degrading identically) on non-Linux,
+/// instead of `#[cfg]`-ing the route out of existence.
 #[cfg(target_os = "linux")]
-async fn dispatch_dbus(dbus: &DbusSenders, cmd: &Command) -> Option<String> {
+pub(crate) async fn dispatch_dbus(dbus: &DbusSenders, cmd: &Command) -> Option<String> {
     let resp = match cmd {
         Command::BtPowerStatus => request_dbus(&dbus.bt, BtReq::PowerStatus).await,
         Command::BtPowerOn => request_dbus(&dbus.bt, BtReq::PowerOn).await,
@@ -807,7 +868,7 @@ async fn dispatch_dbus(dbus: &DbusSenders, cmd: &Command) -> Option<String> {
 /// (other than the stateless MAC-usage error) is unsupported. Keeps `dispatch`
 /// and the protocol parsing/tests cross-platform.
 #[cfg(not(target_os = "linux"))]
-async fn dispatch_dbus(_dbus: &DbusSenders, cmd: &Command) -> Option<String> {
+pub(crate) async fn dispatch_dbus(_dbus: &DbusSenders, cmd: &Command) -> Option<String> {
     let resp = match cmd {
         Command::BtMacUsage(which) => protocol::resp_bt_mac_usage(which),
         Command::CecAddrUsage(which) => protocol::resp_cec_addr_usage(which),
@@ -1024,12 +1085,14 @@ mod tests {
         // empty on macOS), so Phase 3 query commands reply `unsupported` while
         // the stateless MAC-usage error still works.
         let db_state = std::sync::Arc::new(tokio::sync::RwLock::new(ControllerDbState::initial()));
+        let ui_state = shell_state::shared();
         let server = tokio::spawn(serve(
             sock.clone(),
             control_tx,
             events_tx.clone(),
             DbusSenders::default(),
             db_state,
+            ui_state.clone(),
         ));
 
         // Wait for the socket to appear.
@@ -1247,6 +1310,56 @@ mod tests {
             "error:usage: overlay-focus on|off"
         );
 
+        // shell-state: an IPC-layer cache write, NOT a runtime round-trip. A
+        // valid push replies `ok` and lands verbatim in the shared cache the
+        // HTTP bridge reads; a missing body is a usage error and a malformed one
+        // is `error:invalid JSON` (never a panic), neither of which mutates it.
+        assert_eq!(
+            send_line(
+                &mut s,
+                r#"shell-state {"state":"streaming","media_playing":true}"#
+            )
+            .await,
+            "ok"
+        );
+        {
+            let cache = ui_state.read().await;
+            assert_eq!(cache.state.as_deref(), Some("streaming"));
+            assert!(cache.media_playing);
+            assert_ne!(cache.last_push_unix, 0, "a push must stamp the timestamp");
+        }
+        assert_eq!(
+            send_line(&mut s, "shell-state").await,
+            "error:usage: shell-state <json-object with state+media_playing>"
+        );
+        assert!(send_line(&mut s, "shell-state not-json")
+            .await
+            .starts_with("error:invalid JSON"));
+        // A partial body is rejected rather than defaulted (a defaulted
+        // `media_playing:false` would under-report to a suspend consumer).
+        assert!(send_line(&mut s, r#"shell-state {"state":"idle"}"#)
+            .await
+            .starts_with("error:invalid JSON"));
+        {
+            let cache = ui_state.read().await;
+            assert_eq!(
+                cache.state.as_deref(),
+                Some("streaming"),
+                "a rejected push must not clobber the last good reading"
+            );
+        }
+        // An unrecognised state string is stored verbatim — the daemon does not
+        // interpret the shell's vocabulary.
+        assert_eq!(
+            send_line(
+                &mut s,
+                r#"shell-state {"state":"warp9","media_playing":false}"#
+            )
+            .await,
+            "ok"
+        );
+        assert_eq!(ui_state.read().await.state.as_deref(), Some("warp9"));
+
         // get-pads round-trips the runtime and returns the fleet JSON array.
         assert_eq!(
             send_line(&mut s, "get-pads").await,
@@ -1296,12 +1409,14 @@ mod tests {
         drop(control_rx); // no runtime listening — every send fails
         let (events_tx, _events_rx) = broadcast::channel(16);
         let db_state = std::sync::Arc::new(tokio::sync::RwLock::new(ControllerDbState::initial()));
+        let ui_state = shell_state::shared();
 
         let down = dispatch(
             &control_tx,
             &events_tx,
             &DbusSenders::default(),
             &db_state,
+            &ui_state,
             Command::Grab,
         )
         .await;
@@ -1312,6 +1427,7 @@ mod tests {
             &events_tx,
             &DbusSenders::default(),
             &db_state,
+            &ui_state,
             Command::Unknown,
         )
         .await;
