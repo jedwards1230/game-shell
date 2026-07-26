@@ -63,7 +63,8 @@ hand-formats config JSON; the old per-call `python3 -c` socket shims are gone.
 | `session_env.rs` | Session-environment self-discovery (resolves `WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE`, install root) |
 | `daemon_config.rs` | Typed `~/.config/tv-shell/config.toml` parse + startup `validate()` — the single per-machine config source |
 | `bridge_core.rs` | Shared action logic for the HTTP bridge and MCP server (intent dispatch, screenshot, status, log read) |
-| `http.rs` | LAN HTTP/1.1 control bridge (`[http].bind`) — `POST /intent`, `POST /key`, `GET /screenshot`, `/dev/*` |
+| `shell_state.rs` | Shell-reported UI state cache: the `shell-state` push (state string + `media_playing`, stamped with a receipt time) plus the pure staleness predicate behind `GET /status`. The daemon cannot observe this — only the shell knows it. **Reports, never decides**: no `busy` boolean, so the suspend policy lives in the consumer. Cross-platform |
+| `http.rs` | LAN HTTP/1.1 control bridge (`[http].bind`) — `POST /intent`, `POST /key`, `GET /screenshot`, `GET /status`, `POST /suspend`, `/dev/*` |
 | `mcp.rs` | MCP server (`[mcp].bind`, `--features mcp`) — 14 tools over streamable-HTTP at `/mcp` |
 | `ipc.rs` | Unix-socket server, `broadcast` event fan-out, D-Bus command routing |
 | `main.rs` | Runtime wiring + signals + D-Bus actor spawn |
@@ -134,7 +135,9 @@ QML shell-outs that *read* system state:
 - **Wi-Fi reads** (`zbus`/NetworkManager): `net-status`, `net-wifi-list`,
   `net-wifi-rescan`. Wi-Fi **join** stays an `nmcli` shell-out.
 - **Power/idle** (`zbus`/logind + UPower): `power-can-suspend`, `power-suspend`,
-  `power-battery` (graceful "no battery" on a desktop).
+  `power-battery` (graceful "no battery" on a desktop). The HTTP bridge's
+  `POST /suspend` routes through these same two commands — there is one suspend
+  path, not two.
 
 These three modules are `#[cfg(target_os = "linux")]` (D-Bus is Linux-only) —
 they are excluded from the macOS build, so the rest of the crate still compiles

@@ -56,10 +56,10 @@ then the only gate.
 | POST | `/dev/restart-daemon` | re-exec the daemon (picks up a new binary) |
 | GET | `/metrics` | Prometheus/OpenMetrics exposition (**auth-exempt**; see Observability) |
 
-Returns `200 ok`, `400` (`error:` reply), `401`, `404`, `405`, `500` (grim/dev
-failure), `503` (daemon unavailable). Hardening: 4 KiB header cap, 5 s header
-timeout, 128 concurrent-connection cap (→ 503), 180 s budget for `/dev/*`
-subprocesses (auth checked first).
+Returns `200 ok`, `400` (`error:` reply), `401`, `404`, `405`, `409`
+(`/suspend` refused), `500` (grim/dev failure), `503` (daemon unavailable).
+Hardening: 4 KiB header cap, 5 s header timeout, 128 concurrent-connection cap
+(→ 503), 180 s budget for `/dev/*` subprocesses (auth checked first).
 
 > ⚠️ **`POST /suspend` widens what a leaked bearer token can do.** Until this
 > route existed, the worst an attacker with the token could do was drive the UI
@@ -104,6 +104,28 @@ implementation with `/dev/status`, so the two can never disagree. Together the
 two fields separate "shell is gone" (`shell_running: false`) from "shell is
 alive but silent" (`shell_running: true`, `stale: true`) — different faults with
 different fixes.
+
+### `POST /suspend` — put this machine to sleep
+
+No body. Runs the existing `power-can-suspend` gate first and only then
+`power-suspend` (logind `Suspend(false)`) — the same D-Bus actor the IPC command
+uses, so there is exactly one suspend path in the daemon.
+
+| Result | Status | Body |
+|--------|--------|------|
+| logind accepted | `200` | `ok` |
+| this machine reports it cannot suspend | `409` | `suspend refused: this system reports it cannot suspend` |
+| the suspend call failed | `500` | `suspend failed: <reason>` |
+
+A **refusal is not a failure** — `power-can-suspend` deliberately degrades a bus
+error to `no`, and a non-Linux build answers `unsupported on this platform`;
+both land on `409` so a caller can distinguish "won't" from "broken". `200 ok`
+means *accepted and dispatched*, not "already asleep": the response is flushed
+before the kernel can freeze the process.
+
+This route does **not** consult `/status`. Whether the box is too busy to
+suspend is the caller's decision — read `/status`, apply your own rule, then
+call `/suspend`.
 
 > The HTTP `/dev/*` routes are **always registered** when the bridge is bound —
 > they are not behind a separate dev flag (unlike MCP). Gate them by not binding
