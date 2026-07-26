@@ -17,6 +17,23 @@
 //! (folded into `cec-scan` and run explicitly by `cec-test`) update it, and a
 //! `cec:health` event fires on each real transition.
 //!
+//! **Display ownership gate.** The lifecycle sequences never transmit for a
+//! display we do not own. Ownership is tracked PASSIVELY from received bus
+//! traffic (a `command_received_callback` folding `<Active Source>` /
+//! `<Inactive Source>` into an atomic cell) rather than probed at decision time:
+//! a receive-based gate keeps answering in exactly the failure mode this module
+//! is built around — an adapter that opens and RECEIVES fine while every
+//! transmit fails — and it adds zero latency to the suspend path, which runs
+//! inside logind's bounded `PrepareForSleep` inhibitor window.
+//!
+//! Standby (suspend / session-end) requires POSITIVE proof we hold active source
+//! ([`owns_display`]), so suspending this box can't power off a TV someone is
+//! watching on another input. The wake claim is the asymmetric counterpart
+//! ([`may_claim_active_source`]): it yields only to a different KNOWN owner,
+//! since requiring `owner == ours` would make the claim a permanent no-op. Both
+//! are pure decision fns, unit-tested below; a skip performs zero transmits, so
+//! it replies `ok` and is excluded from the transmit health.
+//!
 //! **Remote input -> navigation.** When the `TV_SHELL_CEC_LIFECYCLE` flag is
 //! on, the worker registers a libcec key-press callback. Each TV/AVR remote
 //! button (a `CecUserControlCode`) arriving on the CEC bus is forwarded over a
@@ -92,12 +109,24 @@ pub enum CecReq {
     /// TV (addr 0), then claim active source. Replies `ok` / `error:*`. A no-op
     /// (still replying `ok`) when the lifecycle flag is off OR when the
     /// `cecFocusOnWake` setting is false, so callers never drive the bus on
-    /// dev/CI hosts or when the user has opted out of focus-on-wake. Not
-    /// exposed as a manual IPC command.
+    /// dev/CI hosts or when the user has opted out of focus-on-wake.
+    ///
+    /// The **active-source claim is additionally gated on display ownership**
+    /// ([`may_claim_active_source`], against the passively-tracked [`OwnerCell`]):
+    /// if a different known device last claimed active source (someone is
+    /// watching another input), the claim is skipped and only the AVR/TV power-on
+    /// runs — powering on an idle display is benign, stealing a live input is
+    /// not. Not exposed as a manual IPC command.
     WakeSequence(Reply),
     /// Lifecycle standby (suspend / session-end SIGTERM): send CEC standby to TV
     /// (addr 0) then AVR (addr 5). Replies `ok` / `error:*`. A no-op (`ok`) when
-    /// the lifecycle flag is off. Not exposed as a manual IPC command.
+    /// the lifecycle flag is off.
+    ///
+    /// Also a no-op (`ok`, zero transmits, not folded into transmit health) unless
+    /// we **positively own the display** ([`owns_display`]): if another device
+    /// last claimed active source — or no claim has been observed at all — the
+    /// standby is skipped so suspending this box never powers off a TV someone
+    /// else is watching. Not exposed as a manual IPC command.
     StandbyAll(Reply),
 }
 
@@ -313,18 +342,27 @@ fn scan_devices(conn: &cec_rs::CecConnection) -> Vec<String> {
 /// restart. Re-arming the callback would mean threading the (already-consumed)
 /// `control_tx` and a fresh forwarder thread through here, which is out of scope
 /// for a transmit-failure retry.
-fn reopen_connection() -> Option<cec_rs::CecConnection> {
+///
+/// The **ownership-tracking callback IS re-armed** here (unlike the key-press
+/// one): without it the cache would freeze at whatever it held when the
+/// connection died and we could later standby a display someone else has since
+/// taken over — the exact bug the gate exists to prevent. For the same reason the
+/// cell is RESET to [`OWNER_UNSEEN`] on every reopen: claims broadcast while the
+/// connection was down were missed, so the only honest state is "unknown", which
+/// fails safe (standby skips).
+fn reopen_connection(owner: &OwnerCell) -> Option<cec_rs::CecConnection> {
     tracing::warn!("cec: reopening libcec connection (recovery after transmit failure)");
-    cec_rs::CecConnectionCfgBuilder::default()
+    owner_set(owner, cec_rs::CecLogicalAddress::Unknown);
+    let mut builder = cec_rs::CecConnectionCfgBuilder::default()
         .device_name(osd_device_name())
         .device_types(cec_rs::CecDeviceTypeVec::new(
             cec_rs::CecDeviceType::PlaybackDevice,
         ))
-        .activate_source(false)
-        .build()
-        .ok()?
-        .open()
-        .ok()
+        .activate_source(false);
+    if lifecycle_enabled() {
+        builder = builder.command_received_callback(owner_tracking_callback(owner.clone()));
+    }
+    builder.build().ok()?.open().ok()
 }
 
 /// Minimum spacing between recovery reopens. A stale/wedged adapter can make
@@ -359,6 +397,7 @@ fn reopen_allowed(last_reopen: &mut Option<std::time::Instant>) -> bool {
 fn with_cec_reconnect<T, E: std::fmt::Debug>(
     conn: &mut cec_rs::CecConnection,
     last_reopen: &mut Option<std::time::Instant>,
+    owner: &OwnerCell,
     label: &str,
     mut op: impl FnMut(&cec_rs::CecConnection) -> Result<T, E>,
 ) -> Result<T, E> {
@@ -372,7 +411,7 @@ fn with_cec_reconnect<T, E: std::fmt::Debug>(
                 return Err(e);
             }
             tracing::warn!("cec: {label} failed ({e:?}); reopening libcec connection and retrying");
-            match reopen_connection() {
+            match reopen_connection(owner) {
                 Some(fresh) => {
                     *conn = fresh;
                     op(conn)
@@ -445,11 +484,12 @@ fn note_health(
 /// acceptable here (the deployment host always has a TV on the bus), and the scan path
 /// only falls back to the poll when the bus shows zero devices.
 fn poll_probe(conn: &cec_rs::CecConnection) -> Result<(), cec_rs::CecConnectionResultError> {
-    let initiator = conn
-        .get_logical_addresses()
-        .ok()
-        .map(|la| cec_rs::CecLogicalAddress::from(la.primary))
-        .unwrap_or(cec_rs::CecLogicalAddress::Unregistered);
+    // A well-formed poll needs a valid initiator, so an undeterminable own
+    // address degrades to `Unregistered` (the wire's "no logical address" value).
+    let initiator = match our_logical_address(conn) {
+        cec_rs::CecLogicalAddress::Unknown => cec_rs::CecLogicalAddress::Unregistered,
+        addr => addr,
+    };
     let poll = cec_rs::CecCommand {
         initiator,
         destination: cec_rs::CecLogicalAddress::Tv,
@@ -485,21 +525,172 @@ fn run_poll_probe(
 }
 
 // ---------------------------------------------------------------------------
+// Display ownership (never drive a display we do not own).
+// ---------------------------------------------------------------------------
+
+/// Whether `addr` names a real device on the bus. `Unknown` (nobody observed /
+/// libcec could not determine one) and `Unregistered` (the wire's "no logical
+/// address") are answers, not devices — neither can own a display, so both
+/// predicates below treat them as "nobody". Pure.
+fn is_addressable(addr: cec_rs::CecLogicalAddress) -> bool {
+    !matches!(
+        addr,
+        cec_rs::CecLogicalAddress::Unknown | cec_rs::CecLogicalAddress::Unregistered
+    )
+}
+
+/// Standby-path decision: do we positively own the display?
+///
+/// True only when the last observed ownership claim was OURS. "Never seen a
+/// claim", "someone else claimed it", and "our own address is undeterminable"
+/// all yield false — the standby transmit needs proof, not the absence of
+/// counter-evidence. Pure.
+fn owns_display(owner: cec_rs::CecLogicalAddress, ours: cec_rs::CecLogicalAddress) -> bool {
+    is_addressable(owner) && owner == ours
+}
+
+/// Wake-path decision: may we claim active source?
+///
+/// Asymmetric with [`owns_display`] on purpose. Requiring `owner == ours` here
+/// would make the claim a permanent no-op (if we already owned the display there
+/// would be nothing to claim), so we skip only on POSITIVE PROOF that a
+/// different real device holds the screen — that's the harm case (yanking a TV
+/// off someone's Apple TV mid-show). An `Unknown`/`Unregistered` owner means
+/// nobody demonstrably owns the screen, so claiming is allowed; `owner == ours`
+/// is a harmless re-assert. Pure.
+fn may_claim_active_source(
+    owner: cec_rs::CecLogicalAddress,
+    ours: cec_rs::CecLogicalAddress,
+) -> bool {
+    !is_addressable(owner) || owner == ours
+}
+
+/// The ownership change implied by a received CEC command, or `None` when the
+/// command says nothing about ownership.
+///
+/// Only `<Active Source>` (0x82) and `<Inactive Source>` (0x9D) are
+/// logical-address ownership claims. `RoutingChange` / `SetStreamPath` are
+/// deliberately NOT handled — they are routing directives addressed at a
+/// PHYSICAL address, not an ownership claim, and whichever device ends up
+/// selected always confirms with a subsequent `<Active Source>`, so keying off
+/// 0x82 alone is both simpler and correct. Pure.
+fn ownership_from_command(
+    opcode: cec_rs::CecOpcode,
+    initiator: cec_rs::CecLogicalAddress,
+) -> Option<cec_rs::CecLogicalAddress> {
+    match opcode {
+        cec_rs::CecOpcode::ActiveSource => Some(initiator),
+        cec_rs::CecOpcode::InactiveSource => Some(cec_rs::CecLogicalAddress::Unknown),
+        _ => None,
+    }
+}
+
+/// Our own primary CEC logical address, or `Unknown` when libcec can't tell us.
+/// A pure local read of libcec's client config (`libcec_get_logical_addresses`
+/// returns the client's own address mask) — no transmit — so it still answers
+/// while the adapter is wedged.
+fn our_logical_address(conn: &cec_rs::CecConnection) -> cec_rs::CecLogicalAddress {
+    conn.get_logical_addresses()
+        .ok()
+        .map(|la| cec_rs::CecLogicalAddress::from(la.primary))
+        .unwrap_or(cec_rs::CecLogicalAddress::Unknown)
+}
+
+/// Cell value meaning "no ownership claim observed": either nothing has been
+/// seen yet (a daemon started mid-session), the owner went `<Inactive Source>`,
+/// or the connection was reopened and any claim made while it was down was
+/// missed. Fail-safe by construction — unknown never satisfies [`owns_display`].
+const OWNER_UNSEEN: i32 = -1;
+
+/// Passively-tracked display owner: the logical address (0..=15) of the device
+/// that last broadcast `<Active Source>`, or [`OWNER_UNSEEN`].
+///
+/// **Why an atomic and not the std-mpsc the key-press callback uses:** keys are
+/// a STREAM to forward (hence a channel plus a drainer thread); ownership is a
+/// single CURRENT VALUE with no history to replay. An `AtomicI32` is lock-free,
+/// can never block, and can never re-enter libcec — the very constraints the
+/// callback must satisfy (it fires on libcec's own thread) — and it needs no
+/// reader thread at all. Stored as the 0..=15 wire index rather than the FFI
+/// enum repr so the cell never depends on libcec-sys' integer typedef.
+type OwnerCell = std::sync::Arc<std::sync::atomic::AtomicI32>;
+
+/// Encode a logical address as its 0..=15 wire index, or [`OWNER_UNSEEN`] for
+/// `Unknown` (which is not one of the 16 addressable slots).
+fn logical_to_i32(addr: cec_rs::CecLogicalAddress) -> i32 {
+    LOGICAL_ADDRESSES
+        .iter()
+        .position(|a| *a == addr)
+        .map_or(OWNER_UNSEEN, |i| i as i32)
+}
+
+/// Read the tracked owner. `Relaxed` is sufficient: the cell is a standalone
+/// value that orders no other memory, and a decision racing an in-flight bus
+/// event is inherent to CEC regardless of ordering.
+fn owner_get(cell: &OwnerCell) -> cec_rs::CecLogicalAddress {
+    logical_from_i32(cell.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(cec_rs::CecLogicalAddress::Unknown)
+}
+
+/// Record the tracked owner (see [`owner_get`] for the ordering rationale).
+fn owner_set(cell: &OwnerCell, addr: cec_rs::CecLogicalAddress) {
+    cell.store(logical_to_i32(addr), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Build the libcec command-received callback that maintains `cell`. It runs on
+/// libcec's OWN thread, so — like the key-press callback — it must not block or
+/// re-enter libcec: a single relaxed atomic store satisfies both.
+fn owner_tracking_callback(cell: OwnerCell) -> Box<cec_rs::FnCommand> {
+    Box::new(move |cmd: cec_rs::CecCommand| {
+        // libcec only routes commands with `opcode_set` to this callback, but
+        // without it the opcode field is meaningless — guard defensively.
+        if !cmd.opcode_set {
+            return;
+        }
+        if let Some(owner) = ownership_from_command(cmd.opcode, cmd.initiator) {
+            owner_set(&cell, owner);
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle sequences (blocking-worker context only — they touch libcec).
 // ---------------------------------------------------------------------------
+
+/// Outcome of a lifecycle sequence. `Skipped` means the ownership gate refused
+/// the sequence and **zero transmits happened** — so the caller must treat it as
+/// neither a success nor a failure: no reopen/retry (there's nothing to recover)
+/// and no `note_health` (recording a transmit that never occurred would corrupt
+/// the `cec-health` state the AV Control page shows).
+enum LifecycleOutcome {
+    Skipped,
+    Done(String),
+}
 
 /// Power on the AVR (addr 5) then the TV (addr 0), wait for the display to come
 /// out of standby, then announce ourselves as the active source. Returns a wire
 /// response: `ok` if every step succeeded, otherwise the first `error:*`. Runs
 /// only inside the blocking worker (it issues blocking libcec calls). Emits a
 /// `cec:power` event per successful power-on so subscribers see the change.
-fn wake_sequence(conn: &cec_rs::CecConnection, events_tx: &broadcast::Sender<Event>) -> String {
+///
+/// **Only the active-source claim is ownership-gated** ([`may_claim_active_source`]):
+/// powering on a display nobody is using is benign and is exactly what the user
+/// asked for on wake — stealing a live input is the harm. When the claim is
+/// skipped the power-ons still ran, so this returns `Done(ok)`, not `Skipped`.
+fn wake_sequence(
+    conn: &cec_rs::CecConnection,
+    events_tx: &broadcast::Sender<Event>,
+    owner: &OwnerCell,
+) -> LifecycleOutcome {
     for addr in [AVR_ADDR, TV_ADDR] {
         let Some(logical) = logical_from_i32(addr) else {
-            return protocol::resp_error(&format!("invalid lifecycle address {addr}"));
+            return LifecycleOutcome::Done(protocol::resp_error(&format!(
+                "invalid lifecycle address {addr}"
+            )));
         };
         if let Err(e) = conn.send_power_on_devices(logical) {
-            return protocol::resp_error(&format!("wake power-on {addr} failed: {e:?}"));
+            return LifecycleOutcome::Done(protocol::resp_error(&format!(
+                "wake power-on {addr} failed: {e:?}"
+            )));
         }
         let ps = conn.get_device_power_status(logical);
         let _ = events_tx.send(Event::CecPower(protocol::cec_power_json(
@@ -509,9 +700,30 @@ fn wake_sequence(conn: &cec_rs::CecConnection, events_tx: &broadcast::Sender<Eve
     }
     // Give the TV time to leave standby before switching it to our input.
     std::thread::sleep(WAKE_ACTIVE_SOURCE_DELAY);
+
+    // Ownership gate — passive cache only, no probe.
+    let observed = owner_get(owner);
+    let ours = our_logical_address(conn);
+    if !may_claim_active_source(observed, ours) {
+        tracing::info!(
+            "cec: lifecycle active-source claim SKIPPED — {observed:?} holds active source (we are {ours:?}); not stealing the display"
+        );
+        return LifecycleOutcome::Done(protocol::resp_ok());
+    }
+
     match conn.set_active_source(cec_rs::CecDeviceType::PlaybackDevice) {
-        Ok(()) => protocol::resp_ok(),
-        Err(e) => protocol::resp_error(&format!("wake active-source failed: {e:?}")),
+        Ok(()) => {
+            // Our OWN claim never comes back through the command callback (it
+            // fires on RECEIVED traffic), so record it here — otherwise the
+            // following suspend would see "unseen" and skip a standby we
+            // legitimately owe. `ours` being Unknown stores "unseen", which is
+            // the honest, fail-safe answer.
+            owner_set(owner, ours);
+            LifecycleOutcome::Done(protocol::resp_ok())
+        }
+        Err(e) => LifecycleOutcome::Done(protocol::resp_error(&format!(
+            "wake active-source failed: {e:?}"
+        ))),
     }
 }
 
@@ -519,13 +731,41 @@ fn wake_sequence(conn: &cec_rs::CecConnection, events_tx: &broadcast::Sender<Eve
 /// response: `ok` if both standby commands succeeded, otherwise the first
 /// `error:*`. Runs only inside the blocking worker. Emits a `cec:power` event
 /// per successful standby.
-fn standby_all(conn: &cec_rs::CecConnection, events_tx: &broadcast::Sender<Event>) -> String {
+///
+/// **Ownership-gated in full**: it transmits only on positive proof that WE hold
+/// active source. Anything else — another device owns the display, no claim has
+/// been observed at all, or our own address is undeterminable — returns
+/// [`LifecycleOutcome::Skipped`] without touching the bus, so suspending this box
+/// can never power off a TV someone else is watching on another input.
+///
+/// The gate is a read of the passive [`OwnerCell`], never a probe: it must stay
+/// correct on an adapter whose transmits all fail, and it runs inside logind's
+/// bounded `PrepareForSleep` inhibitor window where a blocking bus round-trip
+/// risks being force-slept mid-call or delaying suspend.
+fn standby_all(
+    conn: &cec_rs::CecConnection,
+    events_tx: &broadcast::Sender<Event>,
+    owner: &OwnerCell,
+) -> LifecycleOutcome {
+    let observed = owner_get(owner);
+    let ours = our_logical_address(conn);
+    if !owns_display(observed, ours) {
+        tracing::info!(
+            "cec: lifecycle standby SKIPPED — active source is {observed:?}, we are {ours:?}; we do not own the display"
+        );
+        return LifecycleOutcome::Skipped;
+    }
+
     for addr in [TV_ADDR, AVR_ADDR] {
         let Some(logical) = logical_from_i32(addr) else {
-            return protocol::resp_error(&format!("invalid lifecycle address {addr}"));
+            return LifecycleOutcome::Done(protocol::resp_error(&format!(
+                "invalid lifecycle address {addr}"
+            )));
         };
         if let Err(e) = conn.send_standby_devices(logical) {
-            return protocol::resp_error(&format!("standby {addr} failed: {e:?}"));
+            return LifecycleOutcome::Done(protocol::resp_error(&format!(
+                "standby {addr} failed: {e:?}"
+            )));
         }
         let ps = conn.get_device_power_status(logical);
         let _ = events_tx.send(Event::CecPower(protocol::cec_power_json(
@@ -533,7 +773,62 @@ fn standby_all(conn: &cec_rs::CecConnection, events_tx: &broadcast::Sender<Event
             power_status_word(ps),
         )));
     }
-    protocol::resp_ok()
+    LifecycleOutcome::Done(protocol::resp_ok())
+}
+
+/// Run a lifecycle sequence with the bounded, cooldown-gated reopen+retry, then
+/// fold the transmit outcome into `health`, returning the wire reply.
+///
+/// A [`LifecycleOutcome::Skipped`] bypasses BOTH: there is nothing to recover
+/// (zero transmits were attempted, so an `error:*`-style reopen would churn the
+/// adapter for nothing) and nothing to record (a skip is not a transmit success).
+/// It replies plain `ok`, matching the module's no-op-replies-`ok` convention.
+fn run_lifecycle(
+    conn: &mut cec_rs::CecConnection,
+    last_reopen: &mut Option<std::time::Instant>,
+    health: &mut protocol::CecHealthState,
+    events_tx: &broadcast::Sender<Event>,
+    owner: &OwnerCell,
+    seq: fn(&cec_rs::CecConnection, &broadcast::Sender<Event>, &OwnerCell) -> LifecycleOutcome,
+) -> String {
+    let mut outcome = seq(conn, events_tx, owner);
+    let first_error = match &outcome {
+        LifecycleOutcome::Done(resp) if resp.starts_with("error:") => Some(resp.clone()),
+        _ => None,
+    };
+    if let Some(first_error) = first_error {
+        let fresh = if reopen_allowed(last_reopen) {
+            reopen_connection(owner)
+        } else {
+            None
+        };
+        if let Some(fresh) = fresh {
+            *conn = fresh;
+            outcome = match seq(conn, events_tx, owner) {
+                // `reopen_connection` RESET the ownership cache to "unseen", so
+                // the retry can come back `Skipped` even though the first
+                // attempt really did fail a transmit. Report that original
+                // failure instead of letting the skip mask it as `ok` — #19's
+                // transmit health exists to surface exactly this state, and a
+                // wedged adapter is the case it was built for.
+                LifecycleOutcome::Skipped => LifecycleOutcome::Done(first_error),
+                retried => retried,
+            };
+        }
+    }
+    match outcome {
+        LifecycleOutcome::Skipped => protocol::resp_ok(),
+        LifecycleOutcome::Done(resp) => {
+            let ok = resp == protocol::resp_ok();
+            note_health(
+                health,
+                events_tx,
+                ok,
+                resp.strip_prefix("error:").unwrap_or(&resp),
+            );
+            resp
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +941,15 @@ fn blocking_worker(
         None
     };
 
+    // Passive display-ownership tracking, gated on the SAME lifecycle flag as the
+    // key callback (nothing consumes the cell when lifecycle is off). It stays
+    // `OWNER_UNSEEN` until some device broadcasts <Active Source>, so a daemon
+    // started mid-session refuses to standby a display it has never seen claimed.
+    let owner: OwnerCell = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(OWNER_UNSEEN));
+    if lifecycle_enabled() {
+        builder = builder.command_received_callback(owner_tracking_callback(owner.clone()));
+    }
+
     let cfg = match builder.build() {
         Ok(c) => c,
         Err(e) => {
@@ -744,9 +1048,13 @@ fn blocking_worker(
     let focus_on_startup = crate::config::cec_focus_on_startup(&crate::config::settings_path());
     if crate::config::should_focus(lifecycle_enabled(), focus_on_startup) {
         tracing::info!("cec: lifecycle + focus-on-startup enabled — running wake sequence on open");
-        let resp = wake_sequence(&conn, &events_tx);
-        if resp.starts_with("error:") {
-            tracing::warn!("cec: wake-on-open failed: {resp}");
+        match wake_sequence(&conn, &events_tx, &owner) {
+            LifecycleOutcome::Done(resp) if resp.starts_with("error:") => {
+                tracing::warn!("cec: wake-on-open failed: {resp}");
+            }
+            // A clean `ok` (claim made or ownership-skipped) needs no log beyond
+            // the skip breadcrumb `wake_sequence` already emitted.
+            _ => {}
         }
     }
 
@@ -802,9 +1110,13 @@ fn blocking_worker(
                 let resp = match addr.parse::<i32>().ok().and_then(logical_from_i32) {
                     // Transmit op: reopen + retry once on a stale-bus failure.
                     Some(logical) => {
-                        match with_cec_reconnect(&mut conn, &mut last_reopen, "power-on", |c| {
-                            c.send_power_on_devices(logical)
-                        }) {
+                        match with_cec_reconnect(
+                            &mut conn,
+                            &mut last_reopen,
+                            &owner,
+                            "power-on",
+                            |c| c.send_power_on_devices(logical),
+                        ) {
                             Ok(()) => {
                                 note_health(&mut health, &events_tx, true, "");
                                 let ps = conn.get_device_power_status(logical);
@@ -828,9 +1140,13 @@ fn blocking_worker(
                 let resp = match addr.parse::<i32>().ok().and_then(logical_from_i32) {
                     // Transmit op: reopen + retry once on a stale-bus failure.
                     Some(logical) => {
-                        match with_cec_reconnect(&mut conn, &mut last_reopen, "power-off", |c| {
-                            c.send_standby_devices(logical)
-                        }) {
+                        match with_cec_reconnect(
+                            &mut conn,
+                            &mut last_reopen,
+                            &owner,
+                            "power-off",
+                            |c| c.send_standby_devices(logical),
+                        ) {
                             Ok(()) => {
                                 note_health(&mut health, &events_tx, true, "");
                                 let ps = conn.get_device_power_status(logical);
@@ -853,61 +1169,54 @@ fn blocking_worker(
             WorkerReq::ActiveSource(tx) => {
                 // Transmit op: reopen + retry once on a stale-bus failure (this is
                 // the exact op that loops "TransmitFailed" forever on a stale bus).
-                let resp =
-                    match with_cec_reconnect(&mut conn, &mut last_reopen, "active-source", |c| {
-                        c.set_active_source(cec_rs::CecDeviceType::PlaybackDevice)
-                    }) {
-                        Ok(()) => {
-                            note_health(&mut health, &events_tx, true, "");
-                            protocol::resp_ok()
-                        }
-                        Err(e) => {
-                            let msg = format!("active-source failed: {e:?}");
-                            note_health(&mut health, &events_tx, false, &msg);
-                            protocol::resp_error(&msg)
-                        }
-                    };
+                let resp = match with_cec_reconnect(
+                    &mut conn,
+                    &mut last_reopen,
+                    &owner,
+                    "active-source",
+                    |c| c.set_active_source(cec_rs::CecDeviceType::PlaybackDevice),
+                ) {
+                    Ok(()) => {
+                        note_health(&mut health, &events_tx, true, "");
+                        // This manual claim is UNGATED (a deliberate user
+                        // action) but it still makes us the owner, and our own
+                        // claim never returns through the command callback —
+                        // so record it, or the next suspend would skip a
+                        // standby we legitimately owe.
+                        owner_set(&owner, our_logical_address(&conn));
+                        protocol::resp_ok()
+                    }
+                    Err(e) => {
+                        let msg = format!("active-source failed: {e:?}");
+                        note_health(&mut health, &events_tx, false, &msg);
+                        protocol::resp_error(&msg)
+                    }
+                };
                 let _ = tx.send(resp);
             }
+            // Both lifecycle sequences share `run_lifecycle`: bounded,
+            // cooldown-gated reopen+retry on a leading `error:`, then fold the
+            // transmit outcome into health. An ownership SKIP bypasses both and
+            // replies `ok` (see `LifecycleOutcome`).
             WorkerReq::WakeSequence(tx) => {
-                // The sequence is several transmit ops; it returns a wire string
-                // (`ok` / `error:*`) rather than a Result. On a leading `error:`,
-                // reopen the connection once and retry the whole sequence a single
-                // time — but only if the reopen cooldown has elapsed (bounded: no
-                // loop AND no adapter churn).
-                let mut resp = wake_sequence(&conn, &events_tx);
-                if resp.starts_with("error:") && reopen_allowed(&mut last_reopen) {
-                    if let Some(fresh) = reopen_connection() {
-                        conn = fresh;
-                        resp = wake_sequence(&conn, &events_tx);
-                    }
-                }
-                // Fold the wake transmits into health: success on the bare `ok`
-                // wire string, failure on a leading `error:` (record the message).
-                let ok = resp == protocol::resp_ok();
-                note_health(
+                let resp = run_lifecycle(
+                    &mut conn,
+                    &mut last_reopen,
                     &mut health,
                     &events_tx,
-                    ok,
-                    resp.strip_prefix("error:").unwrap_or(&resp),
+                    &owner,
+                    wake_sequence,
                 );
                 let _ = tx.send(resp);
             }
             WorkerReq::StandbyAll(tx) => {
-                // Same bounded, cooldown-gated reopen+retry as WakeSequence.
-                let mut resp = standby_all(&conn, &events_tx);
-                if resp.starts_with("error:") && reopen_allowed(&mut last_reopen) {
-                    if let Some(fresh) = reopen_connection() {
-                        conn = fresh;
-                        resp = standby_all(&conn, &events_tx);
-                    }
-                }
-                let ok = resp == protocol::resp_ok();
-                note_health(
+                let resp = run_lifecycle(
+                    &mut conn,
+                    &mut last_reopen,
                     &mut health,
                     &events_tx,
-                    ok,
-                    resp.strip_prefix("error:").unwrap_or(&resp),
+                    &owner,
+                    standby_all,
                 );
                 let _ = tx.send(resp);
             }
@@ -1112,6 +1421,151 @@ mod tests {
             logical_from_i32(TV_ADDR),
             Some(cec_rs::CecLogicalAddress::Tv)
         );
+    }
+
+    #[test]
+    fn is_addressable_rejects_non_devices() {
+        use cec_rs::CecLogicalAddress as A;
+        // Table-driven so the inputs aren't compile-time constants (a literal
+        // `assert!(is_addressable(A::Tv))` trips clippy's assertions_on_constants).
+        let cases = [
+            (A::Tv, true),
+            (A::Audiosystem, true),
+            (A::Playbackdevice1, true),
+            (A::Freeuse, true),
+            // Not devices: "libcec doesn't know" and "no logical address".
+            (A::Unknown, false),
+            (A::Unregistered, false),
+        ];
+        for (addr, want) in cases {
+            assert_eq!(is_addressable(addr), want, "is_addressable({addr:?})");
+        }
+    }
+
+    #[test]
+    fn owns_display_requires_positive_proof() {
+        use cec_rs::CecLogicalAddress as A;
+        // (observed owner, our address, do we own the display?)
+        let cases = [
+            // The only true case: the last observed claim was ours.
+            (A::Playbackdevice1, A::Playbackdevice1, true),
+            // Someone else claimed it (the Apple TV case).
+            (A::Tv, A::Playbackdevice1, false),
+            (A::Playbackdevice2, A::Playbackdevice1, false),
+            // NEVER SEEN a claim — a daemon started mid-session. Must skip.
+            (A::Unknown, A::Playbackdevice1, false),
+            // <Inactive Source> / no logical address — nobody owns it.
+            (A::Unregistered, A::Playbackdevice1, false),
+            // Undeterminable on both sides is never "we own it".
+            (A::Unknown, A::Unknown, false),
+            (A::Unregistered, A::Unregistered, false),
+            // A real owner we can't match ourselves against is not proof.
+            (A::Playbackdevice1, A::Unknown, false),
+        ];
+        for (owner, ours, want) in cases {
+            assert_eq!(
+                owns_display(owner, ours),
+                want,
+                "owns_display({owner:?}, {ours:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn may_claim_active_source_yields_only_to_a_known_other_owner() {
+        use cec_rs::CecLogicalAddress as A;
+        // (observed owner, our address, may claim?)
+        let cases = [
+            // A different REAL device holds the screen (the Apple TV case) — the
+            // one and only reason to skip the claim.
+            (A::Tv, A::Playbackdevice1, false),
+            (A::Playbackdevice2, A::Playbackdevice1, false),
+            (A::Audiosystem, A::Playbackdevice1, false),
+            // We already hold it: re-asserting is harmless.
+            (A::Playbackdevice1, A::Playbackdevice1, true),
+            // Never seen a claim -> nobody demonstrably owns the screen.
+            (A::Unknown, A::Playbackdevice1, true),
+            (A::Unregistered, A::Playbackdevice1, true),
+            (A::Unknown, A::Unknown, true),
+            // Real other owner still wins even when our own address is unknown.
+            (A::Tv, A::Unknown, false),
+        ];
+        for (owner, ours, want) in cases {
+            assert_eq!(
+                may_claim_active_source(owner, ours),
+                want,
+                "may_claim_active_source({owner:?}, {ours:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_gates_are_asymmetric_when_unseen() {
+        use cec_rs::CecLogicalAddress as A;
+        // The whole point of two predicates: on a bus where no claim has been
+        // observed, standby must refuse to transmit while the wake claim proceeds.
+        let cases = [(A::Unknown, A::Playbackdevice1), (A::Unregistered, A::Tv)];
+        for (owner, ours) in cases {
+            assert!(
+                !owns_display(owner, ours),
+                "standby must skip for owner={owner:?}"
+            );
+            assert!(
+                may_claim_active_source(owner, ours),
+                "wake claim must proceed for owner={owner:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_from_command_tracks_only_source_claims() {
+        use cec_rs::CecLogicalAddress as A;
+        use cec_rs::CecOpcode as O;
+        // (opcode, initiator, resulting owner change)
+        let cases = [
+            // <Active Source>: the initiator now owns the display.
+            (
+                O::ActiveSource,
+                A::Playbackdevice2,
+                Some(A::Playbackdevice2),
+            ),
+            (O::ActiveSource, A::Tv, Some(A::Tv)),
+            // <Inactive Source>: nobody owns it.
+            (O::InactiveSource, A::Playbackdevice2, Some(A::Unknown)),
+            // Routing directives carry a PHYSICAL address, not an ownership
+            // claim; the selected device confirms with a later <Active Source>.
+            (O::RoutingChange, A::Tv, None),
+            (O::SetStreamPath, A::Tv, None),
+            // Unrelated traffic must never move the cache.
+            (O::Standby, A::Tv, None),
+            (O::ReportPowerStatus, A::Audiosystem, None),
+        ];
+        for (opcode, initiator, want) in cases {
+            assert_eq!(
+                ownership_from_command(opcode, initiator),
+                want,
+                "ownership_from_command({opcode:?}, {initiator:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_cell_round_trips_and_defaults_to_unseen() {
+        use cec_rs::CecLogicalAddress as A;
+        let cell: OwnerCell = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(OWNER_UNSEEN));
+        // Never-seen reads back as Unknown, which fails `owns_display`.
+        assert_eq!(owner_get(&cell), A::Unknown);
+        for addr in [A::Tv, A::Audiosystem, A::Playbackdevice1, A::Unregistered] {
+            owner_set(&cell, addr);
+            assert_eq!(owner_get(&cell), addr, "round-trip {addr:?}");
+        }
+        // Unknown is not one of the 16 wire slots — it stores as "unseen".
+        owner_set(&cell, A::Unknown);
+        assert_eq!(
+            cell.load(std::sync::atomic::Ordering::Relaxed),
+            OWNER_UNSEEN
+        );
+        assert_eq!(owner_get(&cell), A::Unknown);
     }
 
     #[test]
