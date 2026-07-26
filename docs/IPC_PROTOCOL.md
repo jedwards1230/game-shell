@@ -1364,7 +1364,27 @@ Gracefully terminate a running Steam game on the host (proxies `POST /quit` with
 `{appid}` to the sidecar). The body is a **single numeric appid** token, mirroring
 `steam-launch`.
 
-**Reply (compact single-line JSON status):** `{"status":"ok"}` / `{"status":"error",…}`.
+The host decides whether there is anything to quit and may **refuse** — it answers
+HTTP 200 with `{"ok":false,"appid":…,"reason":"not running"}` when no live process
+for that appid exists (see [HOST_SETUP.md](HOST_SETUP.md)). A refusal is a normal
+answer, not a failure, so it is surfaced rather than flattened into `"ok"` — the
+same three-outcome shape as `steam-suspend`:
+
+**Reply (compact single-line JSON status):**
+
+| Outcome | Reply |
+|---------|-------|
+| quit sent | `{"status":"ok"}` |
+| refused by the host (nothing running) | `{"status":"error","reason":"<the host's reason>","refused":true}` |
+| unreachable / bad token / decode failure | `{"status":"error","reason":"steam-quit failed: …","refused":false}` |
+| steam unconfigured | `{"status":"disabled","reason":"steam not configured"}` |
+
+The host's `reason` is passed through **verbatim** (it is written to be shown to a
+person); `refused` lets a consumer branch without string-matching it. `"ok"` means
+a matching game process was found and signalled — before this the daemon discarded
+the host's body, so "nothing was running" was indistinguishable from a successful
+quit.
+
 A missing / non-numeric `<appid>` body returns `error:usage: steam-quit <appid>\n`.
 
 #### `steam-suspend`

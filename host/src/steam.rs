@@ -239,12 +239,21 @@ pub fn parse_appmanifest(text: &str) -> Option<LibraryEntry> {
 ///   whose argv is `reaper SteamLaunch AppId=<appid> -- <proton/...> <game.exe>`.
 ///   Linux Steam does NOT write `RunningAppID` to `registry.vdf` (that's a
 ///   Windows-only field), so the process scan is the only reliable signal.
-/// - **Windows**: read the live registry DWORD `HKCU\Software\Valve\Steam\RunningAppID`
-///   via a `reg query` shell-out (the authoritative source); fall back to
-///   parsing the on-disk `registry.vdf` (which Steam also maintains) if the
-///   command fails or its output is unparseable, so this path only ever
-///   improves over the previous VDF-only behavior.
+/// - **Windows**: read the registry DWORD `HKCU\Software\Valve\Steam\RunningAppID`
+///   via a `reg query` shell-out, falling back to parsing the on-disk
+///   `registry.vdf` (which Steam also maintains) if the command fails or its
+///   output is unparseable — then **cross-check the claim against a live
+///   process** ([`appid_has_live_process`]). The registry value is a *claim*, not
+///   a liveness signal: Steam does not clear `RunningAppID` when its client
+///   crashes, so a crashed Steam leaves a phantom "running" appid behind
+///   indefinitely. The cross-check reuses the exact process matcher
+///   [`quit_windows`] uses, so status and quit can no longer disagree (a stale
+///   id reporting "running" while quit finds nothing to kill was the bug).
 /// - **macOS**: not wired yet — returns `None` (out of scope).
+///
+/// Linux needs no such cross-check: its source *is* a live process (`reaper` in
+/// `/proc`), not a persisted value, and a dead pid simply disappears from the
+/// scan. See [`running_appid_linux`].
 ///
 /// Returns `None` whenever nothing matches — the "Playing" badge then shows no
 /// running game.
@@ -272,6 +281,15 @@ pub fn running_appid() -> Option<u32> {
 /// launcher and return its `AppId=<digits>`. `/proc` is read with pure std (no
 /// new crates); each `cmdline` is NUL-separated argv. Unreadable entries
 /// (permissions, races where the pid exits mid-scan) are skipped.
+///
+/// **This is already a liveness check** — unlike the Windows registry value, the
+/// source here is the live process table, so there is nothing stale to guard
+/// against: when the game (and its `reaper`) exit, the `/proc` entry is gone and
+/// the scan reports nothing. A lingering zombie doesn't fake it either — the
+/// kernel serves an empty `cmdline` for a zombie, so it can't carry the
+/// `SteamLaunch`/`AppId=` tokens the matcher requires. It is also the same scan
+/// [`quit_linux`] uses (both go through [`steam_appid_from_argv`]), so the two
+/// sides agree by construction.
 #[cfg(target_os = "linux")]
 fn running_appid_linux() -> Option<u32> {
     let proc = std::fs::read_dir("/proc").ok()?;
@@ -445,10 +463,8 @@ fn quit_windows(appid: u32) -> anyhow::Result<bool> {
     let install_dir = install_dir.to_string_lossy().to_string();
 
     let mut signalled = false;
-    for (pid, exe) in running_processes_windows() {
-        if !exe_is_under_install_dir(&exe, &install_dir) {
-            continue;
-        }
+    let procs = running_processes_windows();
+    for (pid, exe) in processes_under_install_dir(&procs, &install_dir) {
         match std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string()])
             .status()
@@ -468,6 +484,75 @@ fn quit_windows(appid: u32) -> anyhow::Result<bool> {
         }
     }
     Ok(signalled)
+}
+
+/// Pure filter: the subset of `procs` whose executable lives inside
+/// `install_dir`, as `(pid, exe)` pairs borrowed from the input.
+///
+/// This is the **single** "is this appid's game actually running?" matcher on
+/// Windows — both [`quit_windows`] (which taskkills the matches) and
+/// [`appid_has_live_process`] (which only asks whether there are any) go through
+/// it, so status and quit cannot draw different conclusions from the same
+/// process list. Per-process membership is decided by
+/// [`exe_is_under_install_dir`]'s strict boundary check. Pure (no I/O), so it is
+/// unit-tested on every platform.
+#[cfg(any(target_os = "windows", test))]
+fn processes_under_install_dir<'a>(
+    procs: &'a [(u32, String)],
+    install_dir: &str,
+) -> Vec<(u32, &'a str)> {
+    procs
+        .iter()
+        .filter(|(_, exe)| exe_is_under_install_dir(exe, install_dir))
+        .map(|(pid, exe)| (*pid, exe.as_str()))
+        .collect()
+}
+
+/// Windows liveness cross-check: is a process for `appid` actually running?
+///
+/// Resolves the appid's install directory from its own `appmanifest_<appid>.acf`
+/// (never guessed) and asks whether any running process's executable sits inside
+/// it — the same two steps [`quit_windows`] takes before it signals anything,
+/// via the same [`processes_under_install_dir`] matcher.
+///
+/// **Deliberately conservative**: every failure resolves to `false` (unresolvable
+/// install dir, a process enumeration that returned nothing because PowerShell is
+/// missing or the CIM query failed). A phantom "running" is the damaging error —
+/// it badges a poster, restricts focus to that one card, and gates the context
+/// menu — whereas a missed "running" only omits a badge. It also keeps this in
+/// lockstep with quit: whenever this says "running", quit has something to kill,
+/// and whenever this says "not running", quit would have found nothing anyway.
+///
+/// Two consequences of that conservatism, both accepted deliberately:
+/// - A title whose real executable lives OUTSIDE the Steam install dir (a stub
+///   manifest fronting a third-party launcher) reads as not running. That is
+///   already true of [`quit_windows`], which likewise can't act on it — the two
+///   agreeing is the point.
+/// - `/sleep` consults [`running_appid`] for its refusal, so it will no longer
+///   be blocked forever by a stale registry value. Its other guard (Sunshine's
+///   live-session probe) is independent and unaffected.
+///
+/// **Cost**: one process enumeration (a PowerShell CIM query) per call, but only
+/// when the registry claims a non-zero appid — an idle host short-circuits before
+/// getting here and pays nothing, which is the overwhelmingly common state.
+#[cfg(target_os = "windows")]
+fn appid_has_live_process(appid: u32) -> bool {
+    let Some(install_dir) = installdir_for_appid(appid) else {
+        tracing::debug!(
+            "steam: RunningAppID {appid} has no resolvable install dir; treating as not running"
+        );
+        return false;
+    };
+    let install_dir = install_dir.to_string_lossy().to_string();
+    let procs = running_processes_windows();
+    let matches = processes_under_install_dir(&procs, &install_dir);
+    if matches.is_empty() {
+        tracing::debug!(
+            "steam: RunningAppID {appid} is stale — no live process under {install_dir}"
+        );
+        return false;
+    }
+    true
 }
 
 /// Resolve the absolute install directory for a Steam `appid` on Windows.
@@ -598,17 +683,26 @@ fn exe_is_under_install_dir(exe_path: &str, install_dir: &str) -> bool {
     }
 }
 
-/// Windows running-game detector: try the authoritative live registry DWORD
-/// first (`reg query`), and only fall back to the on-disk `registry.vdf` if the
-/// command fails outright, exits non-zero, or its output doesn't parse. This
-/// way the shell-out only ever improves on the previous VDF-only behavior —
-/// it never makes a working case regress.
+/// Windows running-game detector: read the appid Steam *claims* is running (the
+/// live registry DWORD via `reg query`, falling back to the on-disk
+/// `registry.vdf` when the command fails outright, exits non-zero, or its output
+/// doesn't parse), then **verify the claim against the process table** before
+/// reporting it.
+///
+/// The verification is the whole point. `RunningAppID` is written when a game
+/// starts and cleared when it stops *by a healthy Steam client* — a client that
+/// crashes mid-game never clears it, so the value goes stale and the sidecar
+/// reports a game that isn't running (observed: `RunningAppID = 252950` with no
+/// `steam.exe` and an idle GPU). That phantom then drives the shell's poster
+/// badge, its focus restriction, and its context-menu preconditions.
+///
+/// [`appid_has_live_process`] resolves the claim through the same install-dir +
+/// process-match path [`quit_windows`] uses, so the two can no longer disagree.
+/// Failure to verify reports "not running" (see that function's contract).
 #[cfg(target_os = "windows")]
 fn running_appid_windows() -> Option<u32> {
-    if let Some(id) = running_appid_reg_query() {
-        return Some(id);
-    }
-    running_appid_registry()
+    let claimed = running_appid_reg_query().or_else(running_appid_registry)?;
+    appid_has_live_process(claimed).then_some(claimed)
 }
 
 /// Shell out to `reg query "HKCU\Software\Valve\Steam" /v RunningAppID` and
@@ -1275,6 +1369,76 @@ mod tests {
             r"C:\Games\Foo\.\game.exe",
             r"C:\Games\Foo"
         ));
+    }
+
+    /// Table-driven cases for the liveness matcher shared by `quit_windows` and
+    /// `appid_has_live_process`: a realistic process list, the install dir under
+    /// test, and the pids expected to match.
+    #[test]
+    fn processes_under_install_dir_table() {
+        let procs = vec![
+            (4, "C:\\Windows\\System32\\smss.exe".to_string()),
+            (100, "C:\\Program Files (x86)\\Steam\\steam.exe".to_string()),
+            (
+                200,
+                "D:\\SteamLibrary\\steamapps\\common\\rocketleague\\Binaries\\Win64\\RocketLeague.exe".to_string(),
+            ),
+            (
+                201,
+                "D:\\SteamLibrary\\steamapps\\common\\rocketleague\\bootstrapper.exe".to_string(),
+            ),
+            (
+                300,
+                "D:\\SteamLibrary\\steamapps\\common\\rocketleague2\\game.exe".to_string(),
+            ),
+        ];
+        let cases: &[(&str, &[u32])] = &[
+            // The game's own tree — both processes under the install dir match.
+            (
+                r"D:\SteamLibrary\steamapps\common\rocketleague",
+                &[200, 201],
+            ),
+            // Trailing separator + forward slashes normalize to the same dir.
+            (
+                "D:/SteamLibrary/steamapps/common/RocketLeague/",
+                &[200, 201],
+            ),
+            // A sibling sharing a name prefix must NOT drag in the other game.
+            (r"D:\SteamLibrary\steamapps\common\rocketleague2", &[300]),
+            // An installed-but-not-running game matches nothing.
+            (r"D:\SteamLibrary\steamapps\common\portal2", &[]),
+            // An empty install dir must never match everything.
+            ("", &[]),
+        ];
+        for (dir, expected) in cases {
+            let got: Vec<u32> = processes_under_install_dir(&procs, dir)
+                .into_iter()
+                .map(|(pid, _)| pid)
+                .collect();
+            assert_eq!(&got, expected, "install_dir = {dir:?}");
+        }
+    }
+
+    #[test]
+    fn processes_under_install_dir_empty_process_list_matches_nothing() {
+        // The enumeration degrading to an empty list (PowerShell missing, CIM
+        // query failed) must read as "not running", never as "can't tell, assume
+        // running" — a phantom running game is the damaging direction.
+        assert!(
+            processes_under_install_dir(&[], r"D:\SteamLibrary\steamapps\common\rocketleague")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn processes_under_install_dir_borrows_exe_paths() {
+        // The matcher hands back the exe path so quit_windows can keep logging
+        // WHAT it killed, not just the pid.
+        let procs = vec![(7, r"C:\Games\Foo\bin\game.exe".to_string())];
+        assert_eq!(
+            processes_under_install_dir(&procs, r"C:\Games\Foo"),
+            vec![(7, r"C:\Games\Foo\bin\game.exe")]
+        );
     }
 
     #[test]

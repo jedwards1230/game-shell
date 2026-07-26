@@ -26,8 +26,11 @@
 //! `{"status":"disabled",…}` so the widget collapses to nothing.
 //!
 //! Host responses are deserialized into the shared [`tv_shell_protocol`] types
-//! (`LibraryResponse` / `StatusResponse`), so the daemon↔host JSON contract is
-//! single-sourced and can't silently drift. The response *normalizer*
+//! (`LibraryResponse` / `StatusResponse` / `QuitResponse` / `SleepResponse`), so
+//! the daemon↔host JSON contract is single-sourced and can't silently drift. An
+//! action endpoint whose *body* carries the decision (`/quit`, `/sleep` — both
+//! answer HTTP 200 whether they acted or refused) is read with `post_json`, never
+//! the body-discarding `post`. The response *normalizer*
 //! ([`normalize_library`]) is a pure function, unit-tested on every platform; only
 //! the live fetch needs a reachable host.
 
@@ -35,7 +38,9 @@ use crate::daemon_config::SteamHostConfig;
 use crate::service_health::ServiceStatus;
 use crate::sidecar::{url_host, Sidecar};
 use serde_json::{json, Value};
-use tv_shell_protocol::{LibraryEntry, LibraryResponse, SleepResponse, StatusResponse};
+use tv_shell_protocol::{
+    LibraryEntry, LibraryResponse, QuitResponse, SleepResponse, StatusResponse,
+};
 
 /// Recently-played rail cap. The rows only show a handful at 4K.
 const RECENT_LIMIT: usize = 12;
@@ -53,6 +58,10 @@ const MAX_LIBRARY_BODY: u64 = 10 * 1024 * 1024;
 /// cap: a misconfigured/compromised host must not be able to stream an unbounded
 /// body into memory.
 const MAX_SLEEP_BODY: u64 = 64 * 1024;
+
+/// `/quit` answers `{ok, appid, reason}` — tiny, like `/sleep`. Same rationale
+/// for the cap.
+const MAX_QUIT_BODY: u64 = 64 * 1024;
 
 /// The ACTIVE Steam host: the configured host whose name matches the persisted
 /// `steamServer` selection (settings.json, written by `steam-set-host`), else
@@ -208,10 +217,21 @@ pub async fn handle_steam_bigpicture() -> String {
 
 /// IPC entry point for `steam-quit <appid>`. POSTs `{appid}` to the host's `/quit`
 /// to gracefully terminate the running game (SIGTERM to its process group — like
-/// Steam's Stop button), and returns a compact-JSON status object
-/// (`{"status":"ok"}` / `{"status":"error","reason":…}`). Mirrors
-/// [`handle_steam_bigpicture`]; the Moonlight stream close stays in QML. Degrades
-/// gracefully when the host is unconfigured (`disabled`) or unreachable (`error`).
+/// Steam's Stop button). Degrades to `disabled` when steam is unconfigured.
+///
+/// Three outcomes, deliberately distinguishable by a QML consumer — the same
+/// shape [`handle_steam_suspend`] uses:
+/// - quit sent → `{"status":"ok"}`
+/// - REFUSED   → `{"status":"error","reason":"<host's reason>","refused":true}`
+/// - failed    → `{"status":"error","reason":"steam-quit failed: …","refused":false}`
+///
+/// The refusal is the interesting one. The host answers HTTP **200** with
+/// `{"ok":false,"appid":…,"reason":"not running"}` when no matching game process
+/// exists, so it can't be told from success by status code alone — hence
+/// [`crate::sidecar::Sidecar::post_json`] rather than the body-discarding `post`,
+/// which used to flatten both into `{"status":"ok"}` and report a quit that
+/// quit nothing. The host's reason is passed through **verbatim**, and `refused`
+/// lets a caller branch without string-matching it.
 pub async fn handle_steam_quit(appid: u32) -> String {
     let Some(sc) = sidecar() else {
         return json!({
@@ -220,17 +240,39 @@ pub async fn handle_steam_quit(appid: u32) -> String {
         })
         .to_string();
     };
-    match sc.post("/quit", Some(&launch_body(appid))).await {
-        Ok(()) => json!({ "status": ServiceStatus::Ok.as_str() }).to_string(),
+    match sc
+        .post_json::<QuitResponse>("/quit", Some(&launch_body(appid)), MAX_QUIT_BODY)
+        .await
+    {
+        Ok(resp) => quit_reply(&resp),
         Err(e) => {
             tracing::debug!("steam-quit {appid} failed: {e}");
             json!({
                 "status": ServiceStatus::Error.as_str(),
                 "reason": format!("steam-quit failed: {e}"),
+                "refused": false,
             })
             .to_string()
         }
     }
+}
+
+/// Pure reply builder for [`handle_steam_quit`] — maps the host's
+/// [`QuitResponse`] onto the daemon's compact-JSON status shape, mirroring
+/// [`suspend_reply`]. A refusal with no `reason` (a host that answered but said
+/// nothing) still reports as refused, with a generic message, rather than being
+/// mistaken for success.
+fn quit_reply(resp: &QuitResponse) -> String {
+    if resp.ok {
+        return json!({ "status": ServiceStatus::Ok.as_str() }).to_string();
+    }
+    let reason = resp.reason.as_deref().unwrap_or("the host quit nothing");
+    json!({
+        "status": ServiceStatus::Error.as_str(),
+        "reason": reason,
+        "refused": true,
+    })
+    .to_string()
 }
 
 /// IPC entry point for `steam-suspend`. POSTs to the host's `/sleep` (no body) to
@@ -552,6 +594,46 @@ mod tests {
         // A host that answered `{"ok":false}` with no reason must NOT be read as
         // success; it degrades to a generic message, still flagged refused.
         let out = parse(&suspend_reply(&SleepResponse::default()));
+        assert_eq!(out["status"], "error");
+        assert_eq!(out["refused"], true);
+        assert!(!out["reason"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn quit_reply_ok_when_the_host_signalled_the_game() {
+        let out = parse(&quit_reply(&QuitResponse {
+            ok: true,
+            appid: 730,
+            reason: None,
+        }));
+        assert_eq!(out["status"], "ok");
+        // The accepted shape matches steam-suspend's exactly — no extra fields.
+        assert!(out.get("reason").is_none());
+        assert!(out.get("refused").is_none());
+    }
+
+    #[test]
+    fn quit_reply_surfaces_not_running_instead_of_faking_success() {
+        // The bug this closes: the host says "I quit nothing", HTTP 200, and the
+        // daemon used to answer `{"status":"ok"}`. The refusal must reach the
+        // caller with the host's reason verbatim and a `refused` flag QML can
+        // branch on without string-matching.
+        let out = parse(&quit_reply(&QuitResponse {
+            ok: false,
+            appid: 252950,
+            reason: Some("not running".into()),
+        }));
+        assert_eq!(out["status"], "error");
+        assert_eq!(out["reason"], "not running");
+        assert_eq!(out["refused"], true);
+    }
+
+    #[test]
+    fn quit_reply_refusal_without_a_reason_is_still_a_refusal() {
+        // A host that answered `{"ok":false}` with no reason must NOT be read as
+        // success; it degrades to a generic message, still flagged refused. This
+        // is also what a `{}` body deserializes to (ok defaults false).
+        let out = parse(&quit_reply(&QuitResponse::default()));
         assert_eq!(out["status"], "error");
         assert_eq!(out["refused"], true);
         assert!(!out["reason"].as_str().unwrap().is_empty());

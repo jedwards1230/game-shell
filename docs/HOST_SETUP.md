@@ -30,10 +30,43 @@ It never touches Sunshine config, so other Moonlight clients are unaffected.
 | GET    | `/library`    | Bearer      | Enumerate installed Steam games (VDF/ACF) |
 | POST   | `/launch`     | Bearer      | Navigate Big Picture to a game's page (user presses Play) |
 | POST   | `/open-bpm`   | Bearer      | Open Big Picture's HOME screen (no game selected). No body |
-| POST   | `/quit`       | Bearer      | Gracefully stop the running game for `{ appid }` (SIGTERM to its process group, like Steam's Stop) |
+| POST   | `/quit`       | Bearer      | Gracefully stop the running game for `{ appid }` (SIGTERM to its process group, like Steam's Stop). May report **nothing to quit** — see below |
 | POST   | `/sleep`      | Bearer      | Suspend the host to RAM. No body. May be **refused** — see below |
-| GET    | `/status`     | Bearer      | `{ version, running_appid, streaming }` |
+| GET    | `/status`     | Bearer      | `{ version, running_appid, streaming }` — `running_appid` is **process-verified**, see below |
 | GET    | `/art/{appid}`| **public**  | Local cover art (no bearer — QML `Image.source` can't send one; art isn't sensitive) |
+
+### `POST /quit`
+
+Request body is `{ "appid": <n> }`. The response is always the same three fields:
+
+```jsonc
+{ "ok": true,  "appid": 730,    "reason": null }          // a game process was signalled
+{ "ok": false, "appid": 252950, "reason": "not running" } // nothing matched — nothing was quit
+```
+
+**"Nothing to quit" is HTTP 200 with `ok: false`, not an error status** — same
+contract as `/sleep`'s refusal, so the caller can tell "stopped the game" from
+"there was no game" instead of reading a bare 2xx as success.
+
+### `GET /status` — `running_appid` liveness
+
+`running_appid` reports a game only when a **live process** backs it:
+
+- **Linux** scans `/proc` for Steam's `reaper SteamLaunch AppId=<n>` launcher, so
+  the signal *is* the process table — it can't go stale.
+- **Windows** reads `HKCU\Software\Valve\Steam\RunningAppID`, then cross-checks it
+  against the process table (any running executable inside that appid's install
+  directory, resolved from its own `appmanifest_<appid>.acf`). The registry value
+  alone is only a *claim*: Steam does not clear it when its client crashes, so it
+  can name a game that exited hours ago. The cross-check runs the same install-dir
+  match `/quit` uses, so `/status` and `/quit` can't disagree.
+
+The check is deliberately conservative — if the install directory can't be
+resolved, or the process enumeration fails, `running_appid` is `null`. A phantom
+"running" locks the shell's UI down (poster badge, focus restriction, context
+menu); a missed one only omits a badge. It costs one process enumeration per
+`/status` call, but **only when the registry claims a non-zero appid** — an idle
+host short-circuits and pays nothing.
 
 ### `POST /sleep`
 
@@ -51,7 +84,8 @@ success), so a consumer binds one field either way.
 
 The host refuses while:
 
-- a Steam game is running (`running_appid` is set), or
+- a Steam game is running (`running_appid` is set — process-verified, so a stale
+  Windows `RunningAppID` no longer blocks sleep indefinitely), or
 - Sunshine reports a live session — **active *or merely resumable***, the same
   `serverinfo` signal `/status`'s `streaming` field uses. A resumable session
   counts: sleeping would strand a client that still lists this host.
