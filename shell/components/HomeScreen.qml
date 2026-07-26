@@ -39,6 +39,13 @@ FocusScope {
     readonly property Item recentWidget: widgetHost.widgetById("recent")
     readonly property Item steamWidget: widgetHost.widgetById("steam")
 
+    // The Steam host the daemon currently has active (`steam-set-host`), read off
+    // the Moonlight widget's library view. steamLaunch.js matches it against
+    // `targets` so the stream goes to the machine actually serving the library — a
+    // dual-boot gaming PC serves Steam from one boot while targets[0] names the
+    // other, and streaming targets[0] blindly aims at the powered-off boot.
+    readonly property string activeSteamHost: root.moonlightWidget ? (root.moonlightWidget.activeSteamHost || "") : ""
+
     // Recent (apps) size: small = icon-only square tiles (label dropped),
     // medium = full icon + label cards. A reformat, not a scale.
     readonly property bool _recentSmall: SettingsStore.widget("recent").size === "small"
@@ -235,6 +242,12 @@ FocusScope {
     }
     function quitSteamGame(appid) {
         SteamLaunch.quitSteamGame(root, steamQuitReq, appid);
+    }
+    // A steam action fired but there's nowhere to stream it. steamLaunch.js is a
+    // `.pragma library` and can't reach the singleton itself, so it calls back here
+    // — the log alone is invisible from the couch.
+    function notifyNoStreamTarget() {
+        NotificationManager.warn("moonlight", "No stream target", "Add a Moonlight server in Widgets ▸ Moonlight to stream this host.");
     }
 
     // One-shot socket client for `steam-launch <appid>`. The reply (ok/error) is
@@ -699,22 +712,36 @@ FocusScope {
     // SteamCard's guard), positioned over it. Mirrors _moonlightContext's
     // mapToItem positioning, anchored on moonlightWidget.runningCard.
     function _steamGameContext(appid) {
-        if (!root.moonlightWidget)
+        if (!root.moonlightWidget) {
+            // Structurally unreachable (the widget has to exist to have emitted),
+            // but never swallow the keypress silently — say why in the log.
+            console.warn("HomeScreen: no Moonlight widget — can't open the game context menu for", appid);
             return;
+        }
+        // The MENU itself must not depend on the stream target: Quit talks only to
+        // the STEAM host (`steam-quit <appid>` → sidecar), which is up by definition
+        // whenever a game is running there. Only Resume needs somewhere to stream
+        // INTO, so gate Resume ALONE — and render it disabled-with-a-reason rather
+        // than dropping it, so the menu shape never changes under the user.
+        let canResume = SteamLaunch.canStream(root);
+        // `runningCard` is the popover ANCHOR only — it goes null whenever the
+        // poster row isn't the visible view (host down → Wake card, server view,
+        // widget resized). Fall back to the screen centre instead of bailing out,
+        // which is what made the X face read as "the button does nothing".
         let card = root.moonlightWidget.runningCard;
-        if (!card)
-            return;
-        let pos = card.mapToItem(root, card.width / 2, 0);
+        let pos = card ? card.mapToItem(root, card.width / 2, 0) : Qt.point(root.width / 2, root.height / 2);
         popoverMenu.targetX = pos.x;
         popoverMenu.targetY = pos.y;
         popoverMenu.actions = [
             {
                 label: "Resume",
-                hint: "A: Resume",
+                hint: canResume ? "A: Resume" : "No stream target configured",
+                enabled: canResume,
                 // Reconnect/stream the running session. Reuses the Big-Picture
-                // stream path (navigate BPM to this game, then stream targets[0])
-                // and respects the one-session guard: if THIS client is already
-                // streaming, launchSteamGame just moves the live BPM (no 2nd stream).
+                // stream path (navigate BPM to this game, then stream the ACTIVE
+                // Steam host's target) and respects the one-session guard: if THIS
+                // client is already streaming, launchSteamGame just moves the live
+                // BPM (no 2nd stream).
                 action: function () {
                     root.launchSteamGame(appid);
                 }
