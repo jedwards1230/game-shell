@@ -227,7 +227,7 @@ URIs return a JSON-RPC `resource_not_found` (-32002).
   handlers, schemas, and annotations) so the MCP verb names match the `intent` /
   `key` verbs the HTTP bridge and Unix-socket IPC already use. `shell_action` /
   `navigate` are kept unchanged — they are federated to downstream MCP consumers
-  (as `game-shell-*`-prefixed tools), so renaming them would break saved
+  (as `tv-shell-*`-prefixed tools), so renaming them would break saved
   allowlists; the aliases are added alongside, never in place of them.
 
 `[mcp] allowed_hosts = ["host[:port]", …]` sets the rmcp Host
