@@ -81,4 +81,46 @@ TestCase {
     function test_can_stream_while_already_streaming() {
         verify(SteamLaunch.canStream(rootWith([], "", "streaming")));
     }
+
+    // === steam-quit reply classification ===
+    // The incident: a crashed Steam client left a stale RunningAppID, the shell
+    // badged a phantom as "Playing", the host correctly refused the quit — and the
+    // daemon flattened the refusal into {"status":"ok"}, so the UI showed nothing.
+    // The daemon now answers {"status":"error","reason":...,"refused":true}; these
+    // pin that the shell branches on the FLAG, not on the reason text, and that
+    // every non-ok shape is distinguishable from success.
+
+    function test_quit_reply_ok_says_nothing() {
+        compare(SteamLaunch.classifyQuitReply('{"status":"ok"}').kind, "ok");
+    }
+
+    function test_quit_reply_refused_is_its_own_kind() {
+        var r = SteamLaunch.classifyQuitReply('{"status":"error","reason":"not running","refused":true}');
+        compare(r.kind, "refused", "a refusal must not read as success");
+        compare(r.reason, "not running", "the host's reason is surfaced verbatim");
+    }
+
+    // The flag decides, not the wording — the host is free to reword the reason.
+    function test_quit_reply_refusal_does_not_depend_on_the_reason_text() {
+        var r = SteamLaunch.classifyQuitReply('{"status":"error","reason":"no matching process for appid 252950","refused":true}');
+        compare(r.kind, "refused");
+    }
+
+    function test_quit_reply_plain_error_is_not_a_refusal() {
+        var r = SteamLaunch.classifyQuitReply('{"status":"error","reason":"sidecar unreachable"}');
+        compare(r.kind, "error");
+        compare(r.reason, "sidecar unreachable");
+    }
+
+    // An older daemon answers a bare, non-JSON "ok" — still success, still silent.
+    function test_quit_reply_legacy_bare_ok() {
+        compare(SteamLaunch.classifyQuitReply("ok").kind, "ok");
+    }
+
+    // Garbage must not throw: this runs off a socket reply on a user keypress.
+    function test_quit_reply_garbage_is_unknown_not_a_throw() {
+        compare(SteamLaunch.classifyQuitReply("<html>502</html>").kind, "unknown");
+        compare(SteamLaunch.classifyQuitReply("").kind, "unknown");
+        compare(SteamLaunch.classifyQuitReply("null").kind, "unknown");
+    }
 }

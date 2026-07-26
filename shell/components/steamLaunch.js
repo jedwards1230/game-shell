@@ -172,6 +172,49 @@ function launchSteamBigPicture(root, steamBigPictureReq) {
 // local stream-close are independent. Step 1 is the ONLY step that matters to the
 // user, and it needs no stream target at all — which is why Quit is offered
 // unconditionally while Resume is gated (see HomeScreen._steamGameContext).
+// Classify a `steam-quit` reply line into { kind, reason }:
+//   "ok"      — the host killed the game; nothing to tell the user.
+//   "refused" — the host enumerated the real processes and matched NONE, i.e. the
+//               game was never running. Happens when a crashed Steam client leaves
+//               a stale `RunningAppID` behind and the shell badges a phantom as
+//               "Playing". This is the case that used to arrive as a bare
+//               `{"status":"ok"}` and showed nothing — "Quit does nothing".
+//   "error"   — any other non-ok reply.
+//   "unknown" — unparseable (an older daemon answering a bare, non-JSON string).
+// Branch on the `refused` FLAG the daemon sets, never on the reason text.
+function classifyQuitReply(line) {
+    let d = null;
+    try {
+        d = JSON.parse(line);
+    } catch (e) {
+        // Legacy bare "ok"; anything else is a shape we can't reason about.
+        return {
+            "kind": line === "ok" ? "ok" : "unknown",
+            "reason": ""
+        };
+    }
+    if (!d || typeof d !== "object")
+        return {
+            "kind": "unknown",
+            "reason": ""
+        };
+    let reason = typeof d.reason === "string" ? d.reason : "";
+    if (d.refused === true)
+        return {
+            "kind": "refused",
+            "reason": reason
+        };
+    if (d.status === "ok")
+        return {
+            "kind": "ok",
+            "reason": ""
+        };
+    return {
+        "kind": "error",
+        "reason": reason
+    };
+}
+
 function quitSteamGame(root, steamQuitReq, appid) {
     root.userActivity();
     // Fire the host-side graceful kill (fire-and-forget; reply is a status JSON).

@@ -274,16 +274,31 @@ FocusScope {
         onRequestFailed: console.log("HomeScreen: steam-bigpicture request failed (daemon down?)")
     }
 
-    // One-shot socket client for `steam-quit <appid>`. The reply (a status JSON) is
-    // logged on a non-ok status; the stream close doesn't gate on it (the host kill
-    // and the local stream-close race, like launchSteamGame).
+    // One-shot socket client for `steam-quit <appid>`. The stream close doesn't gate
+    // on the reply (the host kill and the local stream-close race, like
+    // launchSteamGame) — but a REFUSED quit has to reach the user. The host answers
+    // `refused: true` when it enumerated the real processes and matched none: the
+    // game was never actually running, which happens when a crashed Steam client
+    // leaves a stale `RunningAppID` behind and the shell badges a phantom as
+    // "Playing". That refusal used to arrive as a bare `{"status":"ok"}` and showed
+    // nothing — the original "Quit does nothing" report. Classification (incl. the
+    // `refused` FLAG vs the reason text) lives in steamLaunch.js so it's testable.
     SocketClient {
         id: steamQuitReq
         onResponseReceived: line => {
-            if (line.indexOf("\"status\":\"ok\"") === -1)
-                console.log("HomeScreen: steam-quit reply: " + line);
+            let r = SteamLaunch.classifyQuitReply(line);
+            if (r.kind === "ok")
+                return;
+            if (r.kind === "refused")
+                NotificationManager.info("steam", "Nothing to quit", r.reason || "The host reports that game isn't running.");
+            else if (r.kind === "error")
+                NotificationManager.warn("steam", "Quit failed", r.reason || "The host couldn't close that game.");
+            console.log("HomeScreen: steam-quit reply: " + line);
         }
-        onRequestFailed: console.log("HomeScreen: steam-quit request failed (daemon down?)")
+        onRequestFailed: {
+            NotificationManager.warn("steam", "Quit failed", "Couldn't reach the input daemon.");
+            console.log("HomeScreen: steam-quit request failed (daemon down?)");
+        }
     }
 
     function _focusFirstVisibleRow() {
