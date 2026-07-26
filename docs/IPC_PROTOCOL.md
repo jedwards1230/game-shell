@@ -1669,6 +1669,14 @@ working libcec adapter), the daemon:
 > Limitation: the cache reflects only traffic observed since the connection
 > opened, so a freshly-started daemon is deliberately conservative — it will not
 > standby a display until it has seen a claim.
+>
+> The same cache is **published read-only** on the HTTP bridge's `GET /status`
+> (`cec_display_ownership` + friends, see
+> [CONTROL_SURFACE.md](CONTROL_SURFACE.md)) so automation can see which input the
+> display is on. Note the fail-safe direction inverts for that consumer: for the
+> gate, "unknown" means "don't transmit"; for a suspend rule, "unknown" must
+> never be read as "nobody is watching". Every observed ownership change is
+> logged at `info` — that log is the timestamped history.
 
 When **disabled** (the default) the CEC actor still serves the manual `cec-*`
 commands, but performs **none** of the above — it never auto-drives the bus on

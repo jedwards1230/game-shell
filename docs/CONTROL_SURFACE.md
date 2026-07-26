@@ -70,10 +70,10 @@ Hardening: 4 KiB header cap, 5 s header timeout, 128 concurrent-connection cap
 > Note this is the *same* token as `[mcp]` (`[http].token_file` is shared), so
 > exposure of either surface exposes both.
 
-### `GET /status` — shell state for automation
+### `GET /status` — shell state + display ownership for automation
 
-Reports what the shell last pushed over [`shell-state`](IPC_PROTOCOL.md), plus a
-staleness verdict:
+Reports what the shell last pushed over [`shell-state`](IPC_PROTOCOL.md) plus a
+staleness verdict, and — from the CEC bus — who currently owns the display:
 
 ```json
 {
@@ -82,7 +82,15 @@ staleness verdict:
   "stale": false,
   "age_seconds": 2,
   "stale_after_seconds": 9,
-  "shell_running": true
+  "shell_running": true,
+
+  "cec_display_ownership": "owned_by_us",
+  "cec_display_owner": 4,
+  "cec_local_address": 4,
+  "cec_display_owner_changed_unix": 1770000000,
+  "cec_display_owner_held_seconds": 312,
+  "cec_display_owner_ever_observed": true,
+  "cec_display_owner_tracking": true
 }
 ```
 
@@ -104,6 +112,57 @@ implementation with `/dev/status`, so the two can never disagree. Together the
 two fields separate "shell is gone" (`shell_running: false`) from "shell is
 alive but silent" (`shell_running: true`, `stale: true`) — different faults with
 different fixes.
+
+#### CEC display ownership (`cec_*`)
+
+The shell fields say what this box is *rendering*; the `cec_*` fields say which
+input the *display* is showing. They answer different halves of "is anyone
+looking at this box?" — an app can sit in `appRunning` forever while the TV has
+been switched to another HDMI input — so a suspend rule generally wants both.
+
+Ownership is tracked **passively**: the daemon folds received `<Active Source>` /
+`<Inactive Source>` traffic into a cache (the same one that gates CEC transmits —
+see the display-ownership gate in [IPC_PROTOCOL.md](IPC_PROTOCOL.md)). Nothing is
+probed and nothing is transmitted to answer this route.
+
+| Field | Meaning |
+|---|---|
+| `cec_display_ownership` | `owned_by_us` \| `owned_by_other` \| `unknown` |
+| `cec_display_owner` | Owning device's CEC logical address, verbatim (`0` = TV, `5` = AVR, `4`/`8`/`11` = playback devices); `null` when nobody currently holds a claim |
+| `cec_local_address` | Our own CEC logical address; `null` when libcec can't tell us |
+| `cec_display_owner_changed_unix` | Unix seconds of the last ownership change; `null` if it never changed |
+| `cec_display_owner_held_seconds` | How long the current owner has held the display |
+| `cec_display_owner_ever_observed` | Whether a claim has EVER been received from the bus since daemon start |
+| `cec_display_owner_tracking` | Whether the daemon is listening at all |
+
+> ⚠️ **`unknown` does NOT mean "nobody is watching" — never suspend on it.** The
+> fail-safe direction here is the *opposite* of the transmit gate's. For a
+> transmit, "we don't own the display" means "don't touch the bus", which is
+> safe. For a suspend rule, treating "unknown" as "not focused" powers down a box
+> someone is actively watching. **`owned_by_other` is the only value that is
+> positive evidence somebody switched away from us.**
+
+`cec_display_owner_held_seconds` is **not** a staleness measure — unlike
+`age_seconds` it never invalidates the reading. CEC ownership is edge-driven with
+no heartbeat, so a claim observed six hours ago is still the current truth; a
+large value just means "unchanged for a while".
+
+Read `cec_display_owner_tracking` before drawing any conclusion from the rest.
+It separates three situations that would otherwise all look like
+`ever_observed: false`:
+
+| tracking | ever_observed | Means |
+|---|---|---|
+| `false` | `false` | Not listening: daemon built without `--features cec`, `[cec].lifecycle` disabled, or the adapter never opened. Every other field is a default, not an observation. |
+| `true` | `false` | Listening, and this bus has **never** announced an ownership change. |
+| `true` | `true` | Working — the values are real observations. |
+
+Ownership resets to `unknown` whenever the libcec connection is reopened after a
+transmit failure (claims broadcast while it was down were missed) and is
+`unknown` on a freshly started daemon until the bus announces something. Each
+observed change is logged at `info` (`cec: display ownership <a> -> <b> (...)`),
+so `journalctl -u tv-shell-input --grep 'display ownership'` is the timestamped
+history; the cache itself keeps only the current value and its change time.
 
 ### `POST /suspend` — put this machine to sleep
 

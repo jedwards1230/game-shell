@@ -61,6 +61,21 @@ config key), e.g. `RUST_LOG=tv_shell_input=debug tv-shell-input`. The
 `publish` chokepoint at `debug` is a full event tracer (intents, combos,
 `pad:*`, input-mode, controller-wake).
 
+**CEC display-ownership history** rides these logs. Every observed change of who
+owns the display is logged at `info` with `previous`/`current`/`source` fields —
+the cache published on `GET /status` keeps only the *current* owner and its
+change time, so the journal is the replayable history:
+
+```bash
+journalctl --user -u tv-shell-input --grep 'display ownership'
+```
+
+A run with no such lines and `cec_display_owner_tracking: true` on
+`GET /status` means the bus genuinely never broadcast `<Active Source>` — the
+one reading that distinguishes "correctly reports unknown" from "the receive
+callback never fires". See
+[CONTROL_SURFACE.md](CONTROL_SURFACE.md#cec-display-ownership-cec_).
+
 ---
 
 ## Metrics
