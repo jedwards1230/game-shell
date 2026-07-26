@@ -11,11 +11,12 @@
 //!                                                  game's page; user presses Play)
 //!   POST /open-bpm     (no body)  → { ok: true }  (opens Big Picture's HOME
 //!                                                  screen — no game selected)
-//!   POST /quit         { appid }  → { ok: true }  (gracefully terminates the
-//!                                                  running game — SIGTERM to its
-//!                                                  process group, like Steam's
-//!                                                  Stop; { ok: false } if not
-//!                                                  running)
+//!   POST /quit         { appid }  → { ok, appid, reason }  (gracefully terminates
+//!                                                  the running game — SIGTERM to
+//!                                                  its process group, like Steam's
+//!                                                  Stop; { ok: false, reason:
+//!                                                  "not running" } — still HTTP
+//!                                                  200 — when nothing matched)
 //!   POST /sleep        (no body)  → { ok, reason }  (suspends the host to RAM;
 //!                                                    REFUSED with { ok: false,
 //!                                                    reason } — still HTTP 200 —
@@ -49,7 +50,7 @@ use serde_json::json;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tv_shell_protocol::{
-    LaunchRequest, LibraryEntry, LibraryResponse, SleepResponse, StatusResponse,
+    LaunchRequest, LibraryEntry, LibraryResponse, QuitResponse, SleepResponse, StatusResponse,
 };
 
 /// Default listen port. Picked outside Sunshine/Moonlight's 47984–47990 range to
@@ -211,25 +212,37 @@ async fn open_bpm(
 /// `POST /quit` — gracefully terminate the running Steam game for `appid` (the
 /// equivalent of Steam's Stop button). Finds the game's `reaper` launcher process
 /// and sends SIGTERM to its process group so the whole game tree shuts down
-/// cleanly (graceful only — never SIGKILL). Returns `{ ok: true, appid }` when a
-/// matching process was signalled, `{ ok: false, appid, reason: "not running" }`
-/// when no such game is running (or the OS is unsupported). The `/proc` scan +
-/// signal run off the async reactor via `spawn_blocking`, matching `status()`.
+/// cleanly (graceful only — never SIGKILL). Returns `{ ok: true, appid, reason:
+/// null }` when a matching process was signalled, `{ ok: false, appid, reason:
+/// "not running" }` when no such game is running (or the OS is unsupported). The
+/// `/proc` scan + signal run off the async reactor via `spawn_blocking`, matching
+/// `status()`.
+///
+/// **"Nothing to quit" is an HTTP 200, not an error** — exactly like `/sleep`'s
+/// refusal: the body, not the status code, carries the decision. Serialized
+/// through the shared [`QuitResponse`] so the daemon deserializes the same
+/// contract and can surface the refusal instead of flattening it into "ok".
 async fn quit_game(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<LaunchRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<QuitResponse>, StatusCode> {
     authorize(&state, &headers)?;
     let appid = req.appid;
     let result = tokio::task::spawn_blocking(move || steam::quit(appid))
         .await
         .unwrap_or_else(|e| Err(anyhow::anyhow!("quit task panicked: {e}")));
     match result {
-        Ok(true) => Ok(Json(json!({ "ok": true, "appid": appid }))),
-        Ok(false) => Ok(Json(
-            json!({ "ok": false, "appid": appid, "reason": "not running" }),
-        )),
+        Ok(true) => Ok(Json(QuitResponse {
+            ok: true,
+            appid,
+            reason: None,
+        })),
+        Ok(false) => Ok(Json(QuitResponse {
+            ok: false,
+            appid,
+            reason: Some("not running".to_string()),
+        })),
         Err(e) => {
             tracing::warn!("quit {appid} failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)

@@ -4,7 +4,7 @@
 //! between `tv-shell-host` (the cross-platform sidecar that enumerates and
 //! launches Steam games on the gaming PC) and `tv-shell-input` (the daemon on
 //! the TV client that proxies `GET /library` / `POST /launch` / `GET /status` /
-//! `POST /sleep` for the QML shell). The daemon reaches the host over **HTTP on the LAN** — the
+//! `POST /quit` / `POST /sleep` for the QML shell). The daemon reaches the host over **HTTP on the LAN** — the
 //! host runs on a separate machine (the gaming PC; see `docs/HOST_SETUP.md`), so
 //! the daemon is an HTTP *client*, not a process supervisor: it does not spawn,
 //! health-restart, or otherwise manage the host's lifecycle. Both sides
@@ -81,6 +81,34 @@ pub struct StatusResponse {
     /// Whether a Moonlight/Sunshine stream is active on the host.
     #[serde(default)]
     pub streaming: bool,
+}
+
+/// Response body for `POST /quit` — the host's answer to a quit request.
+///
+/// Shaped like [`SleepResponse`] and for the same reason: the host answers HTTP
+/// **200** in both branches, so the body — not the status code — carries the
+/// decision. `ok: true` means a matching game process was found and signalled;
+/// `ok: false` means nothing was quit and `reason` says why (`"not running"`).
+/// Without this the daemon can't tell a refusal from a success, and a `steam-quit`
+/// against an already-dead game reports as if it worked.
+///
+/// `reason` is always serialized (as JSON `null` when the quit succeeded) so the
+/// shape is identical in both branches. All fields default so the daemon's parse
+/// survives a host that omits one — note the default is `ok: false`, i.e. an
+/// unreadable/partial body degrades to "nothing was quit", never to a false
+/// success.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct QuitResponse {
+    /// Whether a running game was actually found and signalled.
+    #[serde(default)]
+    pub ok: bool,
+    /// The appid the quit was requested for, echoed back.
+    #[serde(default)]
+    pub appid: u32,
+    /// Human-readable reason when `ok` is false (e.g. `"not running"`); `None`
+    /// (JSON `null`) when the game was signalled.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Response body for `POST /sleep` — the host's answer to a suspend request.
@@ -223,6 +251,47 @@ mod tests {
         // answered but told us nothing.
         let back: SleepResponse = serde_json::from_str("{}").unwrap();
         assert_eq!(back, SleepResponse::default());
+        assert!(!back.ok);
+        assert!(back.reason.is_none());
+    }
+
+    #[test]
+    fn quit_response_signalled_serializes_reason_null() {
+        // Like SleepResponse: `reason` is PRESENT as JSON null on the success
+        // path so a consumer binds one field in both branches.
+        let q = QuitResponse {
+            ok: true,
+            appid: 730,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&q).unwrap(),
+            r#"{"ok":true,"appid":730,"reason":null}"#
+        );
+    }
+
+    #[test]
+    fn quit_response_refusal_roundtrips() {
+        let q = QuitResponse {
+            ok: false,
+            appid: 252950,
+            reason: Some("not running".to_string()),
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(
+            json,
+            r#"{"ok":false,"appid":252950,"reason":"not running"}"#
+        );
+        let back: QuitResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(q, back);
+    }
+
+    #[test]
+    fn quit_response_defaults_on_missing_fields() {
+        // A `{}` body degrades to "nothing was quit" (ok defaults false) — a
+        // partial/unreadable body must never be read as a successful quit.
+        let back: QuitResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, QuitResponse::default());
         assert!(!back.ok);
         assert!(back.reason.is_none());
     }
