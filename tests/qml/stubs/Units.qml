@@ -5,6 +5,10 @@ import QtQuick
 // which reads Quickshell.screens for its grid unit. Fixed values here keep
 // layout assertions deterministic under offscreen. See tests/qml/README.md.
 Item {
+    // The real grid unit is screenHeight/40; PopoverMenu sizes its panel + rows
+    // off it. A fixed value keeps offscreen layout deterministic.
+    property int gridUnit: 27
+
     property int spacingXS: 3
     property int spacingSM: 6
     property int spacingMD: 12

@@ -45,9 +45,14 @@ cp "$shellc/IdleInhibitController.qml" "$build/components/"
 # tst_drawer pins the clip contract that keeps an overflowing child (the Resume
 # rail's third tile) from painting outside a closed drawer.
 cp "$shellc/Drawer.qml" "$build/components/"
+# PopoverMenu is pure QtQuick over Theme/Units only — headless-testable;
+# tst_popovermenu pins its disabled-item contract (an unavailable action stays
+# rendered + inert instead of vanishing from the menu).
+cp "$shellc/PopoverMenu.qml" "$build/components/"
 cat >>"$build/components/qmldir" <<'EOF'
 IdleInhibitController 1.0 IdleInhibitController.qml
 Drawer 1.0 Drawer.qml
+PopoverMenu 1.0 PopoverMenu.qml
 EOF
 cp "$shellc/lib/CountBadge.qml" "$build/components/lib/"
 # focusChain.js — the shared vertical-traversal helper imported by Widget.qml and

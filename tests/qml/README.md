@@ -67,8 +67,9 @@ dependency is probably missing from that list** (or its qmldir entry / stub
 property is absent).
 
 Currently covered: `QuickActions` (+ real `QuickActionButton`, `CountBadge`),
-`WidgetHost` (against the stub `WidgetRegistry` + stub widgets), and the widget
-config migrator `widgetConfig.js` (`tst_widgetmigrate.qml`).
+`WidgetHost` (against the stub `WidgetRegistry` + stub widgets), `PopoverMenu`
+(`tst_popovermenu.qml` — the disabled-item contract), and the widget config
+migrator `widgetConfig.js` (`tst_widgetmigrate.qml`).
 
 The migrator test imports the **real** `widgetConfig.js` by source path
 (`../../shell/widgets/lib/widgetConfig.js`, a pure `.pragma library` module) and

@@ -96,6 +96,11 @@ Widget {
     // The running Steam game's poster card (library view only) — the anchor for
     // HomeScreen's Resume/Quit popover. Null in the server view / when none runs.
     readonly property Item runningCard: _libraryView ? steamView.runningCard : null
+    // The Steam host the daemon currently has ACTIVE (`steam-set-host`), reported by
+    // the `steam-library` reply. HomeScreen matches it against `targets` to stream to
+    // the machine actually serving the library instead of a blind targets[0] — the
+    // two diverge on a dual-boot host. "" until the first reply / in the server view.
+    readonly property string activeSteamHost: _libraryView ? steamView.reportedHost : ""
     readonly property bool currentHasSession: (_serverView && serverRow.currentItem) ? serverRow.currentItem.hasActiveSession === true : false
     // Host reachable (ping). Used to gate the Resume/Quit stream controls: a
     // stream left running suspends in the background, and the Sunshine session

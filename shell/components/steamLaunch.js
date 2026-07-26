@@ -62,15 +62,46 @@ function launchOrResumeSteamLocal(root, execCmd) {
     root.launchApp(app);
 }
 
+// === Stream-target selection ===
+// The Steam host and the Moonlight stream target are TWO different addresses that
+// only usually coincide. `steam-launch`/`steam-quit` go to whichever sidecar the
+// daemon has active (`steam-set-host`), while the stream goes to a targets.json
+// entry — so blindly streaming `targets[0]` sends the video request to a machine
+// that may be powered off (the dual-boot case: the Steam library is served by the
+// Windows boot, targets[0] is the Linux boot). Match the target whose `host` IS the
+// active Steam host; fall back to targets[0] when nothing matches (single-host
+// setups, or a daemon too old to report the host). Returns null with no targets.
+function streamTargetFor(root) {
+    let ts = root.targets || [];
+    if (ts.length === 0)
+        return null;
+    let active = root.activeSteamHost || "";
+    if (active !== "") {
+        for (let i = 0; i < ts.length; i++) {
+            if ((ts[i].host || "") === active)
+                return ts[i];
+        }
+    }
+    return ts[0];
+}
+
+// Whether a "get me onto the screen" action (Resume / Open Steam) can actually
+// land: either this client is already in the stream (the host-side navigate alone
+// moves the live session), or there's a target to stream to. Drives the popover's
+// disabled-with-a-reason Resume row as well as the launch paths below.
+function canStream(root) {
+    return root.shellState === "streaming" || streamTargetFor(root) !== null;
+}
+
 // === Steam launch choreography ===
 // Select a Steam card →
 //   1. `steam-launch <appid>` → the host NAVIGATES Big Picture to that game's page
 //      (it no longer launches the game directly — just moves BPM).
 //   2. If THIS client is NOT already viewing a stream (`shellState !== "streaming"`)
-//      → start one stream to the primary target (targets[0]). Moonlight RESUMES a
-//      host that already has a session, so this both opens a fresh stream and
-//      reconnects to a resumable one — selecting a game must ALWAYS get you onto the
-//      screen.
+//      → start one stream to the ACTIVE Steam host's target (streamTargetFor, NOT a
+//      blind targets[0]). Moonlight RESUMES a host that already has a session, so
+//      this both opens a fresh stream and reconnects to a resumable one — selecting a
+//      game must ALWAYS get you onto the screen.
 //   3. If this client IS already streaming → the nav alone moved the live BPM; don't
 //      launch a 2nd local Moonlight process.
 // The gate is THIS client's own `shellState`, NOT the host's session flag
@@ -87,13 +118,14 @@ function launchSteamGame(root, steamLaunchReq, appid) {
         // Don't start a 2nd local Moonlight process.
         return;
     }
-    // Not viewing a stream here → start/resume one to the primary target. With no
-    // target configured there's nothing to stream into; the nav still fired.
-    let ts = root.targets || [];
-    if (ts.length > 0)
-        root.streamRequested(ts[0]);
+    // Not viewing a stream here → start/resume one to the ACTIVE Steam host's
+    // target. With no target configured there's nothing to stream into; the nav
+    // still fired, so say so on screen rather than only in the log.
+    let t = streamTargetFor(root);
+    if (t)
+        root.streamRequested(t);
     else
-        console.log("HomeScreen: steam-launch " + appid + " sent, but no stream target configured");
+        root.notifyNoStreamTarget();
 }
 
 // === Open Steam Big Picture (home) choreography ===
@@ -101,9 +133,9 @@ function launchSteamGame(root, steamLaunchReq, appid) {
 //   1. `steam-bigpicture` (no appid) → the host RESETS Big Picture to its HOME screen
 //      (fires `steam://open/bigpicture`; no game pre-selected).
 //   2. If THIS client is NOT already viewing a stream (`shellState !== "streaming"`)
-//      → start/resume one stream to the primary target (targets[0]) — Moonlight
-//      resumes a resumable host, so this both opens a fresh stream and reconnects to
-//      one already live elsewhere.
+//      → start/resume one stream to the ACTIVE Steam host's target (streamTargetFor)
+//      — Moonlight resumes a resumable host, so this both opens a fresh stream and
+//      reconnects to one already live elsewhere.
 //   3. If this client IS already streaming → the host-side BPM-home reset alone moved
 //      the live session; don't start a 2nd local Moonlight process.
 // Mirrors launchSteamGame() exactly (same one-session guard / stream path) but sends
@@ -118,13 +150,14 @@ function launchSteamBigPicture(root, steamBigPictureReq) {
         // Don't start a 2nd local Moonlight process.
         return;
     }
-    // Not viewing a stream here → start/resume one to the primary target. With no
-    // target configured there's nothing to stream into; the reset still fired.
-    let ts = root.targets || [];
-    if (ts.length > 0)
-        root.streamRequested(ts[0]);
+    // Not viewing a stream here → start/resume one to the ACTIVE Steam host's
+    // target. With no target configured there's nothing to stream into; the reset
+    // still fired, so say so on screen rather than only in the log.
+    let t = streamTargetFor(root);
+    if (t)
+        root.streamRequested(t);
     else
-        console.log("HomeScreen: steam-bigpicture sent, but no stream target configured");
+        root.notifyNoStreamTarget();
 }
 
 // === Quit running Steam game choreography ===
@@ -132,19 +165,66 @@ function launchSteamBigPicture(root, steamBigPictureReq) {
 //   1. `steam-quit <appid>` → the host gracefully terminates the running game
 //      (SIGTERM to its process group — like Steam's Stop button). Fire-and-forget;
 //      the reply is a status JSON (logged only on non-ok).
-//   2. Close THIS client's Moonlight stream via the existing
-//      streamQuitRequested(targets[0]) path (same teardown the Moonlight "Quit
-//      Stream" action uses).
+//   2. Close THIS client's Moonlight stream via the existing streamQuitRequested
+//      path (same teardown the Moonlight "Quit Stream" action uses), aimed at the
+//      ACTIVE Steam host's target like the launch paths.
 // The two race exactly like launchSteamGame's navigate+stream — the host kill and the
-// local stream-close are independent.
+// local stream-close are independent. Step 1 is the ONLY step that matters to the
+// user, and it needs no stream target at all — which is why Quit is offered
+// unconditionally while Resume is gated (see HomeScreen._steamGameContext).
+// Classify a `steam-quit` reply line into { kind, reason }:
+//   "ok"      — the host killed the game; nothing to tell the user.
+//   "refused" — the host enumerated the real processes and matched NONE, i.e. the
+//               game was never running. Happens when a crashed Steam client leaves
+//               a stale `RunningAppID` behind and the shell badges a phantom as
+//               "Playing". This is the case that used to arrive as a bare
+//               `{"status":"ok"}` and showed nothing — "Quit does nothing".
+//   "error"   — any other non-ok reply.
+//   "unknown" — unparseable (an older daemon answering a bare, non-JSON string).
+// Branch on the `refused` FLAG the daemon sets, never on the reason text.
+function classifyQuitReply(line) {
+    let d = null;
+    try {
+        d = JSON.parse(line);
+    } catch (e) {
+        // Legacy bare "ok"; anything else is a shape we can't reason about.
+        return {
+            "kind": line === "ok" ? "ok" : "unknown",
+            "reason": ""
+        };
+    }
+    if (!d || typeof d !== "object")
+        return {
+            "kind": "unknown",
+            "reason": ""
+        };
+    let reason = typeof d.reason === "string" ? d.reason : "";
+    if (d.refused === true)
+        return {
+            "kind": "refused",
+            "reason": reason
+        };
+    if (d.status === "ok")
+        return {
+            "kind": "ok",
+            "reason": ""
+        };
+    return {
+        "kind": "error",
+        "reason": reason
+    };
+}
+
 function quitSteamGame(root, steamQuitReq, appid) {
     root.userActivity();
     // Fire the host-side graceful kill (fire-and-forget; reply is a status JSON).
     steamQuitReq.request("steam-quit", appid);
-    // Close the local Moonlight stream to the primary target, if one is configured.
-    let ts = root.targets || [];
-    if (ts.length > 0)
-        root.streamQuitRequested(ts[0]);
+    // Close the local Moonlight stream, if there's a target to close. No target is
+    // NOT a failure here (the kill already fired and there's no stream to tear
+    // down), so this stays a log — nothing to tell the user.
+    let t = streamTargetFor(root);
+    if (t)
+        root.streamQuitRequested(t);
     else
-        console.log("HomeScreen: steam-quit " + appid + " sent, but no stream target configured");
+        console.log("HomeScreen: steam-quit " + appid + " sent; no stream target to close");
 }

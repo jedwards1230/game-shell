@@ -22,6 +22,9 @@ Item {
     property int cardWidth: 200
     property int cardHeight: 120
     property int cardSpacing: 16
+    // Panel geometry read by PopoverMenu (radius + edge clamp).
+    property int cardRadius: 14
+    property int padding: 28
 
     // Row/font metrics the widget-contract components bind (tst_widgetcontract).
     property int rowHeight: 140

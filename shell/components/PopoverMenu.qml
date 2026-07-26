@@ -4,9 +4,12 @@ import QtQuick.Layouts
 FocusScope {
     id: root
 
-    // Each action: { label, action, secondaryAction? }. `action` fires on A/Return
-    // (and closes); optional `secondaryAction` fires on the X face and keeps the
-    // menu open (e.g. "set default" without dismissing).
+    // Each action: { label, action, secondaryAction?, enabled? }. `action` fires on
+    // A/Return (and closes); optional `secondaryAction` fires on the X face and keeps
+    // the menu open (e.g. "set default" without dismissing). `enabled: false` renders
+    // the row muted and makes A a no-op that KEEPS the menu open — an unavailable
+    // action stays visible (and stays selectable, so its `hint` can say why) instead
+    // of silently vanishing from the menu.
     property var actions: []
     property bool opened: false
 
@@ -99,13 +102,15 @@ FocusScope {
                         text: modelData.label
                         font.pixelSize: Theme.fontSmall
                         font.bold: index === root._selectedIndex
-                        color: Theme.textPrimary
+                        // Muted label = the disabled affordance (same treatment a
+                        // locked SteamCard's title gets).
+                        color: modelData.enabled === false ? Theme.textMuted : Theme.textPrimary
                     }
 
                     MouseArea {
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
+                        cursorShape: modelData.enabled === false ? Qt.ArrowCursor : Qt.PointingHandCursor
                         onEntered: root._selectedIndex = index
                         onClicked: root._activateItem(index)
                     }
@@ -128,6 +133,10 @@ FocusScope {
     }
 
     function _activateItem(idx) {
+        // A disabled item is a deliberate no-op that KEEPS the menu open, so its
+        // `hint` (the reason it's unavailable) stays on screen.
+        if (idx >= 0 && idx < actions.length && actions[idx] && actions[idx].enabled === false)
+            return;
         if (idx >= 0 && idx < actions.length && actions[idx].action)
             actions[idx].action();
         root.closed();
