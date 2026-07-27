@@ -66,6 +66,7 @@ hand-formats config JSON; the old per-call `python3 -c` socket shims are gone.
 | `shell_state.rs` | Shell-reported UI state cache: the `shell-state` push (state string + `media_playing`, stamped with a receipt time) plus the pure staleness predicate behind `GET /status`. The daemon cannot observe this — only the shell knows it. **Reports, never decides**: no `busy` boolean, so the suspend policy lives in the consumer. Cross-platform |
 | `http.rs` | LAN HTTP/1.1 control bridge (`[http].bind`) — `POST /intent`, `POST /key`, `GET /screenshot`, `GET /status`, `POST /suspend`, `/dev/*` |
 | `mcp.rs` | MCP server (`[mcp].bind`, `--features mcp`) — 14 tools over streamable-HTTP at `/mcp` |
+| `mqtt.rs` | MQTT state publisher + command surface (`[mqtt].broker`). Its OWN broker connection, so it carries its OWN Last Will; retained state on `tv-shell/<device_id>/state`, HA discovery, and `tv-shell/<device_id>/cmd/+` commands. Cross-platform (deliberately **not** OS-gated) |
 | `ipc.rs` | Unix-socket server, `broadcast` event fan-out, D-Bus command routing |
 | `main.rs` | Runtime wiring + signals + D-Bus actor spawn |
 
@@ -211,6 +212,29 @@ bearer token and a single action core (`bridge_core.rs`):
 Both are unset (closed) by default. Auth, endpoint/tool reference, env vars, and
 security posture: **[`docs/CONTROL_SURFACE.md`](../docs/CONTROL_SURFACE.md)**.
 `scripts/build-daemon.sh` defaults to `--features cec,mcp`.
+
+### MQTT (`mqtt.rs`, `[mqtt].broker`)
+
+A third surface, and the only **outbound** one: the daemon dials the broker
+rather than listening. It publishes retained state to `tv-shell/<device_id>/state`
+plus a Home Assistant discovery document, and subscribes to
+`tv-shell/<device_id>/cmd/+` (`suspend`, `home`/`menu`/`settings`,
+`restart-shell`). Three properties are load-bearing:
+
+- **Its own connection ⇒ its own Last Will.** Availability is a fact the broker
+  asserts, not something a consumer probes for.
+- **`device_id` is explicit, never derived** — startup FAILS if `[mqtt].broker`
+  is set without it (deriving from hostname/OS would split one dual-boot machine
+  into two Home Assistant devices).
+- **Emit-on-change plus a ~30 s floor heartbeat**, so `published_at`/`seq` always
+  advance. That floor is the only signal that catches a half-open socket, where
+  the client keeps "publishing" into a dead connection whose Last Will already
+  fired. System metrics are excluded from change detection on purpose — CPU%
+  moves constantly and would publish every tick.
+
+There is **no config-reload path**: any `[mqtt]` change, credential rotation
+included, needs a daemon restart (which hands the CEC adapter to whatever grabs
+it next). Rotation is outage-adjacent, not a config edit.
 
 ## Build & test
 

@@ -17,7 +17,7 @@
 // modules aren't dead-code on non-Linux hosts where `main` is cfg-excluded.)
 #[cfg(target_os = "linux")]
 use tv_shell_input::{
-    bluetooth, display_owner, http, hyprland, input, ipc, network, power, protocol, session,
+    bluetooth, display_owner, http, hyprland, input, ipc, mqtt, network, power, protocol, session,
     session_env, shell_state, state, watch, wol,
 };
 
@@ -318,6 +318,58 @@ fn main() -> anyhow::Result<()> {
                 Ok(None) => {}
                 Err(e) => tracing::warn!("{e}"),
             }
+        }
+
+        // MQTT state publisher + command surface: opt-in via [mqtt].broker in
+        // config.toml. Absent ⇒ no connection is attempted and no discovery is
+        // published. validate() already parsed the URL, resolved the identity,
+        // and vetted the password file at startup (aborting on any of them), so
+        // these resolves are Ok by construction — still matched defensively,
+        // exactly as the HTTP bridge block above does.
+        match (
+            daemon_cfg.mqtt_endpoint(),
+            daemon_cfg.mqtt_device_id(),
+            daemon_cfg.mqtt_password(),
+        ) {
+            (Ok(Some(endpoint)), Ok(Some(device_id)), Ok(password)) => {
+                // A CA certificate is public and read here rather than at
+                // validate() time: an unreadable one degrades to platform roots
+                // with a warning. It must never abort the daemon.
+                let ca_pem =
+                    daemon_cfg
+                        .mqtt_ca_path()
+                        .and_then(|path| match std::fs::read(&path) {
+                            Ok(pem) => Some(pem),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "mqtt: cannot read [mqtt].ca_file {}: {e} — falling back to \
+                                 the platform trust store",
+                                    path.display()
+                                );
+                                None
+                            }
+                        });
+                let settings = mqtt::MqttSettings {
+                    device_id,
+                    endpoint,
+                    ca_pem,
+                    username: daemon_cfg.mqtt.username.clone(),
+                    password,
+                    heartbeat: std::time::Duration::from_secs(daemon_cfg.mqtt.heartbeat_secs),
+                    keepalive: std::time::Duration::from_secs(daemon_cfg.mqtt.keepalive_secs),
+                };
+                tokio::spawn(mqtt::run(
+                    settings,
+                    ui_state.clone(),
+                    Arc::clone(&display_owner),
+                    control_tx.clone(),
+                    dbus.clone(),
+                    Arc::clone(&metrics),
+                    shutdown.clone(),
+                ));
+            }
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => tracing::warn!("{e}"),
+            _ => {}
         }
 
         tokio::select! {

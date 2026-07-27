@@ -83,6 +83,14 @@ pub mod bridge_core;
 // LAN HTTP control bridge — cross-platform (tokio only; no Linux-only imports).
 pub mod http;
 
+// MQTT state publisher + command surface. DELIBERATELY NOT `cfg`-gated, unlike
+// `power`/`network`/`session`/`input`/`hyprland`: gating it on Linux would drop
+// it from macOS `cargo test` coverage, and it is pure tokio + rumqttc over
+// cross-platform helpers (`ipc::dispatch_dbus` — whose non-Linux stub replies
+// `error:unsupported on this platform` — plus `bridge_core`, `shell_state`,
+// `display_owner`). Gate at the CALL SITE (main.rs) if that ever changes.
+pub mod mqtt;
+
 // MCP server (rmcp 1.7.0): opt-in via `--features mcp`. Linux-gated AND
 // feature-gated so the default build (macOS dev boxes, CI default leg) never
 // links rmcp or axum.

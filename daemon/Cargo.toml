@@ -114,6 +114,32 @@ axum = { version = "0.8", optional = true }
 # unifies them to the single resolved copy (1.2.1 in the lockfile).
 schemars = { version = "1", optional = true }
 
+# MQTT client (mqtt.rs): the daemon opens its OWN broker connection so it
+# carries its OWN Last Will — availability is then a fact the broker asserts,
+# not something a consumer has to probe for.
+#
+# `default-features = false` + `use-rustls-no-provider` is load-bearing, NOT a
+# size optimisation. rumqttc's DEFAULT feature is `use-rustls`, which is
+# `use-rustls-no-provider + tokio-rustls/default` — and tokio-rustls's default
+# crypto provider is `aws-lc-rs`, a C + cmake build dependency. Pulling that in
+# would break this crate's C-free default-build invariant (the same invariant
+# that keeps `cec` behind a feature gate and picks pure-Rust evdev/zbus/bluer),
+# and would put a second crypto provider in a graph that is already unified on
+# `ring` via reqwest's `rustls-tls`. Two registered providers is also a runtime
+# hazard: `CryptoProvider::install_default()` becomes ambiguous.
+#
+# `no-provider` means rumqttc installs nothing, so mqtt.rs installs `ring`
+# itself exactly once before building any TLS config (see `install_crypto_provider`).
+# Verify with: cargo tree -p tv-shell-input -i aws-lc-rs   (must find nothing)
+#              cargo tree -p tv-shell-input -i ring        (must find exactly one)
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
+# Declared directly (not just transitively through rumqttc) so the `ring`
+# provider feature is switched on explicitly and `rustls::crypto::ring` is in
+# scope for the one-time install. `default-features = false` keeps `aws-lc-rs`
+# (rustls's own default provider) out of the graph; the enabled set mirrors what
+# reqwest's `rustls-tls` already resolves to, so Cargo unifies them to one copy.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
 # evdev/uinput are Linux kernel interfaces. Keep them off non-Linux hosts so
 # the pure-logic modules (protocol, config, device GUID math) still compile and
 # `cargo test` runs on a macOS/dev box. The full binary only links on Linux.
