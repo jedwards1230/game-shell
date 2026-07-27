@@ -82,22 +82,41 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(DEFAULT_PORT);
     let bind = tv_shell_protocol::brand::env("HOST_BIND").unwrap_or_else(|| "0.0.0.0".to_string());
 
-    // Resolve the MQTT configuration BEFORE serving. A misconfigured device that
-    // silently runs without MQTT is exactly the failure this design removes, so a
-    // bad config is a startup error and a non-zero exit — but a *valid* config
-    // never blocks or fails HTTP startup: the actor is spawned fire-and-forget.
+    // Resolve the MQTT configuration before serving — but NEVER let it stop the
+    // HTTP listener coming up.
+    //
+    // MQTT is additive: the QML shell's Steam widget depends on the HTTP routes
+    // below, and a typo in an MQTT env var must not break the TV's Steam row. On
+    // Windows these arrive through per-user `win_environment` variables, the
+    // fiddliest config channel in the design and the one most likely to carry a
+    // typo — so the cost of that typo is "no MQTT device in Home Assistant", not
+    // a dead sidecar with the cause in an unrelated subsystem.
+    //
+    // This keeps the §3 fail-closed rule intact: it constrains what we PUBLISH
+    // (never invent a device identity), not whether an unrelated listener binds.
+    // A missing device_id still refuses to publish; it just no longer takes HTTP
+    // down with it.
     match mqtt::settings_from_env() {
-        Err(e) => {
-            tracing::error!("MQTT configuration error: {e}");
-            return Err(anyhow::anyhow!("MQTT configuration error: {e}"));
-        }
-        Ok(None) => tracing::info!("MQTT disabled (TV_SHELL_MQTT_BROKER unset)"),
         Ok(Some(settings)) => {
-            // Read the CA here rather than inside the actor: an unreadable bundle
-            // must fail startup, not silently fall back to the platform roots.
-            let ca = mqtt::load_ca(settings.ca_file.as_deref()).await?;
+            // An unreadable CA degrades to the platform trust store rather than
+            // disabling MQTT. That store is now the NORMAL path — the broker
+            // presents a publicly-trusted certificate — so `ca_file` is only for
+            // a private CA.
+            let ca = match mqtt::load_ca(settings.ca_file.as_deref()).await {
+                Ok(ca) => ca,
+                Err(e) => {
+                    tracing::warn!("MQTT: {e} — falling back to the platform trust store");
+                    None
+                }
+            };
             tokio::spawn(mqtt::run(settings, ca));
         }
+        Ok(None) => tracing::info!("MQTT disabled (TV_SHELL_MQTT_BROKER unset)"),
+        Err(e) => tracing::error!(
+            "MQTT DISABLED — configuration error: {e}. The sidecar is starting \
+             normally without it and every HTTP route below still serves. Fix the \
+             TV_SHELL_MQTT_* environment and restart to publish to Home Assistant."
+        ),
     }
 
     let state = Arc::new(AppState { token });

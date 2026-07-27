@@ -583,7 +583,12 @@ async fn publish_loop(
 /// Publish the retained discovery document + the `online` birth message and
 /// (re)subscribe to the command topics. Run on every ConnAck.
 async fn announce(client: &AsyncClient, device_id: &DeviceId) -> anyhow::Result<()> {
-    let discovery = serde_json::to_vec(&shell_discovery(device_id, env!("CARGO_PKG_VERSION")))
+    // No version argument on purpose: a software version in the RETAINED
+    // discovery document would rewrite it on every release, and on the desktop
+    // (whose two boots update independently) on every OS switch. The running
+    // version is published as a `daemon_version` diagnostic ENTITY from the
+    // state payload instead — see `ShellSnapshot::version`.
+    let discovery = serde_json::to_vec(&shell_discovery(device_id))
         .map_err(|e| anyhow::anyhow!("serialising the discovery document: {e}"))?;
     client
         .publish(

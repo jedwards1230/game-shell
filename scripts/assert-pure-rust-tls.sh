@@ -2,12 +2,26 @@
 #
 # Fail the build if a C-backed TLS/crypto crate enters the dependency graph.
 #
-# WHY THIS EXISTS
-# ---------------
+# WHAT "PURE RUST" MEANS HERE — read this before trusting the filename
+# ---------------------------------------------------------------------
 # Every TLS user in this workspace is meant to resolve to **rustls with the
-# `ring` provider** — pure Rust, no cmake, no C compiler, no system OpenSSL.
-# That is what lets `host/` cross-compile clean for Windows and macOS, and what
-# keeps the daemon's default build free of system C libraries.
+# `ring` provider**.
+#
+# `ring` is NOT literally pure Rust: it ships some C and pre-generated assembly
+# compiled through `cc`. So the honest invariant is narrower than the script's
+# name suggests, and worth stating precisely rather than leaving a comment that
+# the next person discovers is false:
+#
+#   * no cmake
+#   * no system TLS library (no OpenSSL, no platform TLS stack as the provider)
+#   * no build-time dependency beyond the C toolchain every target already has
+#
+# `aws-lc-rs` — rustls' other provider — is strictly worse on exactly that axis:
+# it wants cmake and a fuller C build environment. That is the whole reason the
+# feature selection exists, and what this gate protects.
+#
+# The practical payoff: `host/` cross-compiles clean for Windows and macOS, and
+# the daemon's default build pulls in no system C *libraries*.
 #
 # Nothing enforced it. `host.yml` runs fmt/clippy/build/test and no dependency
 # check at all; the only `ldd` assertion lives in `rust.yml`, applies to the
@@ -46,7 +60,7 @@ set -euo pipefail
 # `cargo tree -i <crate>` exits 0 when the crate IS in the graph, so the check
 # is inverted: success is the failure condition.
 BANNED=(
-  aws-lc-rs   # rustls' non-ring provider: needs cmake + a C compiler
+  aws-lc-rs   # rustls' other provider: wants cmake + a fuller C build env
   aws-lc-sys  # its -sys half, in case only the lower crate is pulled
   native-tls  # would bind OpenSSL/Schannel/Security.framework as a TLS stack
   openssl-sys # any path to system OpenSSL at all
@@ -57,7 +71,7 @@ if [ ${#args[@]} -eq 0 ]; then
   args=(--workspace)
 fi
 
-echo "Asserting no C-backed TLS/crypto crate in: cargo tree ${args[*]}"
+echo "Asserting no cmake/system-TLS crypto crate in: cargo tree ${args[*]}"
 
 failed=0
 for crate in "${BANNED[@]}"; do
@@ -82,11 +96,11 @@ done
 if [ "$failed" -ne 0 ]; then
   cat >&2 <<'EOF'
 
-A C-backed TLS/crypto crate reached the dependency graph.
+A cmake/system-TLS crypto crate reached the dependency graph.
 
-This breaks the pure-Rust invariant that lets host/ cross-compile for Windows
-and macOS with no system toolchain. The usual cause is a dependency pulling
-rustls through its DEFAULT features (which select the aws-lc-rs provider).
+This breaks the invariant that lets host/ cross-compile for Windows and macOS
+without cmake or a system TLS library. The usual cause is a dependency pulling
+rustls through its DEFAULT features, which select the aws-lc-rs provider.
 
 Fix it at the dependency, not here — for example:
 
@@ -98,4 +112,4 @@ EOF
   exit 1
 fi
 
-echo "OK: TLS/crypto graph is pure Rust (rustls + ring)."
+echo "OK: TLS/crypto graph resolves to rustls + ring (no cmake, no system TLS)."
