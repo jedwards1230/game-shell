@@ -404,14 +404,33 @@ pub struct DeviceDiscovery {
     pub cmps: BTreeMap<String, Component>,
     /// Shared state topic for every component.
     pub state_topic: String,
-    /// Shared availability topic (the publisher's LWT topic).
-    pub availability_topic: String,
-    /// Payload meaning "available" on `availability_topic`.
-    pub payload_available: String,
-    /// Payload meaning "not available" on `availability_topic`.
-    pub payload_not_available: String,
+    /// Shared availability, as a **list** — see [`AvailabilityEntry`].
+    ///
+    /// Home Assistant's device-based discovery accepts `availability` (the list
+    /// form) as a shared root option; it does **not** accept `availability_topic`
+    /// there. Unknown root keys are silently *ignored*, not rejected, so the
+    /// wrong spelling parses cleanly, registers every entity, and leaves them
+    /// permanently "available" — the LWT would fire and nothing in Home
+    /// Assistant would change. Independent per-process connections exist
+    /// precisely so availability is a fact rather than a probe result, so this
+    /// has to be the form HA actually reads.
+    pub availability: Vec<AvailabilityEntry>,
     /// QoS for the shared subscriptions.
     pub qos: u8,
+}
+
+/// One entry in the shared `availability` list.
+///
+/// `payload_available` / `payload_not_available` are only meaningful *inside*
+/// an entry — at the document root they are unknown keys and are ignored.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AvailabilityEntry {
+    /// The retained LWT topic: `tv-shell/<device_id>/avail`.
+    pub topic: String,
+    /// Payload meaning "available". Matches HA's default, sent explicitly.
+    pub payload_available: String,
+    /// Payload meaning "not available". Matches HA's default, sent explicitly.
+    pub payload_not_available: String,
 }
 
 /// The Home Assistant device record.
@@ -673,9 +692,11 @@ fn base_discovery(
         },
         cmps,
         state_topic: device_id.state_topic(),
-        availability_topic: device_id.avail_topic(),
-        payload_available: AVAIL_ONLINE.to_string(),
-        payload_not_available: AVAIL_OFFLINE.to_string(),
+        availability: vec![AvailabilityEntry {
+            topic: device_id.avail_topic(),
+            payload_available: AVAIL_ONLINE.to_string(),
+            payload_not_available: AVAIL_OFFLINE.to_string(),
+        }],
         qos: 0,
     }
 }
@@ -1156,10 +1177,42 @@ mod tests {
         assert_eq!(doc.o.name, "tv-shell");
         assert_eq!(doc.o.sw_version.as_deref(), Some("0.1.0"));
         assert_eq!(doc.state_topic, "tv-shell/htpc-1/state");
-        assert_eq!(doc.availability_topic, "tv-shell/htpc-1/avail");
-        assert_eq!(doc.payload_available, "online");
-        assert_eq!(doc.payload_not_available, "offline");
+        assert_eq!(doc.availability.len(), 1);
+        assert_eq!(doc.availability[0].topic, "tv-shell/htpc-1/avail");
+        assert_eq!(doc.availability[0].payload_available, "online");
+        assert_eq!(doc.availability[0].payload_not_available, "offline");
         assert_eq!(doc.qos, 0);
+    }
+
+    /// Availability must serialise as the LIST form Home Assistant actually
+    /// reads at the root of a device-based discovery document.
+    ///
+    /// `availability_topic` at the root is an *unknown key*, and HA ignores
+    /// unknown keys rather than rejecting them — so the wrong spelling would
+    /// register every entity and leave them permanently "available", with the
+    /// LWT firing to no visible effect. That failure is invisible without a live
+    /// broker and a live Home Assistant, which is exactly why it is pinned here.
+    #[test]
+    fn availability_serialises_as_the_list_form_ha_reads() {
+        for doc in [
+            shell_discovery(&id("htpc-1"), "0.1.0"),
+            host_discovery(&id("desktop"), "0.1.0"),
+        ] {
+            let json = serde_json::to_string(&doc).unwrap();
+            assert!(json.contains(r#""availability":[{"topic":""#), "{json}");
+            assert!(
+                !json.contains(r#""availability_topic""#),
+                "root availability_topic is silently ignored by HA: {json}"
+            );
+            // The payload keys are legal ONLY inside an entry, so they must
+            // never appear as siblings of "availability" at the root.
+            assert!(
+                !json.contains(
+                    r#","payload_available":"online","payload_not_available":"offline","qos""#
+                ),
+                "payload_* leaked to the document root: {json}"
+            );
+        }
     }
 
     #[test]
