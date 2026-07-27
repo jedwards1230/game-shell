@@ -9,6 +9,15 @@
 # container, so the only things this host needs are `docker` and `cargo` — no
 # mosquitto-clients install, no port-forward gymnastics.
 #
+# It runs that lifecycle under its OWN compose project and its OWN published
+# port. Compose derives the project name from the compose file's DIRECTORY
+# (dev/mqtt -> project `mqtt`), so in CI — where the workflow already started
+# that project — an unqualified `up -d --wait` here would silently adopt the
+# job's container and the EXIT trap's `down -v` would then destroy it. Two
+# things break when it does: this script is no longer running against the fresh
+# broker it claims to, and the workflow's `if: failure()` "Broker logs" step
+# finds nothing left to dump, exactly when it is needed most.
+#
 # What it proves, in order:
 #   1. the built binary actually contains the MQTT code (so silence is
 #      attributable — a build without MQTT publishes nothing, which reads
@@ -27,7 +36,7 @@
 #
 #   ./scripts/mqtt-smoke-test.sh
 #
-# Override the broker's published port when 1883 is taken locally:
+# Override the broker's published port when the default 18831 is taken locally:
 #
 #   TV_SHELL_MQTT_PORT=18830 ./scripts/mqtt-smoke-test.sh
 #
@@ -42,7 +51,26 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 COMPOSE_FILE="dev/mqtt/compose.yaml"
-BROKER_PORT="${TV_SHELL_MQTT_PORT:-1883}"
+
+# A dedicated compose project AND a dedicated published port, so `up`/`down`/
+# `exec` here can only ever touch THIS script's stack. Load-bearing, not
+# tidiness — see the header for what breaks without it.
+#
+# One source of truth: the explicit `-p` on every compose invocation below,
+# mirrored into COMPOSE_PROJECT_NAME so any compose call added later inherits
+# it too. Two independent names would let an override move the `-p` while the
+# run header still reported the old one.
+COMPOSE_PROJECT="${TV_SHELL_SMOKE_PROJECT:-mqtt-smoke}"
+export COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT"
+
+# The port default moves off 1883 so sharing the host port with an outer job's
+# broker can't fail the `up` on a bind collision. Only the PUBLISHED port
+# changes — the container-internal listener stays 1883, so the in-container
+# mosquitto_sub / mosquitto_pub calls below are unaffected; only the URL handed
+# to the host binary follows this value. Exported so the compose file's
+# `${TV_SHELL_MQTT_PORT:-1883}` publishes the same port we connect to.
+BROKER_PORT="${TV_SHELL_MQTT_PORT:-18831}"
+export TV_SHELL_MQTT_PORT="$BROKER_PORT"
 # Distinct high port: the host binds an axum listener and a bind failure EXITS
 # the process, which would present as "MQTT never published".
 HOST_HTTP_PORT="${TV_SHELL_SMOKE_HTTP_PORT:-47908}"
@@ -63,10 +91,17 @@ AVAIL_TOPIC="tv-shell/${DEVICE_ID}/avail"
 STATE_TOPIC="tv-shell/${DEVICE_ID}/state"
 CANARY_TOPIC="tv-shell/${DEVICE_ID}/canary"
 
-BIN="target/debug/tv-shell-host"
+# Honour CARGO_TARGET_DIR: with it set, `cargo build` writes elsewhere and a
+# hardcoded `target/` would test a STALE binary (or none at all).
+BIN="${CARGO_TARGET_DIR:-target}/debug/tv-shell-host"
 WORKDIR="$(mktemp -d)"
 LIVE="$WORKDIR/live.log"
 RETAINED="$WORKDIR/retained.log"
+# mosquitto_sub's stderr is kept OUT of the capture files: a broker warning
+# folded into the payload stream is a line that `grep -c ''` counts as a
+# delivered message.
+LIVE_ERR="$WORKDIR/live.err"
+RETAINED_ERR="$WORKDIR/retained.err"
 HOST_PID=""
 SUB_PID=""
 BROKER_UP=0
@@ -83,6 +118,17 @@ fail() {
     printf -- '--- retained-replay capture (format: "<retain> <topic>") ---\n' >&2
     cat "$RETAINED" >&2
   fi
+  # Kept separate from the captures above so they can never be counted as
+  # messages — but still dumped, because a subscriber's stderr is often the
+  # reason the capture is empty.
+  if [ -s "$LIVE_ERR" ]; then
+    printf -- '--- live subscriber stderr ---\n' >&2
+    cat "$LIVE_ERR" >&2
+  fi
+  if [ -s "$RETAINED_ERR" ]; then
+    printf -- '--- retained subscriber stderr ---\n' >&2
+    cat "$RETAINED_ERR" >&2
+  fi
   exit 1
 }
 
@@ -97,7 +143,7 @@ cleanup() {
     kill "$SUB_PID" 2>/dev/null
   fi
   if [ "$BROKER_UP" -eq 1 ]; then
-    docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1
+    docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1
   fi
   rm -rf "$WORKDIR"
   exit "$code"
@@ -130,6 +176,7 @@ printf 'tv-shell MQTT smoke test\n'
 printf '  repo root:  %s\n' "$ROOT"
 printf '  device_id:  %s\n' "$DEVICE_ID"
 printf '  broker:     mqtt://127.0.0.1:%s (from %s)\n' "$BROKER_PORT" "$COMPOSE_FILE"
+printf '  project:    %s (a dedicated stack, never one the caller started)\n' "$COMPOSE_PROJECT"
 printf '  host http:  127.0.0.1:%s\n' "$HOST_HTTP_PORT"
 
 # ── 1. Build, and prove the binary has MQTT in it ────────────────────────────
@@ -144,24 +191,24 @@ ok "$BIN has MQTT support"
 
 # ── 2. Broker ────────────────────────────────────────────────────────────────
 say "Starting mosquitto from $COMPOSE_FILE"
-docker compose -f "$COMPOSE_FILE" up -d --wait
+docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d --wait
 BROKER_UP=1
-docker compose -f "$COMPOSE_FILE" ps
+docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps
 
 # ── 3. Live subscriber, inside the container ─────────────────────────────────
 say "Subscribing (inside the container) BEFORE the host starts"
 # -F '%r %t %p': %r is the RETAINED flag, %t the topic, %p the payload — see
 # mosquitto_sub(1). mosquitto_sub flushes stdout per message, so the capture file
 # stays live rather than sitting in a block buffer.
-docker compose -f "$COMPOSE_FILE" exec -T mosquitto \
+docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T mosquitto \
   mosquitto_sub -h 127.0.0.1 -p 1883 -q 1 -F '%r %t %p' \
-  -t "tv-shell/${DEVICE_ID}/#" -t "$DISCOVERY_TOPIC" >"$LIVE" 2>&1 &
+  -t "tv-shell/${DEVICE_ID}/#" -t "$DISCOVERY_TOPIC" >"$LIVE" 2>"$LIVE_ERR" &
 SUB_PID=$!
 
 asserting "the capture pipeline works at all — a subscriber that never started also produces an empty file, which would read exactly like 'the host published nothing'"
 canary_ok=0
 for _ in $(seq 1 20); do
-  docker compose -f "$COMPOSE_FILE" exec -T mosquitto \
+  docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T mosquitto \
     mosquitto_pub -h 127.0.0.1 -p 1883 -t "$CANARY_TOPIC" -m ready >/dev/null 2>&1 || true
   if grep -q -- " ${CANARY_TOPIC} " "$LIVE" 2>/dev/null; then
     canary_ok=1
@@ -204,9 +251,9 @@ ok "all three arrived as live forwards with retain=0"
 # ── 5. Retained flags, via a FRESH subscriber ────────────────────────────────
 say "Retained-flag check with a FRESH subscriber"
 asserting "a subscriber connecting AFTER the publishes receives all three as retained replays (retain=1) — this is the only way retention is observable"
-docker compose -f "$COMPOSE_FILE" exec -T mosquitto \
+docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T mosquitto \
   mosquitto_sub -h 127.0.0.1 -p 1883 -F '%r %t' -C 3 -W 15 \
-  -t "$DISCOVERY_TOPIC" -t "$AVAIL_TOPIC" -t "$STATE_TOPIC" >"$RETAINED" 2>&1 || true
+  -t "$DISCOVERY_TOPIC" -t "$AVAIL_TOPIC" -t "$STATE_TOPIC" >"$RETAINED" 2>"$RETAINED_ERR" || true
 
 replays="$(grep -c '' "$RETAINED" 2>/dev/null || true)"
 [ "${replays:-0}" -eq 3 ] ||

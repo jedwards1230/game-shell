@@ -99,8 +99,12 @@ jobs:
             --ignored --test-threads=1 --nocapture
 
       # The smoke script owns its own broker lifecycle (up/--wait, then down -v
-      # from an EXIT trap), so it runs after the tests and against a fresh
-      # broker — no retained state carried over from above.
+      # from an EXIT trap) under its OWN compose project and published port.
+      # That separation is load-bearing, not tidiness: compose derives its
+      # project name from the compose file's directory, so without it the
+      # script's `up` would silently adopt the container this job started and
+      # its teardown would destroy it — leaving the `if: failure()` broker-log
+      # step below with nothing to dump, exactly when it is needed most.
       - name: Smoke test (compose + script)
         id: smoke
         run: ./scripts/mqtt-smoke-test.sh

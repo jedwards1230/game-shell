@@ -438,9 +438,17 @@ struct Subscriber {
     /// rumqttc's request channel, which ends the pump thread and the TCP
     /// connection. No join is attempted (a join could hang); the thread simply
     /// unwinds to its end.
+    ///
+    /// This is why the pump thread must NOT hold a `Client` clone: a live clone
+    /// would keep that request channel open forever, the pump would never end,
+    /// and `evict_session`'s `drop(rogue)` would leave the rogue connected —
+    /// trading evictions with the host indefinitely.
     client: Client,
     rx: Receiver<Note>,
     label: String,
+    /// The filters this subscriber asked for, kept so they can be RE-subscribed
+    /// after a reconnect (see [`Subscriber::resubscribe`]).
+    filters: Vec<String>,
     /// Every publish received so far, in arrival order — the failure dump.
     log: Vec<Received>,
     /// Every connection-level note so far.
@@ -479,6 +487,15 @@ impl Subscriber {
                         Ok(Event::Incoming(Packet::SubAck(_))) => Note::Event("suback".to_string()),
                         Ok(_) => continue,
                         Err(e) => {
+                            // rumqttc yields `Some(Err(_))` for every failure
+                            // except `RequestsDone`, and the NEXT `poll()`
+                            // silently reconnects. Logging is therefore not the
+                            // whole fix: under `set_clean_session(true)` the
+                            // re-established session carries NO subscriptions,
+                            // so the subscriber would go permanently deaf. The
+                            // re-subscribe is driven off the next CONNACK in
+                            // `drain_once`.
+                            //
                             // Never hot-loop a broker that is hard down; the
                             // deadline on the test side is what fails the run.
                             std::thread::sleep(Duration::from_millis(250));
@@ -496,6 +513,7 @@ impl Subscriber {
             client,
             rx,
             label: label.to_string(),
+            filters: filters.to_vec(),
             log: Vec::new(),
             events: Vec::new(),
         };
@@ -600,11 +618,50 @@ impl Subscriber {
         }
     }
 
+    /// Re-subscribe to every filter, after a reconnect dropped them.
+    ///
+    /// `try_subscribe` rather than `subscribe`: the blocking form parks on
+    /// rumqttc's bounded request channel, and a wedged event loop would then
+    /// hang the TEST thread past its own deadline instead of failing it. A
+    /// refusal is recorded loudly instead of panicking, so the dump on the next
+    /// timeout names the real cause rather than reporting "nothing arrived".
+    fn resubscribe(&mut self) {
+        let mut failed: Vec<String> = Vec::new();
+        for filter in &self.filters {
+            if let Err(e) = self.client.try_subscribe(filter.clone(), QoS::AtLeastOnce) {
+                failed.push(format!("{filter} ({e})"));
+            }
+        }
+        let note = if failed.is_empty() {
+            format!(
+                "reconnected: re-subscribed to {} filter(s)",
+                self.filters.len()
+            )
+        } else {
+            format!(
+                "reconnected: re-subscribe FAILED for {failed:?} — this subscriber is now DEAF, \
+                 so every wait below will time out reporting that nothing arrived even if the \
+                 host published correctly"
+            )
+        };
+        println!("  subscriber {}: {note}", self.label);
+        self.events.push(note);
+    }
+
     /// Move at most one message from the channel into the log.
     fn drain_once(&mut self, budget: Duration) {
         match self.rx.recv_timeout(budget) {
             Ok(Note::Publish(received)) => self.log.push(received),
-            Ok(Note::Event(event)) => self.events.push(event),
+            Ok(Note::Event(event)) => {
+                // A CONNACK after the first one is a RECONNECT. The session was
+                // opened clean, so the broker restored no subscriptions and this
+                // subscriber is deaf until it asks again.
+                let reconnected = event == "connack" && self.events.iter().any(|e| e == "connack");
+                self.events.push(event);
+                if reconnected && !self.filters.is_empty() {
+                    self.resubscribe();
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => panic!(
                 "the pump thread for subscriber {} ended, so its MQTT connection is gone and \
@@ -916,8 +973,14 @@ fn discovery_document_has_the_shape_home_assistant_reads() {
         let value = doc
             .get(block)
             .unwrap_or_else(|| panic!("no `{block}` block in the discovery document: {doc}"));
+        // Prove it is an OBJECT first. `Value::get` returns `None` on a string,
+        // number or null, so a `dev` that regressed to a non-object would sail
+        // through the `sw` check below having proved nothing.
+        let object = value.as_object().unwrap_or_else(|| {
+            panic!("`{block}` is not an OBJECT, so the `sw` check below would be vacuous: {doc}")
+        });
         assert!(
-            value.get("sw").is_none(),
+            !object.contains_key("sw"),
             "`{block}.sw` is set; a software version in a RETAINED discovery document rewrites \
              it on every independent boot update: {value}"
         );
@@ -1046,13 +1109,35 @@ fn state_envelope_carries_the_schema_and_staleness_fields() {
         .unwrap_or_else(|| panic!("no `status` object in the state envelope: {envelope}"))
         .as_object()
         .unwrap_or_else(|| panic!("`status` is not a NESTED object: {envelope}"));
-    for field in ["version", "running_appid", "streaming"] {
-        assert!(
-            status.contains_key(field),
-            "`status.{field}` is missing; `status` is contractually StatusResponse verbatim: \
-             {envelope}"
-        );
-    }
+    // `status` is contractually `StatusResponse` VERBATIM, so assert the types,
+    // not merely the keys: `contains_key` passes on a `version` that regressed
+    // to a number or a `streaming` that became the string "true", which is
+    // exactly the drift this block exists to catch.
+    let version = status
+        .get("version")
+        .unwrap_or_else(|| panic!("`status.version` is missing: {envelope}"));
+    assert!(
+        version.is_string(),
+        "`status.version` must be a STRING (StatusResponse::version), got {version}: {envelope}"
+    );
+    let streaming = status
+        .get("streaming")
+        .unwrap_or_else(|| panic!("`status.streaming` is missing: {envelope}"));
+    assert!(
+        streaming.is_boolean(),
+        "`status.streaming` must be a BOOLEAN (StatusResponse::streaming), got {streaming}: \
+         {envelope}"
+    );
+    // `running_appid` is `Option<u32>`, so JSON `null` is the correct value on a
+    // runner with nothing running — presence is all that can be asserted here.
+    let running_appid = status
+        .get("running_appid")
+        .unwrap_or_else(|| panic!("`status.running_appid` is missing: {envelope}"));
+    assert!(
+        running_appid.is_u64() || running_appid.is_null(),
+        "`status.running_appid` must be an INTEGER or null (StatusResponse::running_appid is \
+         Option<u32>), got {running_appid}: {envelope}"
+    );
 
     f.host
         .assert_running("after the state envelope was validated");
@@ -1200,6 +1285,7 @@ fn ungraceful_termination_fires_the_last_will() {
 fn reconnect_republishes_discovery() {
     let mut f = start("reconn", 47907);
     let discovery = contract_discovery_topic(&f.device_id);
+    let avail = contract_avail_topic(&f.device_id);
 
     let first = f.sub.wait_for(
         &mut f.host,
@@ -1222,21 +1308,45 @@ fn reconnect_republishes_discovery() {
     );
     evict_session(&f.broker, &contract_client_id(&f.device_id));
 
-    let second = f.sub.wait_for(
+    // Prove the EVICTION landed before asserting anything about the republish.
+    //
+    // The rogue's own CONNACK proves only that the ROGUE connected — it says
+    // nothing about whose session was displaced. If `contract_client_id` ever
+    // drifts from the client id the host actually connects with, no session is
+    // evicted, the host never reconnects, and the wait below fails blaming the
+    // ConnAck republish path for what is really a harness bug.
+    //
+    // A client-id takeover closes the old socket WITHOUT a DISCONNECT, so the
+    // broker fires the retained Last Will. That `offline` is the observable
+    // proof the takeover hit the host. (The host reconnects on a 1 s backoff and
+    // republishes `online` shortly after; harmless — this scans an indexed log,
+    // so the `offline` entry stays put at its index.)
+    let offline_at = f.sub.wait_for(
+        &mut f.host,
+        &format!(
+            "the Last Will `offline` on {avail} — the proof that the eviction actually \
+             displaced the HOST's session, and not merely that the rogue connected (a \
+             client-id drift between `contract_client_id` and the host's real client id \
+             evicts nothing at all)"
+        ),
+        WILL_TIMEOUT,
+        mark,
+        |m| m.topic == avail && m.payload == b"offline",
+    );
+    println!("  the host's session was evicted (Last Will `offline` at index {offline_at})");
+
+    f.sub.wait_for(
         &mut f.host,
         &format!(
             "a SECOND discovery publish on {discovery} after the session eviction — the \
              ConnAck path must republish, because a reconnect may mean the broker dropped \
-             our session"
+             our session. A timeout here means EITHER the ConnAck path failed to republish, \
+             OR the session was never evicted (client-id drift between `contract_client_id` \
+             and the host's real client id)"
         ),
         RECONNECT_TIMEOUT,
         mark,
         |m| m.topic == discovery,
-    );
-    assert!(
-        second >= mark,
-        "the second discovery publish must arrive AFTER the eviction (index {second} < mark \
-         {mark}) — otherwise this matched the original publish and proves nothing"
     );
 
     f.host
