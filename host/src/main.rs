@@ -34,8 +34,14 @@
 //!                         and logged on startup.
 //!   TV_SHELL_HOST_PORT  — listen port (default 47995).
 //!   TV_SHELL_HOST_BIND  — listen address (default 0.0.0.0 = all LAN ifaces).
+//!
+//! Optionally the sidecar also publishes its state to MQTT and accepts a few
+//! commands there — additive, never a replacement for the HTTP routes above (the
+//! QML shell's Steam widget depends on them). It is off unless
+//! `TV_SHELL_MQTT_BROKER` is set; see [`mqtt`] for the full env surface.
 
 mod launch;
+mod mqtt;
 mod power;
 mod steam;
 
@@ -75,6 +81,24 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_PORT);
     let bind = tv_shell_protocol::brand::env("HOST_BIND").unwrap_or_else(|| "0.0.0.0".to_string());
+
+    // Resolve the MQTT configuration BEFORE serving. A misconfigured device that
+    // silently runs without MQTT is exactly the failure this design removes, so a
+    // bad config is a startup error and a non-zero exit — but a *valid* config
+    // never blocks or fails HTTP startup: the actor is spawned fire-and-forget.
+    match mqtt::settings_from_env() {
+        Err(e) => {
+            tracing::error!("MQTT configuration error: {e}");
+            return Err(anyhow::anyhow!("MQTT configuration error: {e}"));
+        }
+        Ok(None) => tracing::info!("MQTT disabled (TV_SHELL_MQTT_BROKER unset)"),
+        Ok(Some(settings)) => {
+            // Read the CA here rather than inside the actor: an unreadable bundle
+            // must fail startup, not silently fall back to the platform roots.
+            let ca = mqtt::load_ca(settings.ca_file.as_deref()).await?;
+            tokio::spawn(mqtt::run(settings, ca));
+        }
+    }
 
     let state = Arc::new(AppState { token });
 
@@ -274,6 +298,27 @@ async fn sleep(
     headers: HeaderMap,
 ) -> Result<Json<SleepResponse>, StatusCode> {
     authorize(&state, &headers)?;
+    match request_sleep().await {
+        Ok(resp) => Ok(Json(resp)),
+        Err(e) => {
+            tracing::warn!("sleep failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// The sleep decision itself, transport-independent: probe → refuse-or-dispatch.
+///
+/// Lifted out of [`sleep`] so the MQTT `sleep` command runs the **same** safety
+/// gate. Duplicating it would let the two drift on exactly the check that stops a
+/// suspend mid-game.
+///
+/// - `Ok(SleepResponse { ok: false, reason: Some(..) })` — refused. A refusal is a
+///   normal answer, never an error: `sleep` still returns it as an HTTP 200.
+/// - `Ok(SleepResponse { ok: true, reason: None })` — the suspend was *dispatched*
+///   (see [`power::suspend`]); it does not mean the machine is asleep yet.
+/// - `Err(..)` — the suspend could not even be started.
+async fn request_sleep() -> anyhow::Result<SleepResponse> {
     // Both probes touch the OS off-band (a `/proc`/registry read and a blocking
     // loopback HTTP GET to Sunshine); keep them off the async reactor, exactly as
     // `status()` does. A panicked probe degrades to its safe value — and the safe
@@ -288,28 +333,22 @@ async fn sleep(
 
     if let Some(reason) = power::suspend_refusal(running, streaming) {
         tracing::info!("sleep: refused — {reason}");
-        return Ok(Json(SleepResponse {
+        return Ok(SleepResponse {
             ok: false,
             reason: Some(reason.to_string()),
-        }));
+        });
     }
 
     // Spawning the suspend command is a blocking syscall; keep it off the reactor.
     // It returns as soon as the child is spawned (see `power::suspend`), so this
-    // await is short and the response below still gets flushed.
-    let result = tokio::task::spawn_blocking(power::suspend)
+    // await is short and the caller's response still gets flushed.
+    tokio::task::spawn_blocking(power::suspend)
         .await
-        .unwrap_or_else(|e| Err(anyhow::anyhow!("suspend task panicked: {e}")));
-    match result {
-        Ok(()) => Ok(Json(SleepResponse {
-            ok: true,
-            reason: None,
-        })),
-        Err(e) => {
-            tracing::warn!("sleep failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("suspend task panicked: {e}")))?;
+    Ok(SleepResponse {
+        ok: true,
+        reason: None,
+    })
 }
 
 /// `GET /status` — version + the currently-running Steam appid (or null) +

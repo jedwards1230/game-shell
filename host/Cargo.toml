@@ -27,6 +27,18 @@ subtle = { workspace = true }
 # Pure-Rust Valve KeyValues (VDF/ACF) parser for libraryfolders.vdf +
 # appmanifest_*.acf.
 keyvalues-parser = { workspace = true }
+# MQTT client. `default-features = false` + `use-rustls-no-provider` is
+# load-bearing, not tidiness: rumqttc's DEFAULT feature (`use-rustls`) enables
+# `tokio-rustls/default`, whose crypto provider is `aws-lc-rs` — C + cmake, which
+# would break this crate's whole reason to exist (a pure-Rust graph that
+# cross-compiles clean on Windows and macOS). NEVER `use-native-tls` either: that
+# drags in the system C TLS stack. The provider is supplied explicitly below.
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
+# The crypto provider for the above, pinned to `ring` — the same provider the
+# workspace already resolves via reqwest's `rustls-tls`, so there is exactly one
+# in the graph and still no `aws-lc-rs`. Installed once at startup by
+# `mqtt::install_crypto_provider`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tv-shell-protocol = { workspace = true }
 
 # POSIX kill(2) for the graceful-quit path (SIGTERM to the running game's process
