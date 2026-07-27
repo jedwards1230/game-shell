@@ -22,6 +22,10 @@
 /// Central brand identity + backward-compat shims (see module docs).
 pub mod brand;
 
+/// Shared MQTT state envelope, device identity, and Home Assistant discovery
+/// types (see module docs).
+pub mod mqtt;
+
 use serde::{Deserialize, Serialize};
 
 /// One installed Steam game, derived from an `appmanifest_*.acf` file.
