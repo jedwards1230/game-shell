@@ -223,14 +223,27 @@ plus a Home Assistant discovery document, and subscribes to
 
 - **Its own connection ⇒ its own Last Will.** Availability is a fact the broker
   asserts, not something a consumer probes for.
-- **`device_id` is explicit, never derived** — startup FAILS if `[mqtt].broker`
-  is set without it (deriving from hostname/OS would split one dual-boot machine
-  into two Home Assistant devices).
+- **`device_id` is explicit, never derived** — MQTT refuses to start if
+  `[mqtt].broker` is set without it (deriving from hostname/OS would split one
+  dual-boot machine into two Home Assistant devices).
 - **Emit-on-change plus a ~30 s floor heartbeat**, so `published_at`/`seq` always
   advance. That floor is the only signal that catches a half-open socket, where
   the client keeps "publishing" into a dead connection whose Last Will already
   fired. System metrics are excluded from change detection on purpose — CPU%
   moves constantly and would publish every tick.
+
+**A misconfigured `[mqtt]` never stops the daemon starting.** It is logged at
+`error` with the offending field and the MQTT actor is skipped; the shell, CEC
+and the input fleet come up normally. `DaemonConfig::validate()` deliberately
+does not check `[mqtt]` — validate aborts on the daemon's *own* mandatory
+config, and letting an optional subsystem kill a mandatory one would make MQTT
+subtractive. So the cost of a typo here is "no device in Home Assistant", not a
+dead TV. (A *malformed* `[mqtt]` table is a different mechanism: `DaemonConfig`
+is `deny_unknown_fields`, so an unknown key still fails the TOML parse.)
+
+`ca_file` is optional and rarely needed — the broker presents a publicly-trusted
+certificate, so the platform trust store validates it. An unreadable `ca_file`
+warns and falls back to that store rather than disabling MQTT.
 
 There is **no config-reload path**: any `[mqtt]` change, credential rotation
 included, needs a daemon restart (which hands the CEC adapter to whatever grabs
