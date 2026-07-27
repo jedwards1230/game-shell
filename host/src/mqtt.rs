@@ -139,9 +139,25 @@ impl std::fmt::Debug for MqttSettings {
 
 /// Read the MQTT configuration from the process environment.
 ///
-/// `Ok(None)` means "no broker configured, MQTT is off" — the sidecar still
-/// serves HTTP normally. `Err` means the configuration is **wrong**, and the
-/// caller must fail startup rather than run on silently without MQTT.
+/// - `Ok(None)` — no broker configured, MQTT is off. The sidecar serves HTTP normally.
+/// - `Ok(Some(_))` — fully resolved and safe to spawn.
+/// - `Err(_)` — the configuration is wrong.
+///
+/// **`Err` must NOT fail startup.** The caller logs it at `error` and continues
+/// to `axum::serve`; only MQTT is skipped. MQTT is *additive* — the QML shell's
+/// Steam widget depends on the HTTP routes, and on Windows this config arrives
+/// through per-user `win_environment` variables, the config channel most likely
+/// to carry a typo. The cost of that typo is "no device in Home Assistant", not
+/// a dead Steam row whose cause is in an unrelated subsystem.
+///
+/// This does not weaken the fail-closed rule: that constrains what gets
+/// **published** — a missing `device_id` still refuses to invent one rather than
+/// splitting the dual-boot desktop into two Home Assistant devices — not whether
+/// an unrelated listener binds.
+///
+/// Pinned by `a_broken_mqtt_environment_only_disables_mqtt`. If you are here to
+/// "restore correctness" by making the caller fail closed, that test is the
+/// thing you would be breaking, and this paragraph is why.
 pub fn settings_from_env() -> Result<Option<MqttSettings>, String> {
     settings_from(brand::env)
 }

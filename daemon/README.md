@@ -218,8 +218,13 @@ security posture: **[`docs/CONTROL_SURFACE.md`](../docs/CONTROL_SURFACE.md)**.
 A third surface, and the only **outbound** one: the daemon dials the broker
 rather than listening. It publishes retained state to `tv-shell/<device_id>/state`
 plus a Home Assistant discovery document, and subscribes to
-`tv-shell/<device_id>/cmd/+` (`suspend`, `home`/`menu`/`settings`,
-`restart-shell`). Three properties are load-bearing:
+`tv-shell/<device_id>/cmd/+`, accepting `suspend`, `restart-shell`, and any name
+`bridge_core::is_valid_intent` accepts (so the MQTT and IPC surfaces cannot
+disagree about what an intent is). The retained discovery document publishes
+buttons for only five of them — `suspend`, `home`, `menu`, `settings`,
+`restart-shell` — because adding one rewrites a retained message. Topics, entity
+keys and the Home Assistant contract: [`docs/MQTT.md`](../docs/MQTT.md). Three
+properties are load-bearing:
 
 - **Its own connection ⇒ its own Last Will.** Availability is a fact the broker
   asserts, not something a consumer probes for.

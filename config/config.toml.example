@@ -6,7 +6,8 @@
 # sections only turn on the LAN control surface and the optional Plex / Steam
 # home-screen widgets.
 #
-# ALL tokens (HTTP bearer, Plex, Steam) are by reference only — never inline.
+# ALL secrets (HTTP bearer, Plex, Steam, MQTT password) are by reference only —
+# never inline.
 # Each lives in a separate file that the matching `*_token_file` points at. Every
 # token file MUST be mode 0600 AND live under ~/.config/tv-shell/ — the daemon
 # refuses to start on a world-readable token file or a path that escapes the
@@ -127,6 +128,60 @@
 # and never blocks startup or the IPC reply. Pair it with `mac` above, otherwise a
 # long-asleep host still can't be resolved.
 #wake_active_host_on_start = false
+
+# --- MQTT state publisher + command surface (optional) -----------------------
+# The daemon's only OUTBOUND network surface: it dials the broker, publishes its
+# state retained, and subscribes to a command topic. Full reference (topics,
+# entity keys, Home Assistant discovery): docs/MQTT.md.
+#
+# Absent `broker` ⇒ MQTT is off entirely: no connection, no discovery published.
+#
+# A misconfigured [mqtt] does NOT stop the daemon. It is logged at `error` naming
+# the offending field, the MQTT actor is skipped, and the shell/CEC/input come up
+# normally — so the symptom of a typo here is "no device in Home Assistant", not
+# a dead TV. (A *malformed* table is a different mechanism: this file is parsed
+# with deny_unknown_fields, so an unknown KEY still fails the TOML parse and
+# aborts startup. That is why every line below stays commented.)
+#
+# There is NO config-reload path — DaemonConfig::load() runs once and watch.rs
+# watches settings.json only. Any change here, credential rotation included,
+# needs a daemon restart, and a daemon restart hands the CEC adapter to whatever
+# grabs it next. Rotating the MQTT password is outage-adjacent, not a config edit.
+[mqtt]
+# Broker URL. Only mqtt:// (default port 1883) and mqtts:// (default port 8883)
+# are accepted; cleartext mqtt:// logs a warning because the password and every
+# state payload then cross the LAN unencrypted.
+#broker = "mqtts://mqtt.example:8883"
+
+# This machine's identity — EXPLICIT and required whenever `broker` is set, never
+# derived from hostname/OS/IP. A dual-boot machine must publish the SAME id from
+# both OSes; a derived id registers two Home Assistant devices for one machine,
+# one of which is permanently offline by construction. Alphabet is [A-Za-z0-9_-],
+# max 64 bytes (so it can never inject a topic level or an MQTT wildcard).
+#device_id = "htpc-1"
+
+# Broker credentials. Set BOTH or NEITHER — a half-set pair would authenticate
+# anonymously and look like a broker-side ACL problem. The password is by
+# reference only and follows the same rules as every other token file: mode 0600
+# and under ~/.config/tv-shell/, or MQTT is disabled.
+#username = "tv-shell-htpc-1"
+#password_file = "~/.config/tv-shell/mqtt-password"
+
+# PEM CA bundle — OPTIONAL and usually unnecessary. The broker presents a
+# publicly-trusted certificate, so the platform trust store is the normal path;
+# set this only for a private CA. A CA certificate is public, so unlike a token
+# file it is tilde-expanded but NOT mode-checked and NOT confined to the config
+# dir. An unreadable file warns and falls back to the platform store.
+#ca_file = "~/.config/tv-shell/mqtt-ca.pem"
+
+# Floor heartbeat: republish at least this often even when nothing changed, so
+# `published_at`/`seq` always advance. That floor is the only signal that catches
+# a half-open socket (see docs/MQTT.md). Default 30. Must be > 0.
+#heartbeat_secs = 30
+
+# MQTT keepalive. Generous by default — reconnect churn on a broker that home
+# automation also rides on is a real risk. Default 60. Must be > 0.
+#keepalive_secs = 60
 
 # --- Observability: logs + metrics (optional) --------------------------------
 # See docs/OBSERVABILITY.md for the full emit contract (metric catalogue, etc.).
