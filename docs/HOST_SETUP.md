@@ -121,6 +121,43 @@ Generate a token once and reuse it on both ends:
 openssl rand -hex 16
 ```
 
+### MQTT (optional)
+
+The sidecar can also publish its state to an MQTT broker and accept a few
+commands there — additive, never a replacement for the HTTP routes above. It has
+no config file, so every knob is an env var. Topics, entity keys and the Home
+Assistant discovery contract: [MQTT.md](MQTT.md).
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `TV_SHELL_MQTT_BROKER` | unset | `mqtts://host:8883` or `mqtt://host:1883`. **Unset ⇒ MQTT off entirely.** |
+| `TV_SHELL_MQTT_DEVICE_ID` | — | Explicit device id. **Required once the broker is set**, and **identical on both boots** of a dual-boot machine. |
+| `TV_SHELL_MQTT_USERNAME` | unset | Broker username. Both-or-neither with the password. |
+| `TV_SHELL_MQTT_PASSWORD` | unset | The password itself, not a path — Windows has no mode bits. |
+| `TV_SHELL_MQTT_CA_FILE` | unset | PEM CA bundle. **Optional** — unset uses the platform trust store, which is the normal path. |
+| `TV_SHELL_MQTT_HEARTBEAT_SECS` | `30` | Floor republish interval. Must be > 0. |
+| `TV_SHELL_MQTT_KEEPALIVE_SECS` | `60` | MQTT keepalive. Must be > 0. |
+
+The `GAME_SHELL_*` prefix is still honoured as a fallback, as it is for every
+other variable here.
+
+**The id is never derived** from hostname or OS: this box is one physical machine
+that dual-boots, and a derived id would register two Home Assistant devices for
+it, one of which is offline by construction. A broker with no `DEVICE_ID` is a
+configuration error, not a guess.
+
+**A bad MQTT configuration disables MQTT only** — the sidecar starts normally and
+every HTTP route above still serves, because the TV's Steam widget depends on
+them. The failure is logged at `error` at startup; the symptom is "no device in
+Home Assistant", never a dead Steam row. The environment is read once, so any
+change (credential rotation included) needs a sidecar restart.
+
+> **Windows trust note.** On Linux these extend the `0600` `host.env`. On Windows
+> they extend the per-user environment variables, which are ACL-protected and
+> readable by any process running as that user — **the same trust model as the
+> bearer token already deployed there, so no regression**, but not parity with
+> Linux.
+
 ---
 
 ## Install path A — Ansible-managed (homelab)
