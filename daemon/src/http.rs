@@ -766,8 +766,12 @@ async fn handle_shell_status(
 }
 
 /// The outcome of a `POST /suspend`, derived from the daemon's power replies.
+///
+/// `pub(crate)` (a visibility-only change, no behaviour change) so the MQTT
+/// `suspend` command reuses the exact same two-step gate instead of duplicating
+/// it — the truth-table test below stays the single source of truth for both.
 #[derive(Debug, PartialEq, Eq)]
-enum SuspendOutcome {
+pub(crate) enum SuspendOutcome {
     /// logind accepted the suspend request. (Accepted, not completed — the
     /// process may be frozen before anything further could be observed.)
     Accepted,
@@ -792,7 +796,7 @@ enum SuspendOutcome {
 /// `suspend` is `None` when the gate said no and we therefore never asked. That
 /// combination can't occur by construction, but the function stays total: a
 /// `yes` with no attempt is reported as a failure rather than silently "ok".
-fn interpret_suspend(can_suspend: &str, suspend: Option<&str>) -> SuspendOutcome {
+pub(crate) fn interpret_suspend(can_suspend: &str, suspend: Option<&str>) -> SuspendOutcome {
     // Anything other than a plain `yes` is a refusal — including the degraded
     // `no` a bus error produces and the non-Linux unsupported line.
     if can_suspend.trim() != "yes" {

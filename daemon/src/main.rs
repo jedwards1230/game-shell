@@ -17,7 +17,7 @@
 // modules aren't dead-code on non-Linux hosts where `main` is cfg-excluded.)
 #[cfg(target_os = "linux")]
 use tv_shell_input::{
-    bluetooth, display_owner, http, hyprland, input, ipc, network, power, protocol, session,
+    bluetooth, display_owner, http, hyprland, input, ipc, mqtt, network, power, protocol, session,
     session_env, shell_state, state, watch, wol,
 };
 
@@ -318,6 +318,62 @@ fn main() -> anyhow::Result<()> {
                 Ok(None) => {}
                 Err(e) => tracing::warn!("{e}"),
             }
+        }
+
+        // MQTT state publisher + command surface: opt-in via [mqtt].broker in
+        // config.toml. Absent ⇒ no connection is attempted and no discovery is
+        // published.
+        //
+        // A misconfigured [mqtt] is logged LOUDLY and skipped — it must never
+        // stop the daemon starting. This daemon owns the shell, CEC and the input
+        // fleet; letting an optional subsystem's config kill all three would make
+        // MQTT subtractive, able to break features unrelated to it. `validate()`
+        // deliberately does not check [mqtt] for the same reason.
+        match daemon_cfg.mqtt_settings() {
+            Ok(Some(resolved)) => {
+                // A CA certificate is public, and unset is now the NORMAL case:
+                // the broker presents a publicly-trusted certificate, so the
+                // platform trust store validates it. An unreadable one degrades
+                // to that store with a warning rather than aborting.
+                let ca_pem = resolved
+                    .ca_path
+                    .as_ref()
+                    .and_then(|path| match std::fs::read(path) {
+                        Ok(pem) => Some(pem),
+                        Err(e) => {
+                            tracing::warn!(
+                                "mqtt: cannot read [mqtt].ca_file {}: {e} — falling back to the \
+                                 platform trust store",
+                                path.display()
+                            );
+                            None
+                        }
+                    });
+                let settings = mqtt::MqttSettings {
+                    device_id: resolved.device_id,
+                    endpoint: resolved.endpoint,
+                    ca_pem,
+                    username: resolved.username,
+                    password: resolved.password,
+                    heartbeat: std::time::Duration::from_secs(resolved.heartbeat_secs),
+                    keepalive: std::time::Duration::from_secs(resolved.keepalive_secs),
+                };
+                tokio::spawn(mqtt::run(
+                    settings,
+                    ui_state.clone(),
+                    Arc::clone(&display_owner),
+                    control_tx.clone(),
+                    dbus.clone(),
+                    Arc::clone(&metrics),
+                    shutdown.clone(),
+                ));
+            }
+            Ok(None) => tracing::info!("mqtt: disabled ([mqtt].broker is unset)"),
+            Err(e) => tracing::error!(
+                "mqtt: DISABLED — [mqtt] is misconfigured: {e}. The daemon is starting normally \
+                 without it; the shell, CEC and input are unaffected. Fix the [mqtt] section in \
+                 config.toml and restart the daemon to publish to Home Assistant again."
+            ),
         }
 
         tokio::select! {

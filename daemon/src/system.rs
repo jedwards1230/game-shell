@@ -63,16 +63,33 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
+/// Parse the first whitespace-separated field of a `/proc/uptime` body into
+/// whole seconds. Pure (no I/O) so the parse is unit-testable on any host.
+///
+/// `None` for an empty/malformed body, and for a negative value — a clock that
+/// reports a negative uptime is nonsense, and `as u64` would wrap it into a
+/// gigantic positive number.
+fn parse_uptime_secs(raw: &str) -> Option<u64> {
+    let secs = raw.split_whitespace().next()?.parse::<f64>().ok()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(secs as u64)
+}
+
+/// Host uptime in whole seconds, or `None` when `/proc/uptime` is unavailable
+/// or unparseable.
+///
+/// Deliberately `Option` rather than a `0` fallback: on macOS (where the daemon's
+/// cross-platform modules are unit-tested) there is no `/proc`, and publishing
+/// `0` would read as "this box just booted" instead of "we don't know".
+pub fn uptime_seconds() -> Option<u64> {
+    parse_uptime_secs(&fs::read_to_string("/proc/uptime").ok()?)
+}
+
 /// Read system uptime from `/proc/uptime` and format it as `Xd Xh Xm Xs`.
 fn uptime_string() -> String {
-    let raw = fs::read_to_string("/proc/uptime").unwrap_or_default();
-    let secs = raw
-        .split_whitespace()
-        .next()
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| f as u64)
-        .unwrap_or(0);
-    format_uptime(secs)
+    format_uptime(uptime_seconds().unwrap_or(0))
 }
 
 /// Build the `sys-status` JSON response.
@@ -455,6 +472,26 @@ pub fn sys_metrics_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uptime_secs_parses_first_field_only() {
+        // The real /proc/uptime shape: "<up> <idle>\n" — only the first field.
+        assert_eq!(parse_uptime_secs("12345.67 98765.43\n"), Some(12345));
+        assert_eq!(parse_uptime_secs("0.00 0.00\n"), Some(0));
+        // A bare value with no idle field still parses.
+        assert_eq!(parse_uptime_secs("42.9"), Some(42));
+    }
+
+    #[test]
+    fn uptime_secs_returns_none_on_malformed_input() {
+        // Honest "unknown" rather than a 0 that reads as "just booted".
+        assert_eq!(parse_uptime_secs(""), None);
+        assert_eq!(parse_uptime_secs("\n"), None);
+        assert_eq!(parse_uptime_secs("not-a-number 1.0"), None);
+        // A negative uptime is nonsense; `as u64` would wrap it huge.
+        assert_eq!(parse_uptime_secs("-1.0 0.0"), None);
+        assert_eq!(parse_uptime_secs("NaN 0.0"), None);
+    }
 
     #[test]
     fn uptime_formats_seconds_only() {

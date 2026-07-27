@@ -69,7 +69,9 @@ via MoonlightSettings; `config/targets.yaml.example` documents the fields). Daem
 options (LAN bridge, CEC, Plex/Steam widgets) and the web panel's bind address go
 in the optional typed `config.toml` (`config/config.toml.example`, `[panel]`
 section); the shared bearer token lives in a separate `0600` file referenced by
-`[http] token_file`.
+`[http] token_file`. Optional MQTT state publishing + Home Assistant discovery
+(daemon `[mqtt]`, sidecar `TV_SHELL_MQTT_*`) is documented in
+[docs/MQTT.md](docs/MQTT.md).
 
 ## Observability
 

@@ -41,6 +41,15 @@
 //! url = "http://192.0.2.10:47995"
 //! mac = "aa:bb:cc:dd:ee:ff"   # static WoL MAC (preferred over `ip neigh`/cache)
 //!
+//! [mqtt]                      # MQTT state publisher + command surface (opt-in)
+//! broker = "mqtts://mqtt.example:8883"   # absent ⇒ MQTT off entirely
+//! device_id = "htpc-1"        #   EXPLICIT identity; required when broker is set
+//! username = "tv-shell-htpc-1"
+//! password_file = "~/.config/tv-shell/mqtt-password"   # 0600
+//! ca_file = "~/.config/tv-shell/mqtt-ca.pem"           # PEM CA bundle (public)
+//! heartbeat_secs = 30         #   floor republish interval
+//! keepalive_secs = 60         #   MQTT keepalive
+//!
 //! [dev]                       # operator escape hatch
 //! allow_insecure_lan = false  # see validate(): permit LAN + dev + no-auth on purpose
 //! ```
@@ -98,6 +107,8 @@ pub struct DaemonConfig {
     pub panel: PanelConfig,
     pub http: HttpConfig,
     pub mcp: McpConfig,
+    /// `[mqtt]` — the MQTT state publisher + command surface (see [`MqttConfig`]).
+    pub mqtt: MqttConfig,
     pub cec: CecConfig,
     pub plex: PlexConfig,
     pub steam: SteamConfig,
@@ -166,6 +177,173 @@ pub struct McpConfig {
     pub dev: bool,
     /// Host-header allowlist (DNS-rebinding guard). Empty ⇒ allow-all (token-gated).
     pub allowed_hosts: Vec<String>,
+}
+
+/// `[mqtt]` — the MQTT state publisher + command surface (`crate::mqtt`).
+///
+/// `deny_unknown_fields` **is** set here, matching `[http]` and `[mcp]`.
+/// `[cec]` and `[panel]` deliberately omit it because a *second binary*
+/// (tv-shell-panel) writes those sections and is released independently; nothing
+/// but the daemon ever writes `[mqtt]`, so it inherits the daemon's strict
+/// posture and a typo fails loudly at startup.
+///
+/// **The asymmetry that bites:** `DaemonConfig` is `deny_unknown_fields` at the
+/// top level, but `panel/src/config.rs` parses the *same file* leniently. A typo
+/// under `[mqtt]` therefore aborts the daemon while the panel keeps running — so
+/// the symptom presents as "the daemon is broken", not "the config has a typo".
+/// Read the daemon's startup log before believing anything else.
+///
+/// There is **no config-reload path**: `DaemonConfig::load()` runs once into a
+/// `OnceLock` and `watch.rs` watches `settings.json` only. Every key here —
+/// including a credential rotation — needs a **daemon restart**, which hands the
+/// CEC adapter to whatever grabs it next. See the `crate::mqtt` module docs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MqttConfig {
+    /// `mqtts://host:8883` or `mqtt://host:1883`. `None` ⇒ MQTT off entirely;
+    /// no connection is attempted and no discovery is published.
+    pub broker: Option<String>,
+    /// The device identity. EXPLICIT ONLY — never derived from hostname, OS, or
+    /// IP. Required whenever `broker` is set; startup FAILS if it is missing.
+    pub device_id: Option<String>,
+    /// MQTT username (e.g. `tv-shell-htpc-1`). Must be set together with
+    /// `password_file`, or neither.
+    pub username: Option<String>,
+    /// 0600 file under the config dir, resolved like every other token file.
+    pub password_file: Option<String>,
+    /// PEM CA bundle. A PUBLIC certificate — path-expanded but NOT
+    /// permission-checked and NOT confined to the config dir.
+    pub ca_file: Option<String>,
+    /// Floor heartbeat: republish at least this often so `published_at` always
+    /// advances.
+    pub heartbeat_secs: u64,
+    /// MQTT keepalive. Generous by default — the Windows sidecar's watchdog
+    /// makes reconnect churn a real risk, and this daemon shares the same broker.
+    pub keepalive_secs: u64,
+}
+
+impl Default for MqttConfig {
+    /// Hand-written, not derived: `#[derive(Default)]` would give `0` for both
+    /// interval fields, and a `0`-second heartbeat busy-loops the publisher.
+    fn default() -> Self {
+        Self {
+            broker: None,
+            device_id: None,
+            username: None,
+            password_file: None,
+            ca_file: None,
+            heartbeat_secs: 30,
+            keepalive_secs: 60,
+        }
+    }
+}
+
+/// A parsed `[mqtt].broker` URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqttEndpoint {
+    /// Hostname or IP literal (IPv6 without its brackets).
+    pub host: String,
+    /// TCP port — the scheme default (1883/8883) unless explicitly given.
+    pub port: u16,
+    /// `true` for `mqtts://`.
+    pub tls: bool,
+}
+
+/// Everything the MQTT actor needs, resolved from `[mqtt]`.
+///
+/// Produced by [`DaemonConfig::mqtt_settings`]. `ca_path` is deliberately a path
+/// rather than the certificate bytes: a CA file is public, and an unreadable one
+/// must degrade to the platform trust store rather than abort — so the read
+/// happens at the spawn site, where that fallback lives.
+#[derive(Debug, Clone)]
+pub struct ResolvedMqtt {
+    /// Validated device identity — explicitly configured, never derived.
+    pub device_id: tv_shell_protocol::mqtt::DeviceId,
+    /// Broker host/port/TLS.
+    pub endpoint: MqttEndpoint,
+    /// MQTT username, when credentials are configured.
+    pub username: Option<String>,
+    /// MQTT password read from `password_file`, when configured.
+    pub password: Option<String>,
+    /// Optional CA bundle path. Unset ⇒ the platform trust store, which is the
+    /// normal path now that the broker presents a publicly-trusted certificate.
+    pub ca_path: Option<PathBuf>,
+    /// Floor-heartbeat interval in seconds.
+    pub heartbeat_secs: u64,
+    /// MQTT keepalive in seconds.
+    pub keepalive_secs: u64,
+}
+
+/// Parse a `[mqtt].broker` URL **by hand**.
+///
+/// The daemon has no `url` crate and must not gain one for two schemes. Only
+/// `mqtt://` (default port 1883) and `mqtts://` (default port 8883) are accepted;
+/// anything else is an error naming both, so a `http://`/`tcp://` paste fails at
+/// startup rather than at first connect.
+fn parse_mqtt_endpoint(raw: &str) -> anyhow::Result<MqttEndpoint> {
+    let (tls, default_port, rest) = if let Some(rest) = raw.strip_prefix("mqtts://") {
+        (true, 8883u16, rest)
+    } else if let Some(rest) = raw.strip_prefix("mqtt://") {
+        (false, 1883u16, rest)
+    } else {
+        anyhow::bail!(
+            "[mqtt].broker {raw:?} has no recognised scheme — use \"mqtts://host[:port]\" \
+             (TLS, default port 8883) or \"mqtt://host[:port]\" (cleartext, default port 1883)"
+        );
+    };
+
+    // A single trailing slash is a common paste artifact; anything else is a
+    // path, which an MQTT broker URL has no place for.
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.contains('/') {
+        anyhow::bail!("[mqtt].broker {raw:?} must not contain a path");
+    }
+
+    // Bracketed IPv6 (`[::1]:8883`) is split explicitly so the address's own
+    // colons are never mistaken for the port separator.
+    let (host, port) = if let Some(after_bracket) = rest.strip_prefix('[') {
+        let (host, tail) = after_bracket.split_once(']').ok_or_else(|| {
+            anyhow::anyhow!("[mqtt].broker {raw:?} has an unterminated IPv6 literal")
+        })?;
+        let port = match tail {
+            "" => default_port,
+            t => parse_mqtt_port(
+                t.strip_prefix(':').ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "[mqtt].broker {raw:?} has trailing junk after the IPv6 literal"
+                    )
+                })?,
+                raw,
+            )?,
+        };
+        (host, port)
+    } else {
+        match rest.rsplit_once(':') {
+            Some((host, port)) => (host, parse_mqtt_port(port, raw)?),
+            None => (rest, default_port),
+        }
+    };
+
+    if host.is_empty() {
+        anyhow::bail!("[mqtt].broker {raw:?} has an empty host");
+    }
+    Ok(MqttEndpoint {
+        host: host.to_string(),
+        port,
+        tls,
+    })
+}
+
+/// Parse the `:port` half of a broker URL. Rejects non-numeric, out-of-range,
+/// and `0` (which would otherwise mean "any port" to the OS and never connect).
+fn parse_mqtt_port(port: &str, raw: &str) -> anyhow::Result<u16> {
+    let parsed: u16 = port.parse().map_err(|_| {
+        anyhow::anyhow!("[mqtt].broker {raw:?} has a non-numeric or out-of-range port {port:?}")
+    })?;
+    if parsed == 0 {
+        anyhow::bail!("[mqtt].broker {raw:?} has port 0, which is not a valid broker port");
+    }
+    Ok(parsed)
 }
 
 /// `[cec]` — HDMI-CEC lifecycle.
@@ -567,6 +745,63 @@ impl DaemonConfig {
         }
     }
 
+    /// The validated MQTT device identity.
+    ///
+    /// `Ok(None)` when `[mqtt].broker` is unset (MQTT is off, so there is no
+    /// identity to resolve). When `broker` IS set, a missing `device_id` is a
+    /// hard error: **fail closed**, matching the daemon's posture on token files.
+    /// Deriving the id from hostname/OS/IP is what the error message forbids —
+    /// the desktop is one physical machine that dual-boots, and a derived id
+    /// would split it into two Home Assistant devices that alternate.
+    pub fn mqtt_device_id(&self) -> anyhow::Result<Option<tv_shell_protocol::mqtt::DeviceId>> {
+        if self.mqtt.broker.is_none() {
+            return Ok(None);
+        }
+        let raw = self.mqtt.device_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "[mqtt].device_id is required when [mqtt].broker is set; it must be set \
+                 explicitly and identically on every boot of the machine — deriving it from \
+                 hostname or OS produces two Home Assistant devices for one dual-boot machine"
+            )
+        })?;
+        let id = tv_shell_protocol::mqtt::DeviceId::new(raw)
+            .map_err(|e| anyhow::anyhow!("[mqtt].device_id {raw:?} is invalid: {e}"))?;
+        Ok(Some(id))
+    }
+
+    /// Resolve the MQTT password from `[mqtt].password_file`. Same fail-closed
+    /// semantics as [`DaemonConfig::http_token`]: config-dir-confined, 0600, and
+    /// an empty file reads as "no password".
+    pub fn mqtt_password(&self) -> anyhow::Result<Option<String>> {
+        match self.mqtt.password_file.as_deref() {
+            Some(p) => read_token_file(
+                &resolve_token_path(p, "mqtt.password_file")?,
+                "mqtt.password_file",
+            ),
+            None => Ok(None),
+        }
+    }
+
+    /// The `[mqtt].ca_file` path, tilde-expanded only.
+    ///
+    /// A CA **certificate is public** — it is what the broker presents to every
+    /// client — so unlike a token file it is deliberately NOT mode-checked and
+    /// NOT confined to the config dir: an operator may legitimately point at a
+    /// system trust bundle (`/etc/ssl/certs/…`) or an Ansible-managed path.
+    pub fn mqtt_ca_path(&self) -> Option<PathBuf> {
+        self.mqtt.ca_file.as_deref().map(expand_tilde)
+    }
+
+    /// Parse `[mqtt].broker`. `Ok(None)` ⇒ MQTT is off; `Err` on a malformed URL
+    /// so the operator gets a clear startup failure rather than a silently-off
+    /// publisher.
+    pub fn mqtt_endpoint(&self) -> anyhow::Result<Option<MqttEndpoint>> {
+        match self.mqtt.broker.as_deref() {
+            None => Ok(None),
+            Some(raw) => parse_mqtt_endpoint(raw).map(Some),
+        }
+    }
+
     /// Resolve the Plex token from `[plex].token_file` (token-file only; inline
     /// tokens are not supported — see PlexConfig). Same fail-closed semantics as
     /// [`http_token`].
@@ -682,6 +917,11 @@ impl DaemonConfig {
             }
         }
 
+        // NOTE: `[mqtt]` is deliberately NOT validated here. See
+        // [`DaemonConfig::mqtt_settings`] — an optional subsystem's config must
+        // not be able to stop the daemon that owns the shell, CEC and input from
+        // starting.
+
         // The HTTP bridge always exposes its /dev/* tools, so a non-loopback
         // bridge with no auth is an unauthenticated RCE surface regardless of MCP.
         if let Some(addr) = self.http_bind()? {
@@ -708,6 +948,96 @@ impl DaemonConfig {
         }
 
         Ok(())
+    }
+
+    /// Resolve everything the MQTT actor needs, or explain why it cannot run.
+    ///
+    /// - `Ok(None)`   — `[mqtt].broker` is unset: MQTT is off, which is normal.
+    /// - `Ok(Some(_))` — fully resolved and safe to spawn.
+    /// - `Err(_)`     — the `[mqtt]` section is misconfigured.
+    ///
+    /// **`Err` must NOT abort the daemon.** This is deliberately not called from
+    /// [`DaemonConfig::validate`]. `validate()` aborts on the daemon's own
+    /// mandatory configuration; `[mqtt]` is an *optional* subsystem, and letting
+    /// it stop a daemon that owns the shell, CEC and the input fleet would make
+    /// MQTT subtractive — able to break features that have nothing to do with it.
+    /// The caller logs the error loudly and skips the actor; everything else
+    /// starts normally. A misconfigured `[mqtt]` costs you an MQTT device in Home
+    /// Assistant, nothing more.
+    ///
+    /// (A *malformed* `[mqtt]` table still aborts at parse time, because
+    /// `DaemonConfig` is `deny_unknown_fields`. That is a separate mechanism —
+    /// the point here is not to add a second abort path on top of it.)
+    ///
+    /// Resolution is still **fail-closed in what it publishes**: a missing
+    /// `device_id` refuses to invent one, and a world-readable password file
+    /// refuses to be read. It just fails the subsystem, not the process.
+    pub fn mqtt_settings(&self) -> anyhow::Result<Option<ResolvedMqtt>> {
+        // Both parse even when `broker` is unset (they answer Ok(None) then), so
+        // calling them unconditionally is the cheapest way to make a malformed
+        // URL / invalid device_id abort startup.
+        let endpoint = self.mqtt_endpoint()?;
+        self.mqtt_device_id()?;
+
+        let Some(endpoint) = endpoint else {
+            // MQTT off: nothing else in this section can matter.
+            return Ok(None);
+        };
+
+        // Half-configured credentials silently authenticate as anonymous against
+        // a broker that expects a user — refuse rather than let that look like a
+        // broker-side ACL problem.
+        match (
+            self.mqtt.username.is_some(),
+            self.mqtt.password_file.is_some(),
+        ) {
+            (true, false) => anyhow::bail!(
+                "config: [mqtt].username is set without [mqtt].password_file — set both or neither"
+            ),
+            (false, true) => anyhow::bail!(
+                "config: [mqtt].password_file is set without [mqtt].username — set both or neither"
+            ),
+            _ => {}
+        }
+
+        // Resolve eagerly: a path-escaping or group/other-readable password file
+        // must abort startup, not degrade to "no password".
+        self.mqtt_password()?;
+
+        if self.mqtt.heartbeat_secs == 0 {
+            anyhow::bail!(
+                "config: [mqtt].heartbeat_secs must be > 0 — a zero floor heartbeat would \
+                 publish on every tick and flood the broker"
+            );
+        }
+        if self.mqtt.keepalive_secs == 0 {
+            anyhow::bail!("config: [mqtt].keepalive_secs must be > 0");
+        }
+
+        if !endpoint.tls {
+            // A local test broker over cleartext is legitimate, so warn rather
+            // than refuse — but the credentials and every state payload cross the
+            // LAN in the clear, which the operator should know about.
+            tracing::warn!(
+                "config: [mqtt].broker uses the cleartext mqtt:// scheme ({}:{}) — the MQTT \
+                 password and all published state cross the LAN unencrypted. Use mqtts:// \
+                 unless this is a local test broker.",
+                endpoint.host,
+                endpoint.port
+            );
+        }
+
+        Ok(Some(ResolvedMqtt {
+            device_id: self
+                .mqtt_device_id()?
+                .expect("device_id resolves to Some whenever broker is Some"),
+            endpoint,
+            username: self.mqtt.username.clone(),
+            password: self.mqtt_password()?,
+            ca_path: self.mqtt_ca_path(),
+            heartbeat_secs: self.mqtt.heartbeat_secs,
+            keepalive_secs: self.mqtt.keepalive_secs,
+        }))
     }
 
     /// Either return an error (refuse to start) or, when the operator has opted
@@ -1098,6 +1428,281 @@ mod tests {
         // deny_unknown_fields on PanelConfig), so the panel can grow its config
         // without a matching daemon change.
         assert!(DaemonConfig::parse("[panel]\nfuture_panel_key = 42\n").is_ok());
+    }
+
+    // ── [mqtt] ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mqtt_section_parses_with_every_key_and_with_none() {
+        let c = DaemonConfig::parse(
+            r#"
+            [mqtt]
+            broker = "mqtts://mqtt.example:8883"
+            device_id = "htpc-1"
+            username = "tv-shell-htpc-1"
+            password_file = "~/.config/tv-shell/mqtt-password"
+            ca_file = "~/.config/tv-shell/mqtt-ca.pem"
+            heartbeat_secs = 15
+            keepalive_secs = 45
+        "#,
+        )
+        .unwrap();
+        assert_eq!(c.mqtt.broker.as_deref(), Some("mqtts://mqtt.example:8883"));
+        assert_eq!(c.mqtt.device_id.as_deref(), Some("htpc-1"));
+        assert_eq!(c.mqtt.username.as_deref(), Some("tv-shell-htpc-1"));
+        assert_eq!(
+            c.mqtt.password_file.as_deref(),
+            Some("~/.config/tv-shell/mqtt-password")
+        );
+        assert_eq!(c.mqtt.heartbeat_secs, 15);
+        assert_eq!(c.mqtt.keepalive_secs, 45);
+        assert_eq!(
+            c.mqtt_device_id()
+                .unwrap()
+                .map(|d| d.to_string())
+                .as_deref(),
+            Some("htpc-1")
+        );
+
+        // An empty [mqtt] table is all-default (MQTT off).
+        let empty = DaemonConfig::parse("[mqtt]\n").unwrap();
+        assert!(empty.mqtt.broker.is_none());
+        assert!(empty.mqtt.device_id.is_none());
+        assert!(empty.mqtt_ca_path().is_none());
+        assert!(empty.mqtt_endpoint().unwrap().is_none());
+    }
+
+    #[test]
+    fn mqtt_unknown_key_is_rejected() {
+        // Proves deny_unknown_fields is live on [mqtt] (unlike [cec]/[panel]).
+        assert!(DaemonConfig::parse("[mqtt]\nbrokr = \"mqtt://h\"\n").is_err());
+    }
+
+    #[test]
+    fn mqtt_interval_defaults_are_nonzero() {
+        // A derived Default would give 0 for both, which busy-loops the publisher.
+        let c = DaemonConfig::parse("").unwrap();
+        assert_eq!(c.mqtt.heartbeat_secs, 30);
+        assert_eq!(c.mqtt.keepalive_secs, 60);
+        assert_eq!(MqttConfig::default().heartbeat_secs, 30);
+        assert_eq!(MqttConfig::default().keepalive_secs, 60);
+    }
+
+    #[test]
+    fn mqtt_endpoint_parse_table() {
+        let ok: &[(&str, &str, u16, bool)] = &[
+            ("mqtt://h", "h", 1883, false),
+            ("mqtts://h", "h", 8883, true),
+            ("mqtts://h:1234", "h", 1234, true),
+            ("mqtt://h:1883", "h", 1883, false),
+            // A single trailing slash is tolerated (paste artifact).
+            ("mqtts://h/", "h", 8883, true),
+            // Bracketed IPv6: the address's own colons are not the port split.
+            ("mqtts://[::1]", "::1", 8883, true),
+            ("mqtts://[::1]:1234", "::1", 1234, true),
+        ];
+        for (raw, host, port, tls) in ok {
+            let mut c = DaemonConfig::default();
+            c.mqtt.broker = Some((*raw).to_string());
+            let got = c
+                .mqtt_endpoint()
+                .unwrap_or_else(|e| panic!("{raw} should parse: {e}"))
+                .unwrap();
+            assert_eq!(
+                got,
+                MqttEndpoint {
+                    host: (*host).to_string(),
+                    port: *port,
+                    tls: *tls
+                },
+                "for {raw}"
+            );
+        }
+
+        let bad = [
+            "http://h",        // wrong scheme
+            "h:1883",          // no scheme at all
+            "mqtts://",        // empty host
+            "mqtt://",         // empty host
+            "mqtts://h:0",     // port 0
+            "mqtts://h:abc",   // non-numeric port
+            "mqtts://h:99999", // out of u16 range
+            "mqtts://h/path",  // a path
+        ];
+        for raw in bad {
+            let mut c = DaemonConfig::default();
+            c.mqtt.broker = Some(raw.to_string());
+            assert!(c.mqtt_endpoint().is_err(), "{raw} should be rejected");
+            // …and it must disable the MQTT actor, not fail later at connect
+            // time. It must NOT abort the daemon — see
+            // `a_broken_mqtt_section_never_blocks_daemon_startup`.
+            assert!(c.mqtt_settings().is_err(), "{raw} should fail resolution");
+        }
+    }
+
+    /// A misconfigured `[mqtt]` must NOT stop the daemon starting.
+    ///
+    /// The daemon owns the shell, CEC and the input fleet. `[mqtt]` is an
+    /// optional subsystem, and letting its config abort startup would make MQTT
+    /// *subtractive* — able to break features that have nothing to do with it.
+    /// `validate()` therefore does not look at `[mqtt]` at all; the caller
+    /// resolves it separately, logs loudly, and skips only the MQTT actor.
+    ///
+    /// Every case below is a genuine misconfiguration that `mqtt_settings()`
+    /// rejects — the point is that `validate()` still says the daemon may start.
+    #[test]
+    fn a_broken_mqtt_section_never_blocks_daemon_startup() {
+        let broken = [
+            // Broker set, identity missing — cannot publish, must not abort.
+            "[mqtt]\nbroker = \"mqtts://h:8883\"\n",
+            // Identity present but invalid (topic wildcard).
+            "[mqtt]\nbroker = \"mqtts://h\"\ndevice_id = \"a/b\"\n",
+            // Unparseable broker URL.
+            "[mqtt]\nbroker = \"http://h\"\ndevice_id = \"htpc-1\"\n",
+            // Half-configured credentials.
+            "[mqtt]\nbroker = \"mqtts://h\"\ndevice_id = \"htpc-1\"\nusername = \"u\"\n",
+            // Zero intervals.
+            "[mqtt]\nbroker = \"mqtts://h\"\ndevice_id = \"htpc-1\"\nheartbeat_secs = 0\n",
+        ];
+        for raw in broken {
+            let cfg = DaemonConfig::parse(raw).expect("parses");
+            assert!(
+                cfg.mqtt_settings().is_err(),
+                "expected a config error for {raw:?}"
+            );
+            assert!(
+                cfg.validate().is_ok(),
+                "a broken [mqtt] must not abort daemon startup: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mqtt_broker_without_device_id_fails_closed() {
+        // THE fail-closed guarantee: a broker with no explicit device_id must
+        // abort startup rather than derive an id (which would split the
+        // dual-boot desktop into two Home Assistant devices).
+        let mut c = DaemonConfig::default();
+        c.mqtt.broker = Some("mqtts://h".to_string());
+        let err = c.mqtt_device_id().unwrap_err().to_string();
+        assert!(err.contains("[mqtt].device_id is required"), "got: {err}");
+        assert!(err.contains("dual-boot"), "got: {err}");
+        assert!(c.mqtt_settings().is_err());
+    }
+
+    #[test]
+    fn mqtt_invalid_device_id_is_rejected() {
+        // A `/` would inject extra topic levels; the protocol newtype rejects it
+        // and the config surfaces that as a startup error.
+        for bad in ["a/b", "a+b", "a#b", ""] {
+            let mut c = DaemonConfig::default();
+            c.mqtt.broker = Some("mqtts://h".to_string());
+            c.mqtt.device_id = Some(bad.to_string());
+            let err = c.mqtt_device_id().unwrap_err().to_string();
+            assert!(err.contains("[mqtt].device_id"), "for {bad:?}: {err}");
+            assert!(c.mqtt_settings().is_err(), "for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn mqtt_username_and_password_must_be_both_or_neither() {
+        let base = || {
+            let mut c = DaemonConfig::default();
+            c.mqtt.broker = Some("mqtts://h".to_string());
+            c.mqtt.device_id = Some("htpc-1".to_string());
+            c
+        };
+
+        let mut user_only = base();
+        user_only.mqtt.username = Some("tv-shell-htpc-1".to_string());
+        let err = user_only.mqtt_settings().unwrap_err().to_string();
+        assert!(err.contains("without [mqtt].password_file"), "got: {err}");
+
+        let mut pass_only = base();
+        pass_only.mqtt.password_file = Some("mqtt-password".to_string());
+        let err = pass_only.mqtt_settings().unwrap_err().to_string();
+        assert!(err.contains("without [mqtt].username"), "got: {err}");
+
+        // Neither set is fine (anonymous broker).
+        assert!(base().mqtt_settings().unwrap().is_some());
+    }
+
+    #[test]
+    fn mqtt_zero_intervals_are_refused() {
+        for (heartbeat, keepalive, needle) in
+            [(0u64, 60u64, "heartbeat_secs"), (30, 0, "keepalive_secs")]
+        {
+            let mut c = DaemonConfig::default();
+            c.mqtt.broker = Some("mqtts://h".to_string());
+            c.mqtt.device_id = Some("htpc-1".to_string());
+            c.mqtt.heartbeat_secs = heartbeat;
+            c.mqtt.keepalive_secs = keepalive;
+            let err = c.mqtt_settings().unwrap_err().to_string();
+            assert!(err.contains(needle), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn mqtt_off_ignores_every_other_key() {
+        // No broker ⇒ no identity to resolve and nothing to validate, even with
+        // a deliberately broken device_id / half-set credentials present.
+        let c = DaemonConfig::parse(
+            r#"
+            [mqtt]
+            device_id = "not/valid"
+            username = "someone"
+            heartbeat_secs = 0
+            keepalive_secs = 0
+        "#,
+        )
+        .unwrap();
+        assert!(c.mqtt_device_id().unwrap().is_none());
+        assert!(c.mqtt_endpoint().unwrap().is_none());
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn mqtt_ca_path_expands_tilde_and_is_not_confined() {
+        // A CA certificate is public: expand `~`, but do NOT require 0600 and do
+        // NOT confine it to the config dir (a system trust bundle is legitimate).
+        let mut c = DaemonConfig::default();
+        c.mqtt.ca_file = Some("/etc/ssl/certs/broker-ca.pem".to_string());
+        assert_eq!(
+            c.mqtt_ca_path().unwrap(),
+            PathBuf::from("/etc/ssl/certs/broker-ca.pem")
+        );
+        if std::env::var_os("HOME").is_some() {
+            c.mqtt.ca_file = Some("~/mqtt-ca.pem".to_string());
+            let p = c.mqtt_ca_path().unwrap();
+            assert!(p.is_absolute(), "{}", p.display());
+            assert!(p.ends_with("mqtt-ca.pem"), "{}", p.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mqtt_world_readable_password_file_disables_mqtt() {
+        with_temp_config_dir(|gs| {
+            let pw = write_token(gs, "mqtt-password", "hunter2\n", 0o644);
+            let mut c = DaemonConfig::default();
+            c.mqtt.broker = Some("mqtts://h".to_string());
+            c.mqtt.device_id = Some("htpc-1".to_string());
+            c.mqtt.username = Some("tv-shell-htpc-1".to_string());
+            c.mqtt.password_file = Some(pw.to_string_lossy().into_owned());
+            let err = c.mqtt_password().unwrap_err().to_string();
+            assert!(err.contains("group/other-accessible"), "got: {err}");
+            // Fail-closed in what it PUBLISHES: the actor does not start with a
+            // leaked secret. But the daemon itself still starts.
+            assert!(c.mqtt_settings().is_err());
+            assert!(c.validate().is_ok());
+
+            // The same file at 0600 resolves cleanly.
+            let pw = write_token(gs, "mqtt-password", "hunter2\n", 0o600);
+            c.mqtt.password_file = Some(pw.to_string_lossy().into_owned());
+            assert_eq!(c.mqtt_password().unwrap().as_deref(), Some("hunter2"));
+            assert!(c.mqtt_settings().unwrap().is_some());
+            c.validate().unwrap();
+        });
     }
 
     #[test]

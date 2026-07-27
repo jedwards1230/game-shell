@@ -65,6 +65,21 @@ jobs:
         id: test
         run: cargo test -p tv-shell-host -p tv-shell-protocol
 
+      # Acceptance gate: the host's whole reason to be a separate crate is a
+      # pure-Rust graph that builds clean on Windows and macOS with no system
+      # toolchain. Nothing enforced that — this job ran only fmt/clippy/build/
+      # test, and the repo's one `ldd` assertion is in rust.yml and covers the
+      # daemon binary alone.
+      #
+      # Deliberately inside the OS matrix: the resolved graph is
+      # target-dependent, so a provider that only appears on Windows is only
+      # catchable on the Windows leg. `shell: bash` because windows-latest
+      # defaults to pwsh.
+      - name: Assert pure-Rust TLS graph
+        id: tls
+        shell: bash
+        run: ./scripts/assert-pure-rust-tls.sh -p tv-shell-host -p tv-shell-protocol
+
       - name: Summary
         if: always()
         shell: bash
@@ -78,4 +93,5 @@ jobs:
             echo "| Clippy | ${{ steps.clippy.outcome }} |"
             echo "| Build | ${{ steps.build.outcome }} |"
             echo "| Test | ${{ steps.test.outcome }} |"
+            echo "| Pure-Rust TLS | ${{ steps.tls.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"

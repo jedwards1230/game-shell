@@ -11,6 +11,9 @@ token**, and are thin adapters over the same action logic in
 | MCP server (rmcp 1.7.0, streamable-HTTP) | `daemon/src/mcp.rs` | `[mcp] bind = "host:port"` | `http://<bind>/mcp` |
 
 > The web control panel that consumes this surface is documented in [`PANEL.md`](PANEL.md).
+> A third, **outbound** surface — MQTT command topics, gated by broker credentials
+> rather than this bearer token — is summarised [below](#mqtt-command-topics-mqttrs)
+> and documented in [`MQTT.md`](MQTT.md).
 
 Relationship to the Unix-socket IPC ([IPC_PROTOCOL.md](IPC_PROTOCOL.md)): the IPC
 socket (`0o600`, owner-only) is the shell↔daemon contract. This control surface is
@@ -292,6 +295,26 @@ URIs return a JSON-RPC `resource_not_found` (-32002).
 `[mcp] allowed_hosts = ["host[:port]", …]` sets the rmcp Host
 allowlist (loopback always allowed; a concrete bind IP is auto-added; a wildcard
 bind with no override disables Host matching and relies on the token, `mcp.rs:887`).
+
+## MQTT command topics (`mqtt.rs`)
+
+A third control surface, and the only **outbound** one — the process dials the
+broker instead of listening, so nothing is bound and the daemon's bearer token
+does not apply. Access is gated by **broker credentials and topic ACLs** instead.
+Opt-in via `[mqtt].broker` (daemon) or `TV_SHELL_MQTT_BROKER` (sidecar); full
+reference in [`MQTT.md`](MQTT.md).
+
+Commands arrive non-retained on `tv-shell/<device_id>/cmd/<name>`; the payload is
+ignored. The two binaries accept **different** names:
+
+| Binary | Accepted names |
+|---|---|
+| `tv-shell-input` (daemon) | `suspend`, `restart-shell`, and any name `bridge_core::is_valid_intent` accepts (the vocabulary below) |
+| `tv-shell-host` (sidecar) | `sleep`, `quit`, `open-bpm` |
+
+`suspend` reuses `interpret_suspend` — the same two-step gate as `POST /suspend`
+— so the two transports cannot drift on it. Unknown names are logged at `warn`
+and dropped.
 
 ## Intent vocabulary
 
