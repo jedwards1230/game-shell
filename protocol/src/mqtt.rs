@@ -402,18 +402,25 @@ pub struct DeviceDiscovery {
     /// publishing an identical component set from both desktop boots exists to
     /// prevent. Do not "optimize" this to a `HashMap`.
     pub cmps: BTreeMap<String, Component>,
-    /// Shared state topic for every component.
-    pub state_topic: String,
     /// Shared availability, as a **list** — see [`AvailabilityEntry`].
     ///
-    /// Home Assistant's device-based discovery accepts `availability` (the list
-    /// form) as a shared root option; it does **not** accept `availability_topic`
-    /// there. Unknown root keys are silently *ignored*, not rejected, so the
-    /// wrong spelling parses cleanly, registers every entity, and leaves them
-    /// permanently "available" — the LWT would fire and nothing in Home
-    /// Assistant would change. Independent per-process connections exist
-    /// precisely so availability is a fact rather than a probe result, so this
-    /// has to be the form HA actually reads.
+    /// Home Assistant documents `availability` (the list form) among the shared
+    /// root options of a device-based discovery document; `availability_topic`
+    /// is not in that set, and unknown root keys are documented as *allowed but
+    /// ignored* rather than rejected.
+    ///
+    /// So the list form is the unambiguously-supported spelling, and that is why
+    /// it is used here. Note what has **not** been established: whether the
+    /// `availability_topic` spelling also happens to work. That cannot be
+    /// settled without a live broker and a live Home Assistant, neither of which
+    /// was reachable when this was written — so treat "the other form is broken"
+    /// as untested, and this one as the safe encoding either way.
+    ///
+    /// The stakes, which is why it is spelled out at all: if availability were
+    /// silently ignored, every entity would register correctly and then sit
+    /// permanently "available" while the Last Will fired into the void.
+    /// Independent per-process connections exist precisely so availability is a
+    /// fact rather than a probe result.
     pub availability: Vec<AvailabilityEntry>,
     /// QoS for the shared subscriptions.
     pub qos: u8,
@@ -478,6 +485,20 @@ pub struct Component {
     pub name: String,
     /// Entity unique id — always [`DeviceId::unique_id`] of this component's key.
     pub unique_id: String,
+    /// The topic this entity reads its state from.
+    ///
+    /// Set per-component rather than once at the document root, even though
+    /// every state-bearing entity here shares the same topic. `button` has no
+    /// state topic at all, so a root `state_topic` would apply an option its
+    /// platform does not accept. It is *probably* stripped harmlessly — but
+    /// "probably harmless because Home Assistant discards it" is exactly the
+    /// assumption that made the root `availability_topic` bug possible, and this
+    /// way the document is correct under every reading of the merge rules.
+    ///
+    /// Stamped automatically by [`base_discovery`] onto every non-`button`
+    /// component, so it cannot be forgotten one entity at a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_topic: Option<String>,
     /// Jinja template extracting this entity's value from the state payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_template: Option<String>,
@@ -526,6 +547,7 @@ impl Component {
             platform: platform.to_string(),
             name: name.into(),
             unique_id: unique_id.into(),
+            state_topic: None,
             value_template: None,
             device_class: None,
             state_class: None,
@@ -621,13 +643,24 @@ fn bool_template(expr: &str) -> String {
     format!("{{% if {expr} %}}ON{{% else %}}OFF{{% endif %}}")
 }
 
-/// Render a possibly-null value, falling back to `unknown`.
+/// Render a possibly-null value, falling back to Home Assistant's null sentinel.
 ///
-/// Written explicitly rather than with `| default('unknown', true)`: that filter
-/// treats `0` as falsy, so a real `0` (a zero CPU percentage, logical address 0)
-/// would render as `unknown`.
+/// Two independent traps here, both of which produce a *silently* wrong entity:
+///
+/// 1. **The fallback must be `none`, not the string `'unknown'`.** Jinja renders
+///    `none` as the literal `None`, which is the sentinel Home Assistant's MQTT
+///    sensor documents: *"a `'None'` value will set the sensor to an `unknown`
+///    state."* Several of these sensors carry `unit_of_measurement` or
+///    `state_class`, which marks them numeric — and the null case is not exotic,
+///    it is every publish before the first metrics sample. `None` is the
+///    documented spelling for all of them, string-valued sensors included.
+/// 2. **Written explicitly rather than with `| default(x, true)`.** That filter
+///    treats `0` as falsy, so a real `0` — a zero CPU percentage, CEC logical
+///    address `0`, which is the TV — would be reported as null. Verified against
+///    the live template engine: `{{ 0 | default('unknown', true) }}` renders
+///    `unknown`, whereas the form below renders `0`.
 fn nullable_template(expr: &str) -> String {
-    format!("{{{{ {expr} if {expr} is not none else 'unknown' }}}}")
+    format!("{{{{ {expr} if {expr} is not none else none }}}}")
 }
 
 /// A plain `{{ expr }}` template — only for values that are never null.
@@ -671,27 +704,54 @@ fn seq_component(device_id: &DeviceId) -> Component {
         .diagnostic()
 }
 
+/// Assemble a discovery document from a component set.
+///
+/// **Deliberately takes no software version.** An earlier revision stamped one
+/// into `dev.sw_version` and `o.sw_version`, which was a real §4a hole: the
+/// desktop's two boots install `tv-shell-host` independently, so updating
+/// CachyOS but not Windows made every OS switch rewrite the *retained* discovery
+/// document with different bytes — the same churn mechanism the identical
+/// component set exists to prevent. It also made the
+/// "identical across boots" claim false while the test still passed, because the
+/// test happened to pass the same version to both calls.
+///
+/// The running version is not lost: it is published as a `*_version` diagnostic
+/// **entity** from the state payload, which is the right home for something that
+/// legitimately changes per boot. That leaves this function a pure function of
+/// `device_id` alone, so identical-across-boots is structural rather than a
+/// convention someone has to remember.
 fn base_discovery(
     device_id: &DeviceId,
     model: &str,
-    sw_version: &str,
     cmps: BTreeMap<String, Component>,
 ) -> DeviceDiscovery {
+    // Stamp the shared state topic onto every entity that has one. `button` has
+    // no state topic, so it is skipped rather than inheriting an option its
+    // platform does not accept (see `Component::state_topic`).
+    let cmps = cmps
+        .into_iter()
+        .map(|(key, mut component)| {
+            if component.platform != "button" {
+                component.state_topic = Some(device_id.state_topic());
+            }
+            (key, component)
+        })
+        .collect();
+
     DeviceDiscovery {
         dev: DeviceInfo {
             identifiers: vec![device_id.ha_device_identifier()],
             name: format!("{TOPIC_ROOT} {device_id}"),
             manufacturer: Some(TOPIC_ROOT.to_string()),
             model: Some(model.to_string()),
-            sw_version: Some(sw_version.to_string()),
+            sw_version: None,
         },
         o: OriginInfo {
             name: TOPIC_ROOT.to_string(),
-            sw_version: Some(sw_version.to_string()),
+            sw_version: None,
             support_url: Some("https://github.com/jedwards1230/tv-shell".to_string()),
         },
         cmps,
-        state_topic: device_id.state_topic(),
         availability: vec![AvailabilityEntry {
             topic: device_id.avail_topic(),
             payload_available: AVAIL_ONLINE.to_string(),
@@ -708,14 +768,18 @@ fn base_discovery(
 /// Windows, and this message is *retained*: if the component set differed per
 /// boot, every OS switch would rewrite the retained config, adding and removing
 /// Home Assistant entities each time. The guarantee is structural — the function
-/// has no input that could make it differ — and is pinned by
-/// `host_discovery_is_identical_across_boots`. Entities that only apply to one
-/// boot simply report `unknown`/`unavailable` on the other.
+/// The guarantee is structural: `device_id` is this function's ONLY input, and
+/// it is by definition the same on both boots (one machine, one id). It is
+/// pinned by `host_discovery_is_identical_across_boots`. Entities that only
+/// apply to one boot simply report `unknown`/`unavailable` on the other.
+///
+/// A software version is deliberately absent — see [`base_discovery`] for why
+/// stamping one in was a real hole rather than a cosmetic one.
 ///
 /// Steam library size and the current game's *name* are deliberately **not**
 /// exposed: both would need fields [`crate::StatusResponse`] does not carry, and
 /// `status` is contractually that type verbatim. Deferred.
-pub fn host_discovery(device_id: &DeviceId, sw_version: &str) -> DeviceDiscovery {
+pub fn host_discovery(device_id: &DeviceId) -> DeviceDiscovery {
     let mut cmps = BTreeMap::new();
 
     cmps.insert(
@@ -774,14 +838,14 @@ pub fn host_discovery(device_id: &DeviceId, sw_version: &str) -> DeviceDiscovery
         ),
     );
 
-    base_discovery(device_id, "tv-shell-host", sw_version, cmps)
+    base_discovery(device_id, "tv-shell-host", cmps)
 }
 
 /// Discovery document for the TV client daemon (`status` = [`ShellSnapshot`]).
 ///
 /// Settings switches/numbers/selects are a later phase and are intentionally
 /// absent — adding one rewrites this retained message.
-pub fn shell_discovery(device_id: &DeviceId, sw_version: &str) -> DeviceDiscovery {
+pub fn shell_discovery(device_id: &DeviceId) -> DeviceDiscovery {
     let mut cmps = BTreeMap::new();
 
     cmps.insert(
@@ -891,7 +955,7 @@ pub fn shell_discovery(device_id: &DeviceId, sw_version: &str) -> DeviceDiscover
         );
     }
 
-    base_discovery(device_id, "tv-shell-input", sw_version, cmps)
+    base_discovery(device_id, "tv-shell-input", cmps)
 }
 
 #[cfg(test)]
@@ -1044,8 +1108,8 @@ mod tests {
         // would rewrite that retained config and churn HA entities. This pins
         // the structural guarantee: host_discovery has no OS input at all.
         let device = id("desktop");
-        let a = serde_json::to_string(&host_discovery(&device, "1.2.3")).unwrap();
-        let b = serde_json::to_string(&host_discovery(&device, "1.2.3")).unwrap();
+        let a = serde_json::to_string(&host_discovery(&device)).unwrap();
+        let b = serde_json::to_string(&host_discovery(&device)).unwrap();
         assert_eq!(a, b);
         assert!(
             !a.contains("linux"),
@@ -1055,13 +1119,25 @@ mod tests {
             !a.contains("windows"),
             "discovery must not mention an OS: {a}"
         );
+        // `device_id` is the ONLY input, so there is nothing else a boot could
+        // vary. An earlier revision also took `sw_version` and stamped it into
+        // this retained document — which the previous version of this test could
+        // not catch, because it passed the same version to both calls. The two
+        // boots install independently, so that was a real hole: update CachyOS,
+        // skip Windows, and every OS switch rewrote the retained config.
+        //
+        // Assert the absence directly rather than trusting the signature.
+        assert!(
+            !a.contains("\"sw\""),
+            "no software version belongs in the retained discovery doc: {a}"
+        );
     }
 
     #[test]
     fn discovery_component_keys_are_stable() {
         // Adding or removing an entity silently rewrites a RETAINED message —
         // any change here must be a conscious one.
-        let host = host_discovery(&id("desktop"), "1.2.3");
+        let host = host_discovery(&id("desktop"));
         let host_keys: Vec<&str> = host.cmps.keys().map(String::as_str).collect();
         assert_eq!(
             host_keys,
@@ -1078,7 +1154,7 @@ mod tests {
             ]
         );
 
-        let shell = shell_discovery(&id("htpc-1"), "1.2.3");
+        let shell = shell_discovery(&id("htpc-1"));
         let shell_keys: Vec<&str> = shell.cmps.keys().map(String::as_str).collect();
         assert_eq!(
             shell_keys,
@@ -1109,8 +1185,8 @@ mod tests {
     #[test]
     fn discovery_unique_ids_are_prefixed() {
         for (device, doc) in [
-            (id("desktop"), host_discovery(&id("desktop"), "1.2.3")),
-            (id("htpc-1"), shell_discovery(&id("htpc-1"), "1.2.3")),
+            (id("desktop"), host_discovery(&id("desktop"))),
+            (id("htpc-1"), shell_discovery(&id("htpc-1"))),
         ] {
             let prefix = format!("{}-", device.ha_device_identifier());
             for (key, cmp) in &doc.cmps {
@@ -1129,8 +1205,8 @@ mod tests {
         // Jinja renders Python bools as True/False, which matches neither
         // payload — so every binary sensor must use the if/else ON/OFF form.
         for doc in [
-            host_discovery(&id("desktop"), "1.2.3"),
-            shell_discovery(&id("htpc-1"), "1.2.3"),
+            host_discovery(&id("desktop")),
+            shell_discovery(&id("htpc-1")),
         ] {
             for (key, cmp) in &doc.cmps {
                 if cmp.platform != "binary_sensor" {
@@ -1151,8 +1227,8 @@ mod tests {
     fn nullable_templates_do_not_use_the_default_filter() {
         // `| default('unknown', true)` treats a real 0 as falsy.
         for doc in [
-            host_discovery(&id("desktop"), "1.2.3"),
-            shell_discovery(&id("htpc-1"), "1.2.3"),
+            host_discovery(&id("desktop")),
+            shell_discovery(&id("htpc-1")),
         ] {
             for (key, cmp) in &doc.cmps {
                 if let Some(template) = &cmp.value_template {
@@ -1162,9 +1238,47 @@ mod tests {
         }
     }
 
+    /// The null fallback must be Home Assistant's documented sentinel — the
+    /// literal `None` that Jinja's `none` renders to — never the string
+    /// `'unknown'`.
+    ///
+    /// HA's MQTT sensor documents *"a `'None'` value will set the sensor to an
+    /// `unknown` state."* Several of these sensors carry `unit_of_measurement`
+    /// or `state_class`, which marks them numeric, and the null case is the
+    /// common path rather than an edge: every publish before the first metrics
+    /// sample has no CPU/memory reading at all.
+    ///
+    /// Pinned here because it is invisible without a live broker AND a live
+    /// Home Assistant — the payload would serialise, the entity would register,
+    /// and it would simply never show a value.
+    #[test]
+    fn nullable_templates_use_the_documented_none_sentinel() {
+        for doc in [
+            host_discovery(&id("desktop")),
+            shell_discovery(&id("htpc-1")),
+        ] {
+            for (key, cmp) in &doc.cmps {
+                let Some(template) = &cmp.value_template else {
+                    continue;
+                };
+                if !template.contains("is not none") {
+                    continue;
+                }
+                assert!(
+                    template.ends_with("else none }}"),
+                    "{key} must fall back to the `none` sentinel, not a string: {template}"
+                );
+                assert!(
+                    !template.contains("'unknown'"),
+                    "{key} uses the 'unknown' string instead of the None sentinel: {template}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn discovery_serialises_platform_as_p() {
-        let json = serde_json::to_string(&host_discovery(&id("desktop"), "1.2.3")).unwrap();
+        let json = serde_json::to_string(&host_discovery(&id("desktop"))).unwrap();
         assert!(json.contains(r#""p":"sensor""#), "{json}");
         assert!(!json.contains(r#""platform":"#), "{json}");
     }
@@ -1172,11 +1286,21 @@ mod tests {
     #[test]
     fn discovery_root_carries_the_shared_topics_and_payloads() {
         let device = id("htpc-1");
-        let doc = shell_discovery(&device, "0.1.0");
+        let doc = shell_discovery(&device);
         assert_eq!(doc.dev.identifiers, vec!["tv-shell-htpc-1".to_string()]);
         assert_eq!(doc.o.name, "tv-shell");
-        assert_eq!(doc.o.sw_version.as_deref(), Some("0.1.0"));
-        assert_eq!(doc.state_topic, "tv-shell/htpc-1/state");
+        // No software version in the RETAINED document — the two desktop boots
+        // update independently, so a version here would rewrite the retained
+        // config on every boot switch. It is published as a state entity instead.
+        assert_eq!(doc.o.sw_version, None);
+        assert_eq!(doc.dev.sw_version, None);
+        // The state topic is stamped per-component, not at the root — buttons
+        // have no state topic and must not inherit one.
+        assert_eq!(
+            doc.cmps["shell_state"].state_topic.as_deref(),
+            Some("tv-shell/htpc-1/state")
+        );
+        assert_eq!(doc.cmps["suspend"].state_topic, None);
         assert_eq!(doc.availability.len(), 1);
         assert_eq!(doc.availability[0].topic, "tv-shell/htpc-1/avail");
         assert_eq!(doc.availability[0].payload_available, "online");
@@ -1195,8 +1319,8 @@ mod tests {
     #[test]
     fn availability_serialises_as_the_list_form_ha_reads() {
         for doc in [
-            shell_discovery(&id("htpc-1"), "0.1.0"),
-            host_discovery(&id("desktop"), "0.1.0"),
+            shell_discovery(&id("htpc-1")),
+            host_discovery(&id("desktop")),
         ] {
             let json = serde_json::to_string(&doc).unwrap();
             assert!(json.contains(r#""availability":[{"topic":""#), "{json}");
@@ -1219,8 +1343,8 @@ mod tests {
     fn object_id_is_unset_everywhere() {
         // Pinning HA entity_ids belongs to the deferred cutover phase.
         for doc in [
-            host_discovery(&id("desktop"), "1.2.3"),
-            shell_discovery(&id("htpc-1"), "1.2.3"),
+            host_discovery(&id("desktop")),
+            shell_discovery(&id("htpc-1")),
         ] {
             for (key, cmp) in &doc.cmps {
                 assert!(cmp.object_id.is_none(), "{key} pins an object_id");

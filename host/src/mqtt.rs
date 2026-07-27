@@ -515,7 +515,7 @@ async fn on_connected(client: AsyncClient, device_id: DeviceId, force_publish: A
 /// Serialize the Home Assistant discovery document exactly as the publish site
 /// does. Pinned OS-free by `discovery_payload_has_no_os_branching`.
 fn discovery_payload(device_id: &DeviceId) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&host_discovery(device_id, HOST_VERSION))
+    serde_json::to_vec(&host_discovery(device_id))
 }
 
 /// Probe the host and publish the state envelope on change or on the heartbeat.
