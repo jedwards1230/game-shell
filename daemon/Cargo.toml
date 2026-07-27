@@ -68,7 +68,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # Typed daemon config (~/.config/tv-shell/config.toml). Cross-platform pure
 # Rust; replaces the old daemon.env KEY=VALUE loader.
-toml = "0.8"
+toml = "1.1"
 # Pure-Rust .desktop parser (cross-platform): drives app discovery (apps.rs).
 # Deliberately NOT Linux-gated so the parse/filter logic unit-tests on macOS.
 # default-features = false drops the optional `gettext` feature (and its C
@@ -76,7 +76,7 @@ toml = "0.8"
 # needed and CI/macOS stay free of a system gettext requirement.
 freedesktop-desktop-entry = { version = "0.8", default-features = false }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
@@ -95,13 +95,13 @@ subtle = "2"
 time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
 # base64 encoding for MCP screenshot tool (PNG bytes → base64 for Content::image).
 # Optional: only needed under the `mcp` feature.
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 
 # MCP server (rmcp 1.7.0 — official Model Context Protocol Rust SDK).
 # Optional + feature-gated (`mcp`): brings in axum, schemars, and the full
 # MCP protocol machinery. The `transport-streamable-http-server` feature pulls
 # in axum transitively; we declare axum directly so we can use it in mcp.rs.
-rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"], optional = true }
+rmcp = { version = "2.2.0", features = ["server", "macros", "transport-streamable-http-server"], optional = true }
 # axum is used in mcp.rs to host the StreamableHttpService. Also optional so
 # the default build never links it. Version must be compatible with rmcp's
 # transitive axum requirement (rmcp 1.7.0 uses axum 0.8).
@@ -180,7 +180,7 @@ bluer = { version = "0.17.4", default-features = false, features = ["bluetoothd"
 # debounce window so we don't hand-roll timers. Pulls `notify` transitively.
 # Linux-only: inotify is a Linux syscall; watching is not meaningful on macOS
 # (FSEvents is a different API), and the watch module is cfg-gated to match.
-notify-debouncer-full = "0.3"
+notify-debouncer-full = "0.7"
 
 # HDMI-CEC (#94): cec-rs wraps libcec (GPL-2.0) — compatible under GPL-3.0 (#88).
 # 12.0.1 / libcec-sys 9.0.3 support libcec 7. The `cec` feature STATIC-LINKS a
