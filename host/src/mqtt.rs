@@ -311,9 +311,10 @@ fn parse_broker_url(raw: &str) -> Result<(String, u16, bool), String> {
 
 /// Read the configured PEM CA bundle, if any.
 ///
-/// Called from `main` **before** the actor is spawned so an unreadable CA fails
-/// startup loudly instead of silently degrading the connection to the platform
-/// trust store.
+/// Called from `main` before the actor is spawned. An unreadable bundle is an
+/// `Err` **the caller warns about and degrades from** — it does not fail startup:
+/// the broker presents a publicly-trusted certificate, so the platform trust
+/// store is the normal path and `ca_file` only matters for a private CA.
 pub async fn load_ca(path: Option<&Path>) -> anyhow::Result<Option<Vec<u8>>> {
     match path {
         None => Ok(None),
@@ -714,6 +715,46 @@ mod tests {
         assert_eq!(settings_from(lookup(&[])), Ok(None));
         // An empty value reads as unset, not as a configured-but-blank broker.
         assert_eq!(settings_from(lookup(&[("MQTT_BROKER", "  ")])), Ok(None));
+    }
+
+    /// A broken MQTT environment disables MQTT and nothing else.
+    ///
+    /// The QML shell's Steam widget depends on this sidecar's HTTP routes, so an
+    /// MQTT typo — most likely on Windows, where these arrive through per-user
+    /// `win_environment` variables — must not take the HTTP listener down with
+    /// it. `main` logs the error and carries on to `axum::serve`; the contract
+    /// this test pins is that resolution reports the failure as a value rather
+    /// than panicking or aborting.
+    #[test]
+    fn a_broken_mqtt_environment_only_disables_mqtt() {
+        let broken: [&[(&str, &str)]; 4] = [
+            // Broker set, identity missing.
+            &[("MQTT_BROKER", "mqtts://broker:8883")],
+            // Identity present but not topic-safe.
+            &[("MQTT_BROKER", "mqtt://broker"), ("MQTT_DEVICE_ID", "a/b")],
+            // Unparseable broker URL.
+            &[
+                ("MQTT_BROKER", "http://broker"),
+                ("MQTT_DEVICE_ID", "desktop"),
+            ],
+            // Half-configured credentials.
+            &[
+                ("MQTT_BROKER", "mqtts://broker"),
+                ("MQTT_DEVICE_ID", "desktop"),
+                ("MQTT_USERNAME", "tv-shell-desktop"),
+            ],
+        ];
+        for env in broken {
+            let got = settings_from(lookup(env));
+            assert!(got.is_err(), "expected a config error for {env:?}");
+        }
+        // And the healthy case still resolves, so the test cannot pass vacuously.
+        assert!(settings_from(lookup(&[
+            ("MQTT_BROKER", "mqtts://broker"),
+            ("MQTT_DEVICE_ID", "desktop"),
+        ]))
+        .expect("valid config resolves")
+        .is_some());
     }
 
     #[test]
