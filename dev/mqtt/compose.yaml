@@ -1,0 +1,28 @@
+# Ephemeral MQTT broker for the tv-shell MQTT integration harness.
+#
+#   docker compose -f dev/mqtt/compose.yaml up -d --wait
+#   TV_SHELL_TEST_BROKER=mqtt://127.0.0.1:1883 \
+#     cargo test -p tv-shell-host --test mqtt_broker -- --ignored --test-threads=1
+#   docker compose -f dev/mqtt/compose.yaml down -v
+#
+# CI runs this exact file (.github/workflows/mqtt.yml), so the committed compose
+# file is itself exercised rather than being a stale README snippet.
+#
+# Override the published port when 1883 is already taken locally:
+#   TV_SHELL_MQTT_PORT=18830 docker compose -f dev/mqtt/compose.yaml up -d --wait
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    ports:
+      - "${TV_SHELL_MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      # A real round-trip, not a port check: `up --wait` must not return until
+      # the broker actually accepts a CONNECT and a PUBLISH. A TCP-open probe
+      # would go green while mosquitto was still refusing anonymous clients.
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-p", "1883", "-t", "healthcheck", "-m", "ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
