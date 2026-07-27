@@ -38,6 +38,10 @@ cargo build -p tv-shell-host -p tv-shell-protocol
 cargo test -p tv-shell-host -p tv-shell-protocol
 ```
 
+The broker-backed MQTT tests are `#[ignore]`-gated behind `TV_SHELL_TEST_BROKER`,
+so the line above stays fast and offline. To run them you need a broker — see
+[docs/MQTT.md](docs/MQTT.md#testing).
+
 ### Panel (`panel/` — LAN web control panel, Linux/macOS)
 
 ```bash
