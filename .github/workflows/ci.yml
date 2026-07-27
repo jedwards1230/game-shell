@@ -42,6 +42,7 @@ jobs:
       qml: ${{ steps.filter.outputs.qml }}
       qmlformat: ${{ steps.filter.outputs.qmlformat }}
       widgets: ${{ steps.filter.outputs.widgets }}
+      mqtt: ${{ steps.filter.outputs.mqtt }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
@@ -83,6 +84,21 @@ jobs:
               - 'scripts/check-widgets-index.py'
               - '.github/workflows/widgets.yml'
               - '.github/workflows/ci.yml'
+            # The broker-backed MQTT tests exercise the host binary against a
+            # real mosquitto, so they track the host crate, the shared protocol
+            # crate (which owns every topic/discovery builder), and the harness
+            # itself. Slow by nature — they wait out heartbeat and Last-Will
+            # timers — so they stay their own area rather than riding along in
+            # host.yml's 3-OS matrix.
+            mqtt:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'host/**'
+              - 'protocol/**'
+              - 'dev/mqtt/**'
+              - 'scripts/mqtt-smoke-test.sh'
+              - '.github/workflows/mqtt.yml'
+              - '.github/workflows/ci.yml'
 
   rust:
     needs: changes
@@ -114,10 +130,15 @@ jobs:
     if: needs.changes.outputs.widgets == 'true'
     uses: ./.github/workflows/widgets.yml
 
+  mqtt:
+    needs: changes
+    if: needs.changes.outputs.mqtt == 'true'
+    uses: ./.github/workflows/mqtt.yml
+
   # The ONLY required check. Always runs; fails if any area job failed/was
   # cancelled. Skipped area jobs (their area didn't change) count as success.
   ci-gate:
-    needs: [changes, rust, host, qml, qmlformat, widgets]
+    needs: [changes, rust, host, qml, qmlformat, widgets, mqtt]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -131,6 +152,7 @@ jobs:
           echo "  qml=${{ needs.qml.result }}"
           echo "  qmlformat=${{ needs.qmlformat.result }}"
           echo "  widgets=${{ needs.widgets.result }}"
+          echo "  mqtt=${{ needs.mqtt.result }}"
           exit 1
       - name: All required jobs passed or were skipped
         run: echo "CI gate green."

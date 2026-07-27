@@ -1,0 +1,131 @@
+# Broker-backed MQTT integration tests for the tv-shell host sidecar.
+#
+# WHY THIS IS A SEPARATE AREA (not a job in host.yml): host.yml is a 3-OS matrix
+# whose whole point is proving the host's pure-Rust graph builds on
+# Linux/macOS/Windows. These tests need a live broker, which only the Linux
+# runner can host cheaply, and they are slow (they wait out heartbeat and
+# Last-Will timers). Bolting them onto the matrix would triple the broker cost
+# and stall the cross-platform signal behind a timer.
+#
+# The 26 existing MQTT unit tests (12 in daemon/src/mqtt.rs, 14 in
+# host/src/mqtt.rs) are pure functions by design — every *decision* was factored
+# out so it needs no broker. This job covers the part that design left
+# uncovered: the I/O glue. Topic names, retain flags, the discovery document
+# shape, the state envelope, the heartbeat, and the Last Will are all contract,
+# and three of the four messages are RETAINED — a regression there orphans a
+# Home Assistant device rather than throwing an error.
+#
+# The tests are `#[ignore]`-gated and keyed on TV_SHELL_TEST_BROKER, so
+# `cargo test` stays fast and offline everywhere else; this is the only place
+# that opts in. They deliberately are NOT cfg(target_os)-gated — they must stay
+# compiled and clippy-clean on all three of host.yml's targets.
+#
+# The broker comes up from the SAME committed compose file a developer runs
+# locally (dev/mqtt/compose.yaml), so that file is exercised rather than left to
+# rot as a README snippet. `docker` here runs on the GitHub-hosted runner only.
+#
+# Invoked by the CI orchestrator (.github/workflows/ci.yml); ci.yml is the
+# single required-check surface.
+
+name: MQTT
+
+run-name: "MQTT CI — ${{ github.event_name }} on ${{ github.ref_name }} by @${{ github.actor }}"
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  COMPOSE_FILE: dev/mqtt/compose.yaml
+  TV_SHELL_TEST_BROKER: mqtt://127.0.0.1:1883
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # A broker that never goes healthy, a host that never publishes, and a Last
+    # Will that never fires all present as "still waiting". Cap the job so a
+    # hang fails in minutes instead of burning the default 6 hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: .
+          key: mqtt
+
+      # Build EXPLICITLY, before the broker exists, and prove the binary
+      # actually carries the MQTT code. This is not ceremony: a build from a
+      # checkout without the MQTT feature publishes nothing, which reads
+      # IDENTICALLY to "the broker is broken" or "MQTT regressed". Silence has
+      # to be attributable before any assertion rests on it.
+      - name: Build host sidecar
+        id: build
+        run: cargo build -p tv-shell-host
+
+      - name: Assert the built binary has MQTT support
+        id: binary_check
+        run: |
+          BIN=target/debug/tv-shell-host
+          test -x "$BIN" || { echo "::error::$BIN missing or not executable"; exit 1; }
+          if ! grep -aq 'TV_SHELL_MQTT_BROKER' "$BIN"; then
+            echo "::error::$BIN contains no TV_SHELL_MQTT_BROKER string — this build has no MQTT support, so a run that publishes nothing would prove nothing"
+            exit 1
+          fi
+          echo "OK: $BIN carries the MQTT env surface"
+
+      - name: Start mosquitto
+        id: broker
+        run: |
+          docker compose -f "$COMPOSE_FILE" up -d --wait
+          docker compose -f "$COMPOSE_FILE" ps
+
+      # The real work. --test-threads=1 because the tests share the broker's
+      # retained-message namespace and each drives a real process; --nocapture
+      # so the harness's own progress echo and the host's RUST_LOG output land
+      # in this log, which is the ONLY way this is debuggable.
+      - name: Integration tests
+        id: tests
+        env:
+          RUST_LOG: info
+        run: |
+          cargo test -p tv-shell-host --test mqtt_broker -- \
+            --ignored --test-threads=1 --nocapture
+
+      # The smoke script owns its own broker lifecycle (up/--wait, then down -v
+      # from an EXIT trap), so it runs after the tests and against a fresh
+      # broker — no retained state carried over from above.
+      - name: Smoke test (compose + script)
+        id: smoke
+        run: ./scripts/mqtt-smoke-test.sh
+
+      # Broker-side view of what happened. Only on failure, and only after the
+      # assertions ran, so a green run stays quiet.
+      - name: Broker logs (on failure)
+        if: failure()
+        run: docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f "$COMPOSE_FILE" down -v --remove-orphans || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## MQTT CI — broker-backed integration"
+            echo ""
+            echo "| Step | Result |"
+            echo "|------|--------|"
+            echo "| Build | ${{ steps.build.outcome }} |"
+            echo "| Binary has MQTT support | ${{ steps.binary_check.outcome }} |"
+            echo "| Broker up (healthy) | ${{ steps.broker.outcome }} |"
+            echo "| Integration tests | ${{ steps.tests.outcome }} |"
+            echo "| Smoke script | ${{ steps.smoke.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

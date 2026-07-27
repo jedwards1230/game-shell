@@ -195,6 +195,52 @@ rather than "the config has a typo".
   a broker home automation depends on. They ride along on whatever publish happens
   for a real reason; `published_at` still advances every heartbeat.
 
+## Testing
+
+Every *decision* was factored into a pure function, so the 26 unit tests
+(12 in `daemon/src/mqtt.rs`, 14 in `host/src/mqtt.rs`) cover config/URL parsing,
+redaction, the `should_publish` truth table and `seq` monotonicity with no
+broker. What that leaves uncovered is the **I/O glue** — and since three of the
+four messages are retained, a regression there orphans a Home Assistant device
+rather than raising an error.
+
+`host/tests/mqtt_broker.rs` covers it against a real broker: the three topic
+names, their retain flags, the discovery document's shape (the `availability`
+list form, no root `availability_topic`, no `sw`, `state_topic` absent on
+buttons), the state envelope, the floor heartbeat advancing `seq` +
+`published_at`, the Last Will firing on an **ungraceful** kill, and discovery
+being republished after a reconnect.
+
+The tests are `#[ignore]`-gated behind `TV_SHELL_TEST_BROKER`, so `cargo test`
+stays fast and offline by default. They are deliberately **not**
+`cfg(target_os)`-gated — they stay compiled and clippy-clean on all three of
+`host.yml`'s targets.
+
+```bash
+docker compose -f dev/mqtt/compose.yaml up -d --wait
+TV_SHELL_TEST_BROKER=mqtt://127.0.0.1:1883 \
+  cargo test -p tv-shell-host --test mqtt_broker -- --ignored --test-threads=1 --nocapture
+docker compose -f dev/mqtt/compose.yaml down -v
+
+./scripts/mqtt-smoke-test.sh   # owns its own broker lifecycle
+```
+
+CI runs both in `.github/workflows/mqtt.yml`, against that same compose file.
+
+Two failure modes this harness is built to *not* reproduce, because both
+produced convincing false results when the surface was tested by hand:
+
+- **A binary without the MQTT code publishes nothing**, which reads identically
+  to "MQTT is broken". Both the job and the smoke script assert the built binary
+  actually carries the MQTT env surface before drawing any conclusion from
+  silence.
+- **`pkill -f <pattern>` that matches nothing exits 0**, so the Last-Will check
+  waited on a will that had no reason to fire. The harness proves the process was
+  alive, then proves it is dead, before asserting on the consequence of its death.
+
+Generally: a check that silently does nothing looks exactly like a check that
+passed. Each assertion proves the precondition it depends on.
+
 ## Home Assistant discovery notes
 
 Researched for the deferred cutover; none of it is testable from Rust.
