@@ -3113,6 +3113,8 @@ dependencies = [
  "notify-debouncer-full",
  "reqwest",
  "rmcp",
+ "rumqttc",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",
