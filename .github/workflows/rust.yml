@@ -67,6 +67,15 @@ jobs:
         id: test
         run: cargo test -p tv-shell-input
 
+      # Acceptance gate: the TLS/crypto graph must stay pure Rust (rustls +
+      # ring). The `ldd` assertion in the `cec` job below only greps for
+      # libcec/libp8-platform, so it would sail straight past a crypto-provider
+      # regression — e.g. a dependency pulling rustls via its DEFAULT features
+      # and dragging in aws-lc-rs (cmake + a C toolchain) with it.
+      - name: Assert pure-Rust TLS graph
+        id: tls
+        run: ../scripts/assert-pure-rust-tls.sh -p tv-shell-input
+
       - name: Summary
         if: always()
         run: |
@@ -79,6 +88,7 @@ jobs:
             echo "| Clippy | ${{ steps.clippy.outcome }} |"
             echo "| Build (release) | ${{ steps.build.outcome }} |"
             echo "| Test | ${{ steps.test.outcome }} |"
+            echo "| Pure-Rust TLS | ${{ steps.tls.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # tv-shell-panel (panel/) is a separate workspace member: a pure-Rust web
@@ -198,6 +208,13 @@ jobs:
             exit 1
           fi
           echo "OK: no system libcec/libp8-platform dynamic dependency"
+
+      # Same TLS/crypto gate as the default leg, but against the `cec` feature
+      # graph — enabling a feature can pull a different set of transitive deps,
+      # so the invariant has to be asserted per feature combination, not once.
+      - name: Assert pure-Rust TLS graph (--features cec)
+        id: tls
+        run: ../scripts/assert-pure-rust-tls.sh -p tv-shell-input --features cec
 
       - name: Test (--features cec)
         id: test
