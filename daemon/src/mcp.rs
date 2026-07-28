@@ -38,9 +38,9 @@ use base64::Engine as _;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        AnnotateAble, CallToolResult, Content, ErrorData as McpError, Implementation,
-        ListResourcesResult, PaginatedRequestParams, RawResource, ReadResourceRequestParams,
-        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData as McpError, Implementation, ListResourcesResult,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource,
+        ResourceContents, ServerCapabilities, ServerInfo,
     },
     schemars::{self, JsonSchema},
     service::{RequestContext, RoleServer},
@@ -72,8 +72,8 @@ const SCREENSHOT_RESOURCE_URI: &str = "screenshot://current";
 /// Build the `screenshot://current` descriptor returned by `resources/list`.
 /// Factored out so a unit test can assert its shape without constructing a
 /// `RequestContext`.
-fn screenshot_resource_descriptor() -> RawResource {
-    RawResource::new(SCREENSHOT_RESOURCE_URI, "Current screen")
+fn screenshot_resource_descriptor() -> Resource {
+    Resource::new(SCREENSHOT_RESOURCE_URI, "Current screen")
         .with_title("Current screen")
         .with_description(
             "Live tv-shell display, captured as a PNG on read (no flash). \
@@ -290,12 +290,12 @@ impl TvShellMcp {
     fn intent_result(reply: Option<String>) -> CallToolResult {
         match bridge_core::interpret_reply(reply) {
             DispatchOutcome::Unavailable => {
-                CallToolResult::error(vec![Content::text("daemon unavailable")])
+                CallToolResult::error(vec![ContentBlock::text("daemon unavailable")])
             }
             DispatchOutcome::Err(msg) => {
-                CallToolResult::error(vec![Content::text(msg.trim().to_owned())])
+                CallToolResult::error(vec![ContentBlock::text(msg.trim().to_owned())])
             }
-            DispatchOutcome::Ok => CallToolResult::success(vec![Content::text("ok")]),
+            DispatchOutcome::Ok => CallToolResult::success(vec![ContentBlock::text("ok")]),
         }
     }
 
@@ -308,14 +308,14 @@ impl TvShellMcp {
         // is intentional for the MCP surface only (A1).
         if name.contains(':') {
             let valid = crate::protocol::INTENT_VOCAB.join(", ");
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "deep-links are not accepted here; use open_settings / open_overlay / launch_app. \
                  Valid actions: {valid}."
             ))]);
         }
         if !bridge_core::is_valid_intent(&name) {
             let valid = crate::protocol::INTENT_VOCAB.join(", ");
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "unknown action '{name}'. Valid actions: {valid}."
             ))]);
         }
@@ -394,7 +394,7 @@ impl ServerHandler for TvShellMcp {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult::with_all_items(vec![
-            screenshot_resource_descriptor().no_annotation(),
+            screenshot_resource_descriptor(),
         ]))
     }
 
@@ -528,7 +528,9 @@ impl TvShellMcp {
         let intent_name = match bridge_core::overlay_intent(target.as_str()) {
             Ok(name) => name,
             Err(msg) => {
-                return CallToolResult::error(vec![Content::text(format!("internal error: {msg}"))])
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "internal error: {msg}"
+                ))])
             }
         };
         Self::intent_result(
@@ -610,11 +612,11 @@ impl TvShellMcp {
                 let meta = bridge_core::capture_meta().await;
                 let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_owned());
                 CallToolResult::success(vec![
-                    Content::image(b64, "image/png"),
-                    Content::text(meta_json),
+                    ContentBlock::image(b64, "image/png"),
+                    ContentBlock::text(meta_json),
                 ])
             }
-            Err(msg) => CallToolResult::error(vec![Content::text(msg)]),
+            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
         }
     }
 
@@ -644,8 +646,8 @@ impl TvShellMcp {
     ) -> CallToolResult {
         let lines_usize = (lines as usize).min(1000);
         match bridge_core::get_logs(lines_usize, filter.as_deref()) {
-            Ok(content) => CallToolResult::success(vec![Content::text(content)]),
-            Err(msg) => CallToolResult::error(vec![Content::text(msg)]),
+            Ok(content) => CallToolResult::success(vec![ContentBlock::text(content)]),
+            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
         }
     }
 
@@ -660,8 +662,8 @@ impl TvShellMcp {
     )]
     async fn restart_shell(&self) -> CallToolResult {
         match bridge_core::dev_restart_shell(&self.handles.metrics).await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(msg) => CallToolResult::error(vec![Content::text(msg)]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
         }
     }
 
@@ -682,13 +684,13 @@ impl TvShellMcp {
         Parameters(DevDeployParams { git_ref }): Parameters<DevDeployParams>,
     ) -> CallToolResult {
         if !self.handles.dev_enabled {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "dev tools disabled — set TV_SHELL_MCP_DEV to enable",
             )]);
         }
         match bridge_core::dev_deploy(git_ref.as_deref()).await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(msg) => CallToolResult::error(vec![Content::text(msg)]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
         }
     }
 
@@ -700,13 +702,13 @@ impl TvShellMcp {
     )]
     async fn dev_build(&self) -> CallToolResult {
         if !self.handles.dev_enabled {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "dev tools disabled — set TV_SHELL_MCP_DEV to enable",
             )]);
         }
         match bridge_core::dev_build().await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(msg) => CallToolResult::error(vec![Content::text(msg)]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
         }
     }
 
@@ -718,12 +720,12 @@ impl TvShellMcp {
     )]
     async fn dev_restart_daemon(&self) -> CallToolResult {
         if !self.handles.dev_enabled {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "dev tools disabled — set TV_SHELL_MCP_DEV to enable",
             )]);
         }
         bridge_core::request_reexec(&self.handles.reexec_flag, &self.handles.shutdown);
-        CallToolResult::success(vec![Content::text("ok, re-execing\n")])
+        CallToolResult::success(vec![ContentBlock::text("ok, re-execing\n")])
     }
 }
 
@@ -1006,7 +1008,7 @@ mod tests {
     fn screenshot_resource_serialises_as_blob_uri() {
         // The descriptor must round-trip through the rmcp Resource wrapper with
         // the custom URI scheme intact (resources/list payload shape).
-        let resource = screenshot_resource_descriptor().no_annotation();
+        let resource = screenshot_resource_descriptor();
         let json = serde_json::to_string(&resource).expect("resource serialises");
         assert!(json.contains("screenshot://current"), "uri missing: {json}");
         assert!(json.contains("image/png"), "mimeType missing: {json}");
