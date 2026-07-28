@@ -24,7 +24,7 @@
 #[cfg(target_os = "linux")]
 pub async fn run(config_changed: std::sync::Arc<tokio::sync::Notify>) {
     use crate::config;
-    use notify_debouncer_full::{new_debouncer, notify::RecursiveMode, notify::Watcher};
+    use notify_debouncer_full::{new_debouncer, notify::RecursiveMode};
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
@@ -59,12 +59,9 @@ pub async fn run(config_changed: std::sync::Arc<tokio::sync::Notify>) {
 
     // Watch the parent directory (not the file) so rename-based atomic writes
     // (write-temp + rename) are detected even after an inode replacement.
-    // notify-debouncer-full 0.3: the watch() method is on the inner Watcher,
-    // accessed via debouncer.watcher().
-    if let Err(e) = debouncer
-        .watcher()
-        .watch(&watch_dir, RecursiveMode::NonRecursive)
-    {
+    // notify-debouncer-full 0.7: `Debouncer` implements `Watcher` itself, so
+    // watch() is called directly on it (the old `.watcher()` accessor is gone).
+    if let Err(e) = debouncer.watch(&watch_dir, RecursiveMode::NonRecursive) {
         tracing::warn!(
             "watch: could not watch {}: {e}, live-reload disabled",
             watch_dir.display()
@@ -112,7 +109,7 @@ pub async fn run(config_changed: std::sync::Arc<tokio::sync::Notify>) {
 
     while let Some(batch) = fwd_rx.recv().await {
         // Filter: only act on events whose path is settings.json.
-        // DebouncedEvent in notify-debouncer-full 0.3 has `event` (notify::Event)
+        // DebouncedEvent in notify-debouncer-full 0.7 has `event` (notify::Event)
         // and `time` fields; paths are in ev.event.paths (not ev.path).
         let touched = match &batch {
             Ok(events) => events.iter().any(|ev| {

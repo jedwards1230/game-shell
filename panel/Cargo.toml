@@ -25,11 +25,11 @@ tv-shell-protocol = { workspace = true }
 askama = { workspace = true }
 # Typed config parsing (~/.config/tv-shell/config.toml), matching how the
 # daemon declares it directly rather than via a workspace dep.
-toml = "0.8"
+toml = "1.1"
 # Format/comment-preserving config.toml edits — the panel's only config write
 # is the CEC page's single-key `[cec].osd_name` update; everything else in the
 # operator's file (comments, ordering, unknown sections) must survive intact.
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 # uid lookup for the $XDG_RUNTIME_DIR-unset socket-path fallback (matches how
 # the host crate uses libc on Linux for its own OS-level needs).
