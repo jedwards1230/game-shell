@@ -17,6 +17,33 @@
 //!
 //! Pure serde — no clock, no I/O, no time crate. `published_at` is supplied by the
 //! caller (see [`StateEnvelope`] for why that field is load-bearing).
+//!
+//! ## Availability is per-entity, in three tiers
+//!
+//! These machines **sleep as their normal resting state** — the HTPC and the
+//! gaming PC are both suspended most of the day. A single shared `availability`
+//! at the document root made every entity `unavailable` for all of that time,
+//! which is a bad trade: the state topic is *retained*, so the broker is still
+//! holding a perfectly good last-known reading that availability then hides.
+//!
+//! So availability is stamped per-component by [`base_discovery`], in tiers:
+//!
+//! | tier | entities | gated? | rendering while asleep |
+//! |---|---|---|---|
+//! | commands | every `button` | **yes** | `unavailable` — pressing it cannot work |
+//! | liveness | `status_stale`, `age_seconds` | **yes** | `unavailable` — a frozen value would lie |
+//! | facts | everything else | no | last known value, as of `published_at` |
+//!
+//! Two things make the ungated tier safe rather than merely quieter. First,
+//! `published_at` carries `device_class: timestamp`, which Home Assistant renders
+//! as relative time — so "how old is this?" is answered on the face of the
+//! dashboard rather than inferred from an entity being missing. Second, the
+//! `connected` binary sensor reads the LWT topic directly, so the online/offline
+//! fact the root availability used to encode is still a first-class entity.
+//!
+//! Getting the tiers wrong is silent in both directions: an ungated liveness
+//! sensor reports stale data as fresh, and a gated connectivity sensor goes
+//! `unavailable` exactly when it has something to report.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -386,8 +413,8 @@ impl Default for ShellSnapshot {
 /// One retained device-based discovery document, published to
 /// [`DeviceId::discovery_topic`].
 ///
-/// Options shared by every entity (state/availability topics, payloads, QoS) are
-/// hoisted to the document root; per-entity options live under `cmps`.
+/// Only genuinely global options (QoS) sit at the document root; every
+/// per-entity option — including **availability** — lives under `cmps`.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeviceDiscovery {
     /// The Home Assistant device this document registers.
@@ -402,34 +429,24 @@ pub struct DeviceDiscovery {
     /// publishing an identical component set from both desktop boots exists to
     /// prevent. Do not "optimize" this to a `HashMap`.
     pub cmps: BTreeMap<String, Component>,
-    /// Shared availability, as a **list** — see [`AvailabilityEntry`].
-    ///
-    /// Home Assistant documents `availability` (the list form) among the shared
-    /// root options of a device-based discovery document; `availability_topic`
-    /// is not in that set, and unknown root keys are documented as *allowed but
-    /// ignored* rather than rejected.
-    ///
-    /// So the list form is the unambiguously-supported spelling, and that is why
-    /// it is used here. Note what has **not** been established: whether the
-    /// `availability_topic` spelling also happens to work. That cannot be
-    /// settled without a live broker and a live Home Assistant, neither of which
-    /// was reachable when this was written — so treat "the other form is broken"
-    /// as untested, and this one as the safe encoding either way.
-    ///
-    /// The stakes, which is why it is spelled out at all: if availability were
-    /// silently ignored, every entity would register correctly and then sit
-    /// permanently "available" while the Last Will fired into the void.
-    /// Independent per-process connections exist precisely so availability is a
-    /// fact rather than a probe result.
-    pub availability: Vec<AvailabilityEntry>,
     /// QoS for the shared subscriptions.
     pub qos: u8,
 }
 
-/// One entry in the shared `availability` list.
+/// One entry in a component's `availability` list.
 ///
 /// `payload_available` / `payload_not_available` are only meaningful *inside*
-/// an entry — at the document root they are unknown keys and are ignored.
+/// an entry; as siblings of `availability` they are unknown keys and are ignored.
+///
+/// **Always the list form, never `availability_topic`.** Home Assistant documents
+/// `availability` (the list form) as the supported spelling and treats unknown
+/// keys as *allowed but ignored* rather than rejecting them. So a document that
+/// said `availability_topic` would register every entity and leave them
+/// permanently "available" while the Last Will fired into the void — a silent
+/// failure invisible without both a live broker and a live Home Assistant. What
+/// has **not** been established is whether `availability_topic` also happens to
+/// work; treat "the other form is broken" as untested and this one as the safe
+/// encoding either way.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct AvailabilityEntry {
     /// The retained LWT topic: `tv-shell/<device_id>/avail`.
@@ -499,6 +516,15 @@ pub struct Component {
     /// component, so it cannot be forgotten one entity at a time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_topic: Option<String>,
+    /// This entity's availability, as a **list** — see [`AvailabilityEntry`].
+    ///
+    /// `None` on purpose for most entities: the state topic is *retained*, so an
+    /// entity with no availability keeps showing its last published value while
+    /// the machine is asleep, instead of going `unavailable` and hiding data the
+    /// broker still holds. See [`base_discovery`] for which entities opt in and
+    /// why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<Vec<AvailabilityEntry>>,
     /// Jinja template extracting this entity's value from the state payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_template: Option<String>,
@@ -539,6 +565,13 @@ pub struct Component {
     /// Whether the entity is enabled when first added.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled_by_default: Option<bool>,
+    /// Build-time intent, **never serialised**: this entity measures liveness, so
+    /// a retained last-known value would be an active lie rather than stale-but-
+    /// useful data. [`base_discovery`] turns it into an `availability` list.
+    ///
+    /// Set it via [`Component::liveness_gated`], not by hand.
+    #[serde(skip)]
+    pub liveness_gated: bool,
 }
 
 impl Component {
@@ -548,6 +581,7 @@ impl Component {
             name: name.into(),
             unique_id: unique_id.into(),
             state_topic: None,
+            availability: None,
             value_template: None,
             device_class: None,
             state_class: None,
@@ -560,6 +594,7 @@ impl Component {
             payload_press: None,
             object_id: None,
             enabled_by_default: None,
+            liveness_gated: false,
         }
     }
 
@@ -581,6 +616,38 @@ impl Component {
     /// Set the value template.
     pub fn with_value_template(mut self, template: impl Into<String>) -> Self {
         self.value_template = Some(template.into());
+        self
+    }
+
+    /// Mark this entity as measuring **liveness**, so [`base_discovery`] gates it
+    /// on availability.
+    ///
+    /// Reach for this only when a retained last-known value would *lie*. Both
+    /// current users report how fresh the state envelope is (`status.stale`,
+    /// `status.age_seconds`) and are computed **by the publisher**, not by a Home
+    /// Assistant template that could re-render on a clock tick. So the last
+    /// message a sleeping machine ever sent says "not stale, a few seconds old",
+    /// and it says that for as long as the machine stays asleep. `unavailable` is
+    /// the honest rendering of "I cannot tell you how stale this is"; a frozen
+    /// `stale: false` is worse than no answer.
+    ///
+    /// This is the exception. Ordinary state (which OS, which app, CPU load) is
+    /// still true-as-of-`published_at` while the machine sleeps, so it stays
+    /// ungated and keeps showing its retained value.
+    pub fn liveness_gated(mut self) -> Self {
+        self.liveness_gated = true;
+        self
+    }
+
+    /// Override the state topic.
+    ///
+    /// Normally [`base_discovery`] stamps the shared state topic onto every
+    /// non-`button` component, and this is not needed. Use it only for an entity
+    /// that reads a *different* topic — today just the connectivity sensor, which
+    /// reads the raw LWT payload off the avail topic. A preset topic suppresses
+    /// the automatic stamp.
+    pub fn with_state_topic(mut self, topic: impl Into<String>) -> Self {
+        self.state_topic = Some(topic.into());
         self
     }
 
@@ -723,16 +790,58 @@ fn seq_component(device_id: &DeviceId) -> Component {
 fn base_discovery(
     device_id: &DeviceId,
     model: &str,
-    cmps: BTreeMap<String, Component>,
+    mut cmps: BTreeMap<String, Component>,
 ) -> DeviceDiscovery {
+    // The one entity that reports the connection itself. It reads the LWT topic
+    // raw ("online"/"offline"), NOT the JSON state envelope, so it is the single
+    // place the avail topic is still legible now that most entities are ungated.
+    //
+    // It must never be `liveness_gated`: an availability-gated connectivity
+    // sensor is `unavailable` exactly when it has something to say. That is the
+    // same shape of bug as a `status_stale` that freezes at `false`, inverted.
+    cmps.insert(
+        "connected".to_string(),
+        Component::binary_sensor("Connected", device_id.unique_id("connected"))
+            .with_state_topic(device_id.avail_topic())
+            .with_payloads(AVAIL_ONLINE, AVAIL_OFFLINE)
+            .with_device_class("connectivity")
+            .diagnostic(),
+    );
+
     // Stamp the shared state topic onto every entity that has one. `button` has
     // no state topic, so it is skipped rather than inheriting an option its
-    // platform does not accept (see `Component::state_topic`).
+    // platform does not accept (see `Component::state_topic`). A component that
+    // already set its own topic (the connectivity sensor above, which reads the
+    // avail topic) keeps it.
+    //
+    // Availability is stamped here too, on exactly two tiers — see the module
+    // docs for the reasoning:
+    //
+    //   * `button` — a command topic on a sleeping machine cannot be actioned by
+    //     that machine, so an available button is a lie about what pressing it
+    //     will do. (This is the same reasoning that keeps `wake` OUT of the
+    //     command surface entirely: HA's `wake_on_lan` owns that, precisely
+    //     because a wake button gated on availability would be unavailable
+    //     exactly when it is needed.)
+    //   * `liveness_gated` — see [`Component::liveness_gated`].
+    //
+    // Everything else is deliberately ungated: the state topic is retained, so
+    // those entities keep reporting their last known value (true as of
+    // `published_at`) while the machine sleeps, instead of all going
+    // `unavailable` and hiding data the broker is still holding.
+    let availability = vec![AvailabilityEntry {
+        topic: device_id.avail_topic(),
+        payload_available: AVAIL_ONLINE.to_string(),
+        payload_not_available: AVAIL_OFFLINE.to_string(),
+    }];
     let cmps = cmps
         .into_iter()
         .map(|(key, mut component)| {
-            if component.platform != "button" {
+            if component.platform != "button" && component.state_topic.is_none() {
                 component.state_topic = Some(device_id.state_topic());
+            }
+            if component.platform == "button" || component.liveness_gated {
+                component.availability = Some(availability.clone());
             }
             (key, component)
         })
@@ -752,11 +861,6 @@ fn base_discovery(
             support_url: Some("https://github.com/jedwards1230/tv-shell".to_string()),
         },
         cmps,
-        availability: vec![AvailabilityEntry {
-            topic: device_id.avail_topic(),
-            payload_available: AVAIL_ONLINE.to_string(),
-            payload_not_available: AVAIL_OFFLINE.to_string(),
-        }],
         qos: 0,
     }
 }
@@ -868,7 +972,8 @@ pub fn shell_discovery(device_id: &DeviceId) -> DeviceDiscovery {
             device_id.unique_id("status_stale"),
             "value_json.status.stale",
         )
-        .with_device_class("problem"),
+        .with_device_class("problem")
+        .liveness_gated(),
     );
     cmps.insert(
         "shell_running".to_string(),
@@ -884,7 +989,8 @@ pub fn shell_discovery(device_id: &DeviceId) -> DeviceDiscovery {
         Component::sensor("Status Age", device_id.unique_id("age_seconds"))
             .with_value_template(nullable_template("value_json.status.age_seconds"))
             .with_unit("s")
-            .diagnostic(),
+            .diagnostic()
+            .liveness_gated(),
     );
     cmps.insert(
         "cec_display_ownership".to_string(),
@@ -1142,6 +1248,7 @@ mod tests {
         assert_eq!(
             host_keys,
             [
+                "connected",
                 "current_os",
                 "host_version",
                 "open_bpm",
@@ -1162,6 +1269,7 @@ mod tests {
                 "age_seconds",
                 "cec_display_owner",
                 "cec_display_ownership",
+                "connected",
                 "cpu_percent",
                 "current_os",
                 "daemon_version",
@@ -1204,12 +1312,23 @@ mod tests {
     fn binary_sensor_templates_never_emit_bare_bools() {
         // Jinja renders Python bools as True/False, which matches neither
         // payload — so every binary sensor must use the if/else ON/OFF form.
-        for doc in [
-            host_discovery(&id("desktop")),
-            shell_discovery(&id("htpc-1")),
+        for (device, doc) in [
+            (id("desktop"), host_discovery(&id("desktop"))),
+            (id("htpc-1"), shell_discovery(&id("htpc-1"))),
         ] {
             for (key, cmp) in &doc.cmps {
                 if cmp.platform != "binary_sensor" {
+                    continue;
+                }
+                // The connectivity sensor reads the raw LWT payload off the avail
+                // topic, not the JSON state envelope, so it has no template to
+                // get wrong. Keyed on the topic rather than the name so a future
+                // envelope-reading sensor cannot opt out by accident.
+                if cmp.state_topic.as_deref() == Some(device.avail_topic().as_str()) {
+                    assert!(
+                        cmp.value_template.is_none(),
+                        "{key} templates a raw payload"
+                    );
                     continue;
                 }
                 let template = cmp
@@ -1301,21 +1420,119 @@ mod tests {
             Some("tv-shell/htpc-1/state")
         );
         assert_eq!(doc.cmps["suspend"].state_topic, None);
-        assert_eq!(doc.availability.len(), 1);
-        assert_eq!(doc.availability[0].topic, "tv-shell/htpc-1/avail");
-        assert_eq!(doc.availability[0].payload_available, "online");
-        assert_eq!(doc.availability[0].payload_not_available, "offline");
+        // Availability is per-component, not at the root — see the module docs.
+        let avail = doc.cmps["suspend"]
+            .availability
+            .as_ref()
+            .expect("a button must be availability-gated");
+        assert_eq!(avail.len(), 1);
+        assert_eq!(avail[0].topic, "tv-shell/htpc-1/avail");
+        assert_eq!(avail[0].payload_available, "online");
+        assert_eq!(avail[0].payload_not_available, "offline");
         assert_eq!(doc.qos, 0);
     }
 
-    /// Availability must serialise as the LIST form Home Assistant actually
-    /// reads at the root of a device-based discovery document.
+    /// The tiering that keeps a sleeping machine's dashboard useful.
     ///
-    /// `availability_topic` at the root is an *unknown key*, and HA ignores
-    /// unknown keys rather than rejecting them — so the wrong spelling would
-    /// register every entity and leave them permanently "available", with the
-    /// LWT firing to no visible effect. That failure is invisible without a live
-    /// broker and a live Home Assistant, which is exactly why it is pinned here.
+    /// Both of these machines are suspended most of the day. Gating every entity
+    /// on availability hid a retained, perfectly good last-known reading for all
+    /// of that time; gating none of them would let the two liveness sensors report
+    /// stale data as fresh. Each tier is pinned by name because the failure in
+    /// either direction is invisible without a live broker AND a live HA.
+    #[test]
+    fn availability_is_gated_per_tier() {
+        let doc = shell_discovery(&id("htpc-1"));
+
+        // Commands: unavailable while asleep, because pressing them cannot work.
+        for key in ["suspend", "home", "menu", "settings", "restart_shell"] {
+            assert!(
+                doc.cmps[key].availability.is_some(),
+                "{key} is a command and must be availability-gated"
+            );
+        }
+
+        // Liveness: publisher-computed freshness. A retained `stale: false` from a
+        // machine that has been asleep for hours is an active lie, so these must
+        // go unavailable rather than freeze.
+        for key in ["status_stale", "age_seconds"] {
+            assert!(
+                doc.cmps[key].availability.is_some(),
+                "{key} measures liveness and must be availability-gated"
+            );
+        }
+
+        // Facts: still true as of `published_at`, so they keep their retained
+        // value instead of vanishing.
+        for key in [
+            "shell_state",
+            "shell_running",
+            "media_playing",
+            "cec_display_owner",
+            "cec_display_ownership",
+            "cpu_percent",
+            "mem_percent",
+            "uptime_seconds",
+            "current_os",
+            "daemon_version",
+            "published_at",
+            "seq",
+        ] {
+            assert!(
+                doc.cmps[key].availability.is_none(),
+                "{key} is a fact and must NOT be gated — it would hide retained state"
+            );
+        }
+
+        let host = host_discovery(&id("desktop"));
+        for key in ["sleep", "quit", "open_bpm"] {
+            assert!(
+                host.cmps[key].availability.is_some(),
+                "{key} is a command and must be availability-gated"
+            );
+        }
+        for key in ["current_os", "running_appid", "streaming", "host_version"] {
+            assert!(
+                host.cmps[key].availability.is_none(),
+                "{key} is a fact and must NOT be gated"
+            );
+        }
+    }
+
+    /// The connectivity sensor must read the LWT topic and must NOT be gated on
+    /// it — an availability-gated connectivity sensor is `unavailable` exactly
+    /// when it has something to say.
+    #[test]
+    fn connected_sensor_reads_the_avail_topic_ungated() {
+        for (device, doc) in [
+            (id("desktop"), host_discovery(&id("desktop"))),
+            (id("htpc-1"), shell_discovery(&id("htpc-1"))),
+        ] {
+            let cmp = &doc.cmps["connected"];
+            assert_eq!(cmp.platform, "binary_sensor");
+            assert_eq!(
+                cmp.state_topic.as_deref(),
+                Some(device.avail_topic().as_str())
+            );
+            assert_eq!(cmp.device_class.as_deref(), Some("connectivity"));
+            // Raw LWT payloads, not the ON/OFF envelope convention.
+            assert_eq!(cmp.payload_on.as_deref(), Some("online"));
+            assert_eq!(cmp.payload_off.as_deref(), Some("offline"));
+            assert!(cmp.value_template.is_none(), "the LWT payload is not JSON");
+            assert!(
+                cmp.availability.is_none(),
+                "gating the connectivity sensor makes it useless"
+            );
+        }
+    }
+
+    /// Availability must serialise as the LIST form Home Assistant actually
+    /// reads, and must no longer appear at the document root at all.
+    ///
+    /// `availability_topic` is an *unknown key*, and HA ignores unknown keys
+    /// rather than rejecting them — so the wrong spelling would register every
+    /// entity and leave them permanently "available", with the LWT firing to no
+    /// visible effect. That failure is invisible without a live broker and a live
+    /// Home Assistant, which is exactly why it is pinned here.
     #[test]
     fn availability_serialises_as_the_list_form_ha_reads() {
         for doc in [
@@ -1326,15 +1543,27 @@ mod tests {
             assert!(json.contains(r#""availability":[{"topic":""#), "{json}");
             assert!(
                 !json.contains(r#""availability_topic""#),
-                "root availability_topic is silently ignored by HA: {json}"
+                "availability_topic is silently ignored by HA: {json}"
             );
-            // The payload keys are legal ONLY inside an entry, so they must
-            // never appear as siblings of "availability" at the root.
-            assert!(
-                !json.contains(
-                    r#","payload_available":"online","payload_not_available":"offline","qos""#
-                ),
-                "payload_* leaked to the document root: {json}"
+
+            // Availability now lives per-component. At the root it would apply to
+            // every entity and re-introduce the all-unavailable-while-asleep
+            // behaviour this tiering exists to remove — and it would do so
+            // silently, since the per-component lists would still be present and
+            // correct. Checked against the parsed root keys rather than the raw
+            // string, so it cannot be dodged by field ordering.
+            let value = serde_json::to_value(&doc).unwrap();
+            let root = value.as_object().expect("the document is an object");
+            for key in ["availability", "availability_topic", "payload_available"] {
+                assert!(
+                    !root.contains_key(key),
+                    "{key} belongs on a component, not the document root: {json}"
+                );
+            }
+            assert_eq!(
+                root.len(),
+                4,
+                "an unreviewed root key appeared (expected dev/o/cmps/qos): {json}"
             );
         }
     }
