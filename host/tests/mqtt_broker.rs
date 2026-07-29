@@ -925,22 +925,43 @@ fn discovery_document_has_the_shape_home_assistant_reads() {
     );
     let doc = json(&f.sub.log[at], "the discovery document");
 
-    // ── availability: the LIST form, with the payloads INSIDE the entry ───────
+    // ── availability: per-COMPONENT, the LIST form, payloads INSIDE the entry ─
     //
-    // `availability_topic` at the root is an unknown key, and Home Assistant
-    // ignores unknown keys rather than rejecting them: every entity would
-    // register and then sit permanently "available" while the Last Will fired
-    // into the void. That is invisible without a live HA, so it is pinned here.
-    println!("asserting: availability is the list form and availability_topic is NOT at the root");
-    let entries = doc
+    // `availability_topic` is an unknown key, and Home Assistant ignores unknown
+    // keys rather than rejecting them: every entity would register and then sit
+    // permanently "available" while the Last Will fired into the void. That is
+    // invisible without a live HA, so it is pinned here.
+    //
+    // Availability is deliberately NOT at the root. These machines sleep as their
+    // resting state, and a root entry gated every entity on the LWT — so a
+    // sleeping box showed `unavailable` everywhere while the broker still held a
+    // perfectly good retained reading. Commands and the two liveness sensors are
+    // gated; plain facts are not. See the tiers table in `protocol/src/mqtt.rs`.
+    println!("asserting: availability is per-component, in the list form, and never a root key");
+    assert!(
+        doc.get("availability").is_none(),
+        "`availability` is at the document ROOT, which gates EVERY entity on the LWT and \
+         hides retained state whenever the machine sleeps: {doc}"
+    );
+    let cmps = doc
+        .get("cmps")
+        .unwrap_or_else(|| panic!("no `cmps` block in the discovery document: {doc}"))
+        .as_object()
+        .unwrap_or_else(|| panic!("`cmps` is not an object: {doc}"));
+
+    // A command IS gated — pressing a button on a sleeping machine cannot work.
+    let sleep_cmp = cmps
+        .get("sleep")
+        .unwrap_or_else(|| panic!("no `sleep` component: {doc}"));
+    let entries = sleep_cmp
         .get("availability")
-        .unwrap_or_else(|| panic!("no `availability` key at the document root: {doc}"))
+        .unwrap_or_else(|| panic!("the `sleep` button is not availability-gated: {sleep_cmp}"))
         .as_array()
-        .unwrap_or_else(|| panic!("`availability` is not a LIST: {doc}"));
+        .unwrap_or_else(|| panic!("`availability` is not a LIST: {sleep_cmp}"));
     assert_eq!(
         entries.len(),
         1,
-        "expected exactly one availability entry: {doc}"
+        "expected exactly one availability entry: {sleep_cmp}"
     );
     let entry = &entries[0];
     assert_eq!(
@@ -958,10 +979,44 @@ fn discovery_document_has_the_shape_home_assistant_reads() {
         Some("offline"),
         "payload_not_available must live INSIDE the availability entry: {entry}"
     );
+
+    // A fact is NOT gated — it keeps its retained value while the machine sleeps.
+    for key in ["current_os", "running_appid", "streaming", "host_version"] {
+        let cmp = cmps
+            .get(key)
+            .unwrap_or_else(|| panic!("no `{key}` component: {doc}"));
+        assert!(
+            cmp.get("availability").is_none(),
+            "`{key}` is availability-gated, so it will read `unavailable` instead of its \
+             retained last-known value whenever this machine sleeps: {cmp}"
+        );
+    }
+
+    // The connectivity sensor reads the LWT topic RAW and must not be gated on
+    // it — otherwise it is `unavailable` exactly when it has something to say.
+    let connected = cmps
+        .get("connected")
+        .unwrap_or_else(|| panic!("no `connected` component: {doc}"));
+    assert_eq!(
+        connected.get("state_topic").and_then(Value::as_str),
+        Some(avail.as_str()),
+        "the connectivity sensor must read the LWT topic: {connected}"
+    );
+    assert_eq!(
+        connected.get("payload_on").and_then(Value::as_str),
+        Some("online"),
+        "the connectivity sensor reads the raw LWT payload: {connected}"
+    );
     assert!(
-        doc.get("availability_topic").is_none(),
-        "`availability_topic` appears at the document ROOT, where Home Assistant silently \
-         ignores it — every entity would register and stay permanently available: {doc}"
+        connected.get("availability").is_none(),
+        "gating the connectivity sensor on availability makes it useless — it would go \
+         `unavailable` at the exact moment it should report `offline`: {connected}"
+    );
+
+    assert!(
+        !doc.to_string().contains("availability_topic"),
+        "`availability_topic` appears in the document, where Home Assistant silently ignores \
+         it — the gated entities would register and stay permanently available: {doc}"
     );
 
     // ── no software version anywhere in this RETAINED document ────────────────
@@ -1014,6 +1069,15 @@ fn discovery_document_has_the_shape_home_assistant_reads() {
                 component.get("state_topic").is_none(),
                 "button {key} carries a state_topic, an option its platform does not accept: \
                  {component}"
+            );
+        } else if key == "connected" {
+            // The one entity that reads the LWT topic instead of the state
+            // envelope — asserted in full in
+            // `discovery_document_has_the_shape_home_assistant_reads`.
+            assert_eq!(
+                component.get("state_topic").and_then(Value::as_str),
+                Some(avail.as_str()),
+                "the connectivity sensor must read the LWT topic: {component}"
             );
         } else {
             assert_eq!(

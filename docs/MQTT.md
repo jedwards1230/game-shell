@@ -10,10 +10,15 @@ by default on both.
 | the TV client | `htpc-1` | `tv-shell-input` (`daemon/`) | `ShellSnapshot` |
 | the gaming PC (dual-boot, ONE machine) | `desktop` | `tv-shell-host` (`host/`) | `StatusResponse` verbatim |
 
-> **Status: nothing is deployed, and no Home Assistant entities have been created
-> or migrated.** The HA cutover — retiring the `rest:` poller entities, repointing
-> the four automations (including the AVR safety-condition template) and updating
-> the `dashboard-rooms` Office tiles — is a separate, deferred change.
+> **Status: both devices are live and their discovery entities exist in Home
+> Assistant.** What is still deferred is the rest of the cutover — retiring the
+> `rest:` poller entities, repointing the four automations (including the AVR
+> safety-condition template) and updating the `dashboard-rooms` Office tiles.
+>
+> Because the entities are live, **changing the component set now churns real
+> entities**: the discovery message is retained, so adding or removing one
+> rewrites it and Home Assistant adds/removes the entity on the spot. Treat a
+> `cmps` change as a deployment, not a refactor.
 
 ## Topics and identity — a contract
 
@@ -77,6 +82,41 @@ That only works if the publisher is guaranteed to keep publishing when nothing
 has changed, which is why the cadence is emit-on-change **plus a ~30 s floor
 heartbeat**. Both a `published_at` and a `seq` entity are exposed on purpose: if
 one representation ever misbehaves, the other still exposes the wedge.
+
+## Availability is per-entity, in three tiers
+
+Both machines **sleep as their normal resting state**. A single shared
+`availability` at the document root gated every entity on the LWT, so a sleeping
+box read `unavailable` across the board — hiding a retained, perfectly good
+last-known reading that the broker was still holding. Availability is therefore
+stamped per-component by `base_discovery()`:
+
+| Tier | Entities | Gated? | While the machine sleeps |
+|---|---|---|---|
+| commands | every `button` | **yes** | `unavailable` — pressing it cannot work |
+| liveness | `status_stale`, `age_seconds` | **yes** | `unavailable` — a frozen value would lie |
+| facts | everything else | no | last known value, as of `published_at` |
+
+The liveness tier is the subtle one. `status.stale` and `status.age_seconds` are
+computed **by the publisher**, not by a Home Assistant template that re-renders
+on a clock tick — so the last message a sleeping machine sent says "not stale, a
+few seconds old", and keeps saying it for as long as the machine stays asleep.
+`unavailable` is the honest rendering of "I cannot tell you how stale this is".
+
+Two things make the ungated tier safe rather than merely quieter:
+
+- `published_at` carries `device_class: timestamp`, which Home Assistant renders
+  as relative time — so a tile reads "2 hours ago" on its face, and freshness is
+  visible without inferring it from a missing entity.
+- a **`connected`** binary sensor (`device_class: connectivity`) reads the LWT
+  topic raw, so the online/offline fact the root availability used to encode is
+  still a first-class entity. It is deliberately **not** gated: an
+  availability-gated connectivity sensor is `unavailable` at the exact moment it
+  has something to report.
+
+Getting a tier wrong is silent in both directions — an ungated liveness sensor
+reports stale data as fresh, and a gated connectivity sensor says nothing when it
+matters. Each tier is pinned by name in `availability_is_gated_per_tier`.
 
 ## The dual-boot rule
 
@@ -205,9 +245,11 @@ four messages are retained, a regression there orphans a Home Assistant device
 rather than raising an error.
 
 `host/tests/mqtt_broker.rs` covers it against a real broker: the three topic
-names, their retain flags, the discovery document's shape (the `availability`
-list form, no root `availability_topic`, no `sw`, `state_topic` absent on
-buttons), the state envelope, the floor heartbeat advancing `seq` +
+names, their retain flags, the discovery document's shape (per-component
+`availability` in the list form, no root `availability` at all, no
+`availability_topic` anywhere, no `sw`, `state_topic` absent on buttons, the
+`connected` sensor reading the LWT topic ungated), the state envelope, the floor
+heartbeat advancing `seq` +
 `published_at`, the Last Will firing on an **ungraceful** kill, and discovery
 being republished after a reconnect.
 
@@ -258,14 +300,21 @@ Researched for the deferred cutover; none of it is testable from Rust.
   how a root `availability_topic` slipped through initially.
 
 **On availability**: `availability` (the list form) is the spelling Home
-Assistant documents among those shared root options, so it is the unambiguously
-supported one and therefore the safer encoding — which is why it is used. Whether
-the `availability_topic` spelling also happens to work is **not established**: it
-cannot be settled without a live broker and a live Home Assistant, neither of
-which was reachable when this was written. Do not read this as "the other form is
-broken". The stakes are why it is spelled out at all: a silently ignored
-availability block registers every entity correctly and then leaves them
-permanently "available" while the Last Will fires into the void.
+Assistant documents, so it is the unambiguously supported one and therefore the
+safer encoding — which is why it is used. Whether the `availability_topic`
+spelling also happens to work is **not established**: it cannot be settled
+without a live broker and a live Home Assistant, neither of which was reachable
+when this was written. Do not read this as "the other form is broken". The stakes
+are why it is spelled out at all: a silently ignored availability block registers
+every entity correctly and then leaves them permanently "available" while the
+Last Will fires into the void.
+
+Note that although `availability` *is* a legal shared root option, this document
+deliberately does not use it there — it is set per-component instead, so each
+entity can opt in or out (see [the tiers above](#availability-is-per-entity-in-three-tiers)).
+That also sidesteps having to establish how a per-component `availability`
+interacts with a root one: nothing here relies on override-or-merge semantics,
+which is the same reasoning that keeps `state_topic` per-component.
 
 Jinja rules, all checked against the live Home Assistant template engine:
 
