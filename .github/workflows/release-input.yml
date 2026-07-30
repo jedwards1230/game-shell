@@ -1,10 +1,12 @@
 # Per-binary release workflow for the input daemon (daemon/).
 #
-# Triggered by pushing an `input-v*` tag (e.g. `input-v0.1.0`). Builds
-# `tv-shell-input` with the canonical deploy feature set (`cec,mcp`) and
-# publishes a GitHub Release at the tag with the Linux binary + `checksums.txt`.
+# Opt-in via a `semver:input:*` label on the merged PR (or a manual
+# `workflow_dispatch`). Version compute, tagging, and AI release notes are
+# delegated to the shared `ai-release.yml@v1` reusable; this workflow then builds
+# `tv-shell-input` with the canonical deploy feature set (`cec,mcp`) and publishes
+# a GitHub Release at the tag with the Linux binary + `checksums.txt`.
 #
-# This mirrors the `cec` leg of rust.yml exactly: it runs on `rust:1-trixie`
+# The build mirrors the `cec` leg of rust.yml exactly: it runs on `rust:1-trixie`
 # (glibc 2.41) because the prebuilt static libcec.a references glibc ≥2.38 C23
 # symbols, and that matches the CachyOS deploy target's glibc. The static-libcec
 # acceptance gate (no system libcec/libp8-platform link) is re-asserted here so a
@@ -12,27 +14,128 @@
 #
 # Tag scheme (see CLAUDE.md › CI): `host-v*` releases the cross-platform host;
 # `input-v*` releases this Linux daemon. The two artifacts are versioned
-# independently within the one monorepo.
+# independently within the one monorepo — the reusable is called with
+# `tag_prefix: input-`, so it only ever reads and writes `input-v*` tags and the
+# next version is computed from the `input-v*` series alone.
+#
+# NOTE: releases are no longer cut by pushing an `input-v*` tag by hand. Merge a PR
+# labelled `semver:input:patch|minor|major`, or run this workflow manually.
 
 name: Release Input
 
-run-name: "Release Input — ${{ github.ref_name }}"
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch'
+      && format('Release Input: {0}{1}', inputs.dry_run && 'dry-run ' || '', inputs.bump_type)
+      || format('Release Input: {0}', github.event.head_commit.message || github.sha)
+  }}
 
 on:
   push:
-    tags: ['input-v*']
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry_run:
+        description: "Compute version + preview notes without tagging or publishing"
+        required: false
+        type: boolean
+        default: false
 
+concurrency:
+  group: release-input
+  cancel-in-progress: false
+
+# ai-release.yml@v1 reads merged PRs for the changelog and the detect job runs
+# `gh pr list` — both need pull-requests:read. A restricted permissions block
+# defaults every unlisted scope to none, so grant it explicitly.
 permissions:
-  contents: read
+  contents: write
+  pull-requests: read
 
 jobs:
+  detect:
+    name: Detect bump type
+    runs-on: ubuntu-latest
+    outputs:
+      bump_type: ${{ steps.bump.outputs.type }}
+      release: ${{ steps.bump.outputs.release }}
+      dry_run: ${{ steps.bump.outputs.dry_run }}
+    steps:
+      - name: Determine bump type
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TYPE="${{ inputs.bump_type }}"; RELEASE="true"; DRY="${{ inputs.dry_run }}"
+          else
+            # push event: opt-in via the merged PR's semver:input:* label. The label is
+            # component-scoped because this monorepo versions host and input
+            # independently — a `semver:host:*` label must not cut a daemon release.
+            # No matching label -> no release.
+            # Retry -- the GitHub API may not have the merge commit indexed yet.
+            LABELS=""
+            for attempt in 1 2 3; do
+              LABELS=$(gh pr list --state merged --base main --limit 100 \
+                --json labels,mergeCommit \
+                | jq -r --arg sha "$GITHUB_SHA" \
+                  '.[] | select(.mergeCommit.oid == $sha) | .labels[].name' 2>/dev/null || echo "")
+              [ -n "$LABELS" ] && break
+              echo "Attempt ${attempt}: no labels for ${GITHUB_SHA}, retrying in 5s..."
+              sleep 5
+            done
+            echo "Labels: ${LABELS:-<none>}"
+            DRY="false"
+            if echo "$LABELS" | grep -q 'semver:input:major'; then
+              TYPE="major"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:input:minor'; then
+              TYPE="minor"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:input:patch'; then
+              TYPE="patch"; RELEASE="true"
+            else
+              echo "::notice::No semver:input:* label -- skipping daemon release."
+              TYPE="none"; RELEASE="false"
+            fi
+          fi
+          { echo "type=$TYPE"; echo "release=$RELEASE"; echo "dry_run=$DRY"; } >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Tag & Generate Notes
+    needs: [detect]
+    if: needs.detect.outputs.release == 'true'
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1
+    with:
+      service_name: tv-shell-input
+      service_description: "the Rust input/AV daemon for tv-shell — owns the gamepad fleet, HDMI-CEC, and the shell's IPC/HTTP/MCP control surface"
+      bump_type: ${{ needs.detect.outputs.bump_type }}
+      tag_prefix: input-
+      create_release: false
+      dry_run: ${{ needs.detect.outputs.dry_run == 'true' }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   release:
+    name: Build & Publish Release
+    needs: [detect, prepare]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     container: rust:1-trixie
     permissions:
       contents: write
     steps:
+      # The tag the reusable just created is the source of truth for the released
+      # version — build from it, never from the branch head.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       # Static libcec (#179) downloads a prebuilt archive (no cmake/libclang); it
       # only needs the udev dev symlink + pkg-config for the link hint, plus
@@ -74,9 +177,34 @@ jobs:
         working-directory: dist
         run: sha256sum tv-shell-input-* | tee checksums.txt
 
+      # The reusable base64-encodes the body so it survives GitHub Actions' job
+      # output character restrictions — decode before handing it to the release.
+      - name: Decode release notes
+        env:
+          RELEASE_BODY: ${{ needs.prepare.outputs.release_body }}
+        run: printf '%s' "$RELEASE_BODY" | base64 -d > body.md
+
       - name: Publish release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          body_path: body.md
           files: dist/*
-          generate_release_notes: true
           fail_on_unmatched_files: true
+
+      - name: Summary
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          BUMP: ${{ needs.detect.outputs.bump_type }}
+        run: |
+          {
+            echo "## Release Input"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Tag | \`${TAG}\` |"
+            echo "| Bump | ${BUMP} |"
+            echo "| Artifacts | tv-shell-input (linux-gnu) + checksums.txt |"
+            echo
+            echo "[View release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG})"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -6,13 +6,16 @@
 # <id> and <version> against widgets-index.json, then publishes a GitHub
 # Release with auto-generated notes.
 #
-# Tag scheme (see CLAUDE.md › CI):
-#   host-v*            → release-host.yml   (builds tv-shell-host binaries)
-#   input-v*           → release-input.yml  (builds tv-shell-input binary)
-#   widget-<id>-v*     → release-widget.yml (notes-only; no build artifact)
+# Release streams (see CLAUDE.md › CI) — each artifact versions independently:
+#   semver:host:*  label  → release-host.yml   (tags host-v*;  builds host binaries)
+#   semver:input:* label  → release-input.yml  (tags input-v*; builds daemon binary)
+#   widget-<id>-v* TAG    → release-widget.yml (notes-only; no build artifact)
 #
-# The three streams are independent. Widget versions are per-widget, not
-# monorepo-wide. The two SSOT rules:
+# The two binary streams moved to label-triggered releases via the shared
+# ai-release.yml@v1 reusable; this widget stream stays tag-driven because a
+# merged-PR label cannot carry the per-widget <id>.
+#
+# Widget versions are per-widget, not monorepo-wide. The two SSOT rules:
 #   1. WidgetManifests.qml is the authoring SSOT for id/version/requires.
 #   2. widgets-index.json must match (enforced by CI via widgets.yml).
 # Before pushing a widget-<id>-v<X.Y.Z> tag, bump the widget's `version`
@@ -45,7 +48,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           WITHOUT_PREFIX="${TAG#widget-}"          # strip leading 'widget-'
           WIDGET_VERSION="${WITHOUT_PREFIX##*-v}"  # everything after last '-v'
-          WIDGET_ID="${WITHOUT_PREFIX%-v${WIDGET_VERSION}}"  # strip '-v<ver>' suffix
+          WIDGET_ID="${WITHOUT_PREFIX%-v"${WIDGET_VERSION}"}"  # strip '-v<ver>' suffix
           echo "id=${WIDGET_ID}" >> "$GITHUB_OUTPUT"
           echo "version=${WIDGET_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Parsed tag: id=${WIDGET_ID} version=${WIDGET_VERSION}"
