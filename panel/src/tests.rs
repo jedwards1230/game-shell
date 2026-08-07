@@ -1197,3 +1197,972 @@ async fn cec_recover_restart_daemon_falls_back_to_exec_and_reports_health() {
         "expected the restart-daemon action to be reported: {html}"
     );
 }
+
+// ===========================================================================
+// S1/S2/S5 — the auth layer, proven against the REAL router
+//
+// These tests spin the actual `crate::build_router` behind `axum::serve` on an
+// ephemeral loopback port and drive it with `reqwest` (already a dependency —
+// no test-only HTTP crate). Every request is made WITHOUT valid credentials
+// except where a test is explicitly about the authenticated path, so no
+// mutating handler ever executes: a registered route answers 401 (auth rejects
+// before the handler), an unregistered one answers 404. That distinction is
+// what makes the `allow_dangerous` gate testable without ever running
+// `systemctl reboot` on the machine running `cargo test`.
+// ===========================================================================
+
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::state::SharedState;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Method {
+    Get,
+    Post,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Access {
+    /// One of the four documented auth exemptions.
+    Public,
+    /// Gated by `auth::require_auth`.
+    Authenticated,
+}
+
+use Access::{Authenticated, Public};
+use Method::{Get, Post};
+
+/// One row of the route table. `declared` must match `main.rs` verbatim
+/// (placeholders intact); `request` is a concrete path with the placeholders
+/// substituted so the row can actually be dispatched.
+struct RouteSpec {
+    declared: &'static str,
+    request: &'static str,
+    method: Method,
+    access: Access,
+    /// Part of the S5 root-equivalent set — registered only under
+    /// `[panel].allow_dangerous = true`.
+    dangerous: bool,
+    /// This handler shells out (`systemctl`, `pacman`, the daemon bridge's
+    /// deploy/build) rather than just rendering. Probing such a route with its
+    /// real method would EXECUTE it if the gate under test were broken — on a
+    /// live HTPC that means a reboot. They are probed with [`Method::Get`]
+    /// instead: an unexempt path still answers 401 when it is registered and
+    /// gated, 404 when it is not registered, and 405 (harmlessly) if the auth
+    /// layer ever went missing — the handler is never reached either way.
+    exec_backed: bool,
+}
+
+const fn r(
+    declared: &'static str,
+    request: &'static str,
+    method: Method,
+    access: Access,
+) -> RouteSpec {
+    RouteSpec {
+        declared,
+        request,
+        method,
+        access,
+        dangerous: false,
+        exec_backed: false,
+    }
+}
+
+/// A registered-but-exec-backed recovery route (not part of the S5 set).
+const fn recovery(declared: &'static str, request: &'static str, method: Method) -> RouteSpec {
+    RouteSpec {
+        declared,
+        request,
+        method,
+        access: Authenticated,
+        dangerous: false,
+        exec_backed: true,
+    }
+}
+
+const fn danger(declared: &'static str, method: Method) -> RouteSpec {
+    RouteSpec {
+        declared,
+        request: declared,
+        method,
+        access: Authenticated,
+        dangerous: true,
+        exec_backed: true,
+    }
+}
+
+/// The method to probe a row with — see [`RouteSpec::exec_backed`].
+fn probe_method(spec: &RouteSpec) -> Method {
+    if spec.exec_backed {
+        Method::Get
+    } else {
+        spec.method
+    }
+}
+
+/// THE table. `route_table_matches_main_rs_declarations` asserts this is
+/// exactly the set of routes `main.rs` declares — so adding an ungated route
+/// without adding it here fails the suite.
+fn route_table() -> Vec<RouteSpec> {
+    vec![
+        r("/", "/", Get, Authenticated),
+        r("/dashboard", "/dashboard", Get, Authenticated),
+        r("/dashboard/tiles", "/dashboard/tiles", Get, Authenticated),
+        r(
+            "/dashboard/updates-tile",
+            "/dashboard/updates-tile",
+            Get,
+            Authenticated,
+        ),
+        r("/processes", "/processes", Get, Authenticated),
+        // Deliberately an unknown unit key: the handler rejects it before
+        // touching `systemctl`, so this row is inert even if probed.
+        recovery(
+            "/processes/restart/{key}",
+            "/processes/restart/not-a-unit",
+            Post,
+        ),
+        r(
+            "/processes/updates/refresh",
+            "/processes/updates/refresh",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/processes/updates/job",
+            "/processes/updates/job",
+            Get,
+            Authenticated,
+        ),
+        r("/settings", "/settings", Get, Authenticated),
+        r("/settings/save", "/settings/save", Post, Authenticated),
+        r("/settings/raw", "/settings/raw", Post, Authenticated),
+        r("/widgets", "/widgets", Get, Authenticated),
+        r("/widgets/save", "/widgets/save", Post, Authenticated),
+        r(
+            "/widgets/reorder/{id}/up",
+            "/widgets/reorder/plex/up",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/widgets/reorder/{id}/down",
+            "/widgets/reorder/plex/down",
+            Post,
+            Authenticated,
+        ),
+        r("/tools", "/tools", Get, Authenticated),
+        r("/tools/intent", "/tools/intent", Post, Authenticated),
+        r("/tools/key", "/tools/key", Post, Authenticated),
+        r("/tools/apps/list", "/tools/apps/list", Post, Authenticated),
+        r(
+            "/tools/apps/launch",
+            "/tools/apps/launch",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/apps/recents",
+            "/tools/apps/recents",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/bt/power-status",
+            "/tools/bt/power-status",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/bt/power-on",
+            "/tools/bt/power-on",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/bt/power-off",
+            "/tools/bt/power-off",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/bt/scan-on",
+            "/tools/bt/scan-on",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/bt/scan-off",
+            "/tools/bt/scan-off",
+            Post,
+            Authenticated,
+        ),
+        r("/tools/bt/list", "/tools/bt/list", Post, Authenticated),
+        r("/tools/bt/action", "/tools/bt/action", Post, Authenticated),
+        r(
+            "/tools/net/status",
+            "/tools/net/status",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/net/wifi-list",
+            "/tools/net/wifi-list",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/net/wifi-rescan",
+            "/tools/net/wifi-rescan",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/net/throughput",
+            "/tools/net/throughput",
+            Post,
+            Authenticated,
+        ),
+        r("/tools/net/ping", "/tools/net/ping", Post, Authenticated),
+        r(
+            "/tools/power/can-suspend",
+            "/tools/power/can-suspend",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/power/battery",
+            "/tools/power/battery",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/sys/status",
+            "/tools/sys/status",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/sys/metrics",
+            "/tools/sys/metrics",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/sys/storage",
+            "/tools/sys/storage",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/sys/build-info",
+            "/tools/sys/build-info",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/sys/controllerdb-status",
+            "/tools/sys/controllerdb-status",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/tools/sys/controllerdb-refresh",
+            "/tools/sys/controllerdb-refresh",
+            Post,
+            Authenticated,
+        ),
+        r("/controllers", "/controllers", Get, Authenticated),
+        r(
+            "/controllers/grab",
+            "/controllers/grab",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/release",
+            "/controllers/release",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/handoff",
+            "/controllers/handoff",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/pad/battery",
+            "/controllers/pad/battery",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/pad/rumble-status",
+            "/controllers/pad/rumble-status",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/pad/rumble",
+            "/controllers/pad/rumble",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/input-devices",
+            "/controllers/input-devices",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/bindings/set",
+            "/controllers/bindings/set",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/bindings/capture",
+            "/controllers/bindings/capture",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/bindings/capture-cancel",
+            "/controllers/bindings/capture-cancel",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/active-game/set",
+            "/controllers/active-game/set",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/active-game/clear",
+            "/controllers/active-game/clear",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/controllerdb/status",
+            "/controllers/controllerdb/status",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/controllers/controllerdb/refresh",
+            "/controllers/controllerdb/refresh",
+            Post,
+            Authenticated,
+        ),
+        r("/cec", "/cec", Get, Authenticated),
+        r("/cec/scan", "/cec/scan", Post, Authenticated),
+        r("/cec/device", "/cec/device", Post, Authenticated),
+        r(
+            "/cec/active-source",
+            "/cec/active-source",
+            Post,
+            Authenticated,
+        ),
+        r("/cec/power-on", "/cec/power-on", Post, Authenticated),
+        r("/cec/power-off", "/cec/power-off", Post, Authenticated),
+        r("/media", "/media", Get, Authenticated),
+        r(
+            "/media/wallpaper/upload",
+            "/media/wallpaper/upload",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/media/wallpaper/select",
+            "/media/wallpaper/select",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/media/wallpaper/delete",
+            "/media/wallpaper/delete",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/media/wallpaper/file",
+            "/media/wallpaper/file",
+            Get,
+            Authenticated,
+        ),
+        r(
+            "/media/webapp/add",
+            "/media/webapp/add",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/media/webapp/remove",
+            "/media/webapp/remove",
+            Post,
+            Authenticated,
+        ),
+        r("/cec/test", "/cec/test", Post, Authenticated),
+        r("/cec/osd-name", "/cec/osd-name", Post, Authenticated),
+        // Recovery, deliberately NOT part of the dangerous set: restarting a
+        // wedged daemon is the reason the panel exists.
+        recovery(
+            "/cec/recover/restart-daemon",
+            "/cec/recover/restart-daemon",
+            Post,
+        ),
+        r("/logs", "/logs", Get, Authenticated),
+        r("/logs/view", "/logs/view", Get, Authenticated),
+        r("/dev", "/dev", Get, Authenticated),
+        r("/dev/screenshot", "/dev/screenshot", Get, Authenticated),
+        r(
+            "/dev/screenshot/capture",
+            "/dev/screenshot/capture",
+            Post,
+            Authenticated,
+        ),
+        r(
+            "/nav/daemon-status",
+            "/nav/daemon-status",
+            Get,
+            Authenticated,
+        ),
+        // ── the four auth exemptions ──
+        r("/login", "/login", Get, Public),
+        r("/login", "/login", Post, Public),
+        r("/assets/htmx.min.js", "/assets/htmx.min.js", Get, Public),
+        r("/assets/style.css", "/assets/style.css", Get, Public),
+        // ── the S5 root-equivalent set ──
+        danger("/dev/deploy", Post),
+        danger("/dev/build", Post),
+        danger("/dev/restart-daemon", Post),
+        danger("/dev/restart-shell", Post),
+        danger("/dev/reboot", Post),
+        danger("/dev/suspend", Post),
+        danger("/processes/updates/apply", Post),
+        danger("/tools/raw", Post),
+    ]
+}
+
+/// Parse every `.route("<path>", get|post` declaration out of `main.rs`.
+///
+/// Multi-line tolerant: rustfmt wraps a number of these across three lines, so
+/// whitespace (including newlines) is skipped between every token rather than
+/// matching a single line.
+fn parse_declared_routes(src: &str) -> Vec<(String, Method)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(idx) = rest.find(".route(") {
+        rest = &rest[idx + ".route(".len()..];
+        let after_open = rest.trim_start();
+        let Some(quoted) = after_open.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = quoted.find('"') else {
+            continue;
+        };
+        let path = &quoted[..end];
+        let after_path = quoted[end + 1..].trim_start();
+        let Some(after_comma) = after_path.strip_prefix(',') else {
+            continue;
+        };
+        let after_comma = after_comma.trim_start();
+        let method = if after_comma.starts_with("get(") {
+            Method::Get
+        } else if after_comma.starts_with("post(") {
+            Method::Post
+        } else {
+            continue;
+        };
+        out.push((path.to_string(), method));
+    }
+    out
+}
+
+/// The gate that stops the auth layer regressing silently: the table above
+/// must be EXACTLY the set of routes `main.rs` declares. axum's `Router` has
+/// no introspection API, so the source is the source of truth.
+#[test]
+fn route_table_matches_main_rs_declarations() {
+    let declared = parse_declared_routes(include_str!("main.rs"));
+    let table = route_table();
+
+    let declared_paths: BTreeSet<&str> = declared.iter().map(|(p, _)| p.as_str()).collect();
+    let table_paths: BTreeSet<&str> = table.iter().map(|r| r.declared).collect();
+    assert_eq!(
+        declared_paths, table_paths,
+        "main.rs declares a route the auth route table doesn't cover (or vice versa) — \
+         add it to `route_table()` with its access class"
+    );
+
+    // Stronger than the path-set check: also pin the (path, method) pairs, so
+    // adding a second method to an existing path can't slip through.
+    let mut declared_pairs: Vec<(&str, Method)> =
+        declared.iter().map(|(p, m)| (p.as_str(), *m)).collect();
+    let mut table_pairs: Vec<(&str, Method)> =
+        table.iter().map(|r| (r.declared, r.method)).collect();
+    declared_pairs.sort_unstable();
+    table_pairs.sort_unstable();
+    assert_eq!(declared_pairs, table_pairs);
+
+    assert_eq!(
+        declared.len(),
+        90,
+        "expected 88 pre-existing routes + GET/POST /login"
+    );
+}
+
+/// The exemption list is exactly four routes — and the middleware's own
+/// `PUBLIC_PATHS` covers exactly their paths.
+#[test]
+fn public_routes_are_exactly_the_four_documented_exemptions() {
+    let table = route_table();
+    let mut public: Vec<(Method, &str)> = table
+        .iter()
+        .filter(|r| r.access == Public)
+        .map(|r| (r.method, r.declared))
+        .collect();
+    public.sort_unstable();
+    assert_eq!(
+        public,
+        vec![
+            (Get, "/assets/htmx.min.js"),
+            (Get, "/assets/style.css"),
+            (Get, "/login"),
+            (Post, "/login"),
+        ]
+    );
+
+    let public_paths: BTreeSet<&str> = public.iter().map(|(_, p)| *p).collect();
+    let middleware_paths: BTreeSet<&str> = crate::auth::PUBLIC_PATHS.iter().copied().collect();
+    assert_eq!(public_paths, middleware_paths);
+}
+
+/// The S5 set, pinned. `POST /processes/restart/{key}` and
+/// `POST /cec/recover/restart-daemon` are deliberately absent: unit restart is
+/// recovery, not a root-equivalent action.
+#[test]
+fn dangerous_set_is_exactly_the_root_equivalent_actions() {
+    let table = route_table();
+    let mut dangerous: Vec<&str> = table
+        .iter()
+        .filter(|r| r.dangerous)
+        .map(|r| r.declared)
+        .collect();
+    dangerous.sort_unstable();
+    assert_eq!(
+        dangerous,
+        vec![
+            "/dev/build",
+            "/dev/deploy",
+            "/dev/reboot",
+            "/dev/restart-daemon",
+            "/dev/restart-shell",
+            "/dev/suspend",
+            "/processes/updates/apply",
+            "/tools/raw",
+        ]
+    );
+    assert!(table
+        .iter()
+        .any(|r| r.declared == "/processes/restart/{key}" && !r.dangerous));
+    assert!(table
+        .iter()
+        .any(|r| r.declared == "/cec/recover/restart-daemon" && !r.dangerous));
+}
+
+// ── live-router harness ────────────────────────────────────────────────────
+
+const TEST_TOKEN: &str = "panel-test-token";
+
+fn cfg_authenticated(allow_dangerous: bool) -> AppConfig {
+    AppConfig {
+        panel_token_file: Some("~/.config/tv-shell/panel-token".to_string()),
+        panel_token: Some(TEST_TOKEN.to_string()),
+        allow_dangerous,
+        ..AppConfig::default()
+    }
+}
+
+fn state_with(cfg: AppConfig) -> SharedState {
+    let sock = std::path::PathBuf::from(format!(
+        "/tmp/tvshp-router-{}-{:?}.sock",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let bridge = BridgeClient::new(cfg.http_bridge_base.clone(), cfg.http_token.clone());
+    Arc::new(AppState {
+        cfg,
+        ipc: IpcClient::new(sock),
+        bridge,
+        recovery: Recovery::new(),
+        updates: crate::updates::UpdatesState::default(),
+    })
+}
+
+/// Serve the REAL router on an ephemeral loopback port; returns its base URL.
+async fn spawn_panel(state: SharedState) -> String {
+    let app = crate::build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// A client that does NOT follow redirects — the 303 to `/login` is the thing
+/// under test, not a step on the way to something else.
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+}
+
+fn request(c: &reqwest::Client, base: &str, method: Method, path: &str) -> reqwest::RequestBuilder {
+    let url = format!("{base}{path}");
+    match method {
+        Method::Get => c.get(url),
+        Method::Post => c.post(url),
+    }
+}
+
+/// Every authenticated route rejects a request that carries no credentials —
+/// checked against the real router with the dangerous set registered, so all
+/// 90 routes are live. No valid credential is ever sent, so no handler runs.
+#[tokio::test]
+async fn every_authenticated_route_rejects_unauthenticated_requests() {
+    let base = spawn_panel(state_with(cfg_authenticated(true))).await;
+    let c = client();
+    for spec in route_table() {
+        let method = probe_method(&spec);
+        let status = request(&c, &base, method, spec.request)
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{method:?} {} failed: {e}", spec.request))
+            .status()
+            .as_u16();
+        match spec.access {
+            Authenticated => assert_eq!(
+                status, 401,
+                "{method:?} {} must be gated, got {status}",
+                spec.request
+            ),
+            Public => assert_ne!(
+                status, 401,
+                "{method:?} {} is a documented exemption but was gated",
+                spec.request
+            ),
+        }
+    }
+}
+
+/// The exempt routes actually serve their content without credentials.
+#[tokio::test]
+async fn exempt_routes_serve_without_credentials() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let c = client();
+    for path in ["/assets/htmx.min.js", "/assets/style.css", "/login"] {
+        let resp = c.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{path} must serve anonymously");
+        assert!(!resp.text().await.unwrap().is_empty());
+    }
+}
+
+/// S5 — with `allow_dangerous = false` the root-equivalent routes are not
+/// registered at all (404), while the recovery routes stay registered (401,
+/// i.e. auth rejected them before any handler ran).
+#[tokio::test]
+async fn dangerous_routes_are_unregistered_when_allow_dangerous_is_false() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let c = client();
+    for spec in route_table().iter().filter(|s| s.dangerous) {
+        let status = request(&c, &base, probe_method(spec), spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(
+            status, 404,
+            "{} must not exist with allow_dangerous = false",
+            spec.request
+        );
+    }
+    // The two recovery routes are NOT dangerous and must stay registered:
+    // 401 (gated) rather than 404 (gone).
+    for path in [
+        "/processes/restart/not-a-unit",
+        "/cec/recover/restart-daemon",
+    ] {
+        let status = c
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(status, 401, "{path} is recovery and must stay registered");
+    }
+}
+
+/// S5 — with `allow_dangerous = true` they exist again (401, not 404: the
+/// auth layer still rejects the unauthenticated probe, so nothing executes).
+#[tokio::test]
+async fn dangerous_routes_are_registered_when_allow_dangerous_is_true() {
+    let base = spawn_panel(state_with(cfg_authenticated(true))).await;
+    let c = client();
+    for spec in route_table().iter().filter(|s| s.dangerous) {
+        let status = request(&c, &base, probe_method(spec), spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(
+            status, 401,
+            "{} must be registered (and gated) with allow_dangerous = true",
+            spec.request
+        );
+    }
+}
+
+/// The bearer path works, and a wrong token does not.
+#[tokio::test]
+async fn bearer_token_is_accepted_and_a_wrong_one_is_rejected() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let c = client();
+
+    let ok = c
+        .get(format!("{base}/nav/daemon-status"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status().as_u16(), 200);
+
+    let bad = c
+        .get(format!("{base}/nav/daemon-status"))
+        .bearer_auth("not-the-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status().as_u16(), 401);
+}
+
+/// The login form mints a session cookie with the hardened flags, and that
+/// cookie then authenticates a request.
+#[tokio::test]
+async fn login_sets_a_hardened_session_cookie_that_authenticates() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let c = client();
+
+    let resp = c
+        .post(format!("{base}/login"))
+        .form(&[("token", TEST_TOKEN)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("location").unwrap(), "/");
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(cookie.contains("Path=/"), "{cookie}");
+    assert!(
+        !cookie.contains("Secure"),
+        "Secure is deliberately omitted (plain HTTP on the LAN): {cookie}"
+    );
+
+    let jar = cookie.split(';').next().unwrap().to_string();
+    let authed = c
+        .get(format!("{base}/nav/daemon-status"))
+        .header("cookie", jar)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed.status().as_u16(), 200);
+}
+
+/// A wrong token at the login form gets 401 and mints no cookie.
+#[tokio::test]
+async fn login_with_a_wrong_token_sets_no_cookie() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let resp = client()
+        .post(format!("{base}/login"))
+        .form(&[("token", "wrong")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+    assert!(resp.headers().get("set-cookie").is_none());
+}
+
+/// htmx must never be handed an HTML login page — it would be swapped into
+/// whatever target the caller declared (e.g. the nav status dot).
+#[tokio::test]
+async fn htmx_request_gets_a_401_not_a_login_page() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let resp = client()
+        .get(format!("{base}/nav/daemon-status"))
+        .header("HX-Request", "true")
+        .header("accept", "text/html, */*")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("<form") && !body.contains("<!DOCTYPE"),
+        "htmx must not receive an HTML login page: {body}"
+    );
+}
+
+/// A browser navigation is redirected to the login form.
+#[tokio::test]
+async fn browser_navigation_is_redirected_to_login() {
+    let base = spawn_panel(state_with(cfg_authenticated(false))).await;
+    let resp = client()
+        .get(format!("{base}/dashboard"))
+        .header("accept", "text/html,application/xhtml+xml")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(resp.headers().get("location").unwrap(), "/login");
+}
+
+/// Fail closed: auth on (`[panel].token_file` set) with no resolvable token
+/// rejects everything, including a request that presents an empty credential.
+#[tokio::test]
+async fn auth_enabled_with_no_token_rejects_everything() {
+    let cfg = AppConfig {
+        panel_token_file: Some("~/.config/tv-shell/panel-token".to_string()),
+        panel_token: None,
+        ..AppConfig::default()
+    };
+    let base = spawn_panel(state_with(cfg)).await;
+    let c = client();
+    for path in ["/", "/dashboard", "/nav/daemon-status"] {
+        let status = c
+            .get(format!("{base}{path}"))
+            .bearer_auth("")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(status, 401, "{path} must fail closed");
+    }
+}
+
+/// No `[panel].token_file` ⇒ auth off ⇒ the loopback dev experience is
+/// unchanged (this is the state the panel shipped in, and is only permitted
+/// on a loopback bind — see `config::AppConfig::validate`).
+#[tokio::test]
+async fn auth_disabled_serves_without_credentials() {
+    let base = spawn_panel(state_with(AppConfig::default())).await;
+    let status = client()
+        .get(format!("{base}/nav/daemon-status"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 200);
+}
+
+/// S2 — the confused-deputy fix, proven end to end: an unauthenticated
+/// request to a bridge-backed panel route is rejected BEFORE `BridgeClient`
+/// gets to attach the daemon's `[http].token_file` bearer. The stand-in
+/// daemon bridge counts inbound connections; it must see zero.
+#[tokio::test]
+async fn unauthenticated_request_never_reaches_the_daemon_bridge() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_addr = listener.local_addr().unwrap();
+    {
+        let hits = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                hits.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+    }
+
+    let cfg = AppConfig {
+        panel_token_file: Some("~/.config/tv-shell/panel-token".to_string()),
+        panel_token: Some(TEST_TOKEN.to_string()),
+        http_bridge_base: Some(format!("http://{bridge_addr}")),
+        http_token: Some("DAEMON-SECRET".to_string()),
+        ..AppConfig::default()
+    };
+    let base = spawn_panel(state_with(cfg)).await;
+    let c = client();
+
+    // Two bridge-backed routes: the screenshot proxy (GET) and the log view
+    // (GET, `dev_logs`). Both call `BridgeClient`, which attaches the daemon
+    // token on every request it makes.
+    for path in ["/dev/screenshot", "/logs/view"] {
+        let status = c
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(status, 401, "{path} must be gated");
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "the daemon bridge must not be dialed for an unauthenticated request — \
+         the panel would be laundering the daemon's bearer token (S2)"
+    );
+
+    // Control: the same route WITH credentials does reach the bridge, so the
+    // zero above is the auth layer's doing and not a broken bridge client.
+    let ok = c
+        .get(format!("{base}/logs/view"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status().as_u16(), 200);
+    assert!(hits.load(Ordering::SeqCst) > 0);
+}
+
+/// S3 — the refusal must happen before the listener binds. `main` resolves the
+/// config (which validates) strictly before `TcpListener::bind`, so an
+/// aborted startup can never have opened the port.
+#[test]
+fn startup_refusal_precedes_the_listener_bind() {
+    let src = include_str!("main.rs");
+    let load = src
+        .find("config::load()?")
+        .expect("main must resolve the config");
+    let bind = src
+        .find("TcpListener::bind")
+        .expect("main must bind a listener");
+    assert!(
+        load < bind,
+        "config::load() (which refuses an insecure bind) must run before TcpListener::bind"
+    );
+}

@@ -7,6 +7,7 @@ pub mod cec;
 pub mod controllers;
 pub mod dashboard;
 pub mod dev;
+pub mod login;
 pub mod logs;
 pub mod media;
 pub mod nav;

@@ -22,14 +22,9 @@ config management.
 - **Stack**: axum + askama templates + vendored `htmx.min.js` (no CDN; the panel
   must render when the network or the rest of the system is broken).
 - **Bind**: `[panel]` section in `config.toml` (`enabled`, `bind`, default
-  `127.0.0.1:8091`; `token_file` reserved for future auth — v1 is LAN-only).
-  > ⚠️ The loopback default is safe; htpc-1 overrides it to `0.0.0.0:8091`. With
-  > no auth implemented, that exposes the panel's full privileged surface
-  > (deploy/build, reboot/suspend, unit restarts, `sudo pacman -Syu`, uploads) to
-  > the LAN — and, because the panel attaches the daemon's bearer token to its
-  > bridge calls, it also launders the daemon's authenticated surface to any
-  > unauthenticated caller. Tracked as S1/S2 in
-  > [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md#security-considerations).
+  `127.0.0.1:8091`; `token_file` enables auth; `allow_dangerous`, default
+  `false`). See [Authentication](#authentication) below — a non-loopback bind
+  now **requires** a token, or the panel refuses to start.
 - **Unit**: `config/tv-shell-panel.service`, installed by `scripts/install.sh`,
   started by the session script.
 
@@ -55,7 +50,7 @@ config management.
 | Processes | tv-shell systemd user units (daemon/shell/panel) with per-unit restart (color-coded dot + status word, not just text); Hyprland active window/clients (styled table)/monitors via IPC; a read-only top-processes table (`ps`, CPU-sorted, no kill action in v1); a System Updates section (see below) |
 | Settings | grouped typed forms over `settings.json` via `get-config`/`set-config` (shallow merge — unmentioned keys, notably the daemon-owned `keyBindings`/`perGameBindings`/`perPlayerBindings`/`webApps`, are left untouched); covers the QML-owned scalars plus `wallpaperPath` and a line-per-entry `prewarmApps` list editor; the daemon-owned keys (binding layers + the `webApps` registry, `docs/WEB_APPS.md`) are shown read-only here (`keyBindings` is also editable via the Controllers page's bindings editor; the per-game/per-player layers are read-only there too — full editors are deferred; web-app **management** now lives on the Media page); read-only `config.toml` view (a general edit path is deferred — editing still requires a manual edit + daemon/panel restart via the Dev page; the one targeted exception is the CEC page's `[cec].osd_name` input-name editor); raw JSON escape hatch with an explicit shallow-merge/`null`-deletes warning for keys not modeled as typed fields (e.g. `widgets`, `cecDeviceNames`) |
 | Widgets | per-widget enabled/order/size/prefs editors (`widgets.<id>` subtree) |
-| Media | **Wallpapers**: upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one (persisted as `wallpaperPath` via `set-config`) or clear it, and delete — this is the only way to get an image onto the box without SSH. Upload is treated as an attack surface (LAN-only, no auth): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. **Web apps**: list/add/remove the daemon-owned registry (`webapp-list`/`-add`/`-remove`, #187 P1+P3) — the panel is the add surface because the couch UI has no on-screen keyboard (#20) |
+| Media | **Wallpapers**: upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one (persisted as `wallpaperPath` via `set-config`) or clear it, and delete — this is the only way to get an image onto the box without SSH. Upload is treated as an attack surface in its own right (the route is authenticated, but auth is opt-in and a loopback panel may run without it): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. **Web apps**: list/add/remove the daemon-owned registry (`webapp-list`/`-add`/`-remove`, #187 P1+P3) — the panel is the add surface because the couch UI has no on-screen keyboard (#20) |
 | Tools | IPC console grouped by domain — Navigation (intent/key), Apps (list/launch/recents), Bluetooth (power/scan/list/connect-disconnect-pair-trust), Network (status/wifi/throughput/ping), Power (can-suspend/battery), System (sys-status/sys-metrics/storage-status/build-info/controllerdb); plus a raw-line escape hatch with a warning on commands owned by another page's guarded flow. CEC and controller/pads/bindings commands live on their own Controllers/CEC pages (below) instead. |
 | Controllers | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Settings raw JSON hatch); controller-DB status/refresh |
 | CEC | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides from Settings); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname) — **the panel's one config.toml write**, done format-preservingly via `toml_edit`, applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
@@ -130,6 +125,89 @@ and the log-tail `<details>` auto-expands on a failed run instead of staying
 collapsed — so the real cause is visible without an extra click. The
 Dashboard Updates tile is unaffected either way, since it only reflects the
 unprivileged `checkupdates` read.
+
+## Authentication
+
+Set `[panel].token_file` to a 0600 file under `~/.config/tv-shell/` and every
+route is gated:
+
+```bash
+install -m600 /dev/null ~/.config/tv-shell/panel-token
+openssl rand -hex 32 > ~/.config/tv-shell/panel-token
+```
+
+Use a **different** token from `[http].token_file` — that one is the daemon's,
+and the panel already holds it to call the bridge.
+
+**Two credentials, one secret.**
+
+- **Browser** — `GET /login` renders a one-field form; a correct token is
+  exchanged for a session cookie (`HttpOnly`, `SameSite=Strict`, `Path=/`, no
+  `Max-Age` — it dies with the browser session).
+- **Script** — `curl -H "Authorization: Bearer $(cat ~/.config/tv-shell/panel-token)" …`
+
+Both are compared **constant-time** (`subtle::ConstantTimeEq`, the same
+primitive as the daemon's `bridge_core::ct_eq_str`).
+
+Two deliberate simplifications, stated so they are not mistaken for oversights:
+
+- **The cookie value IS the token.** No session store, no session id — the panel
+  has exactly one credential, so a session table would add state without adding
+  a security property. It follows that revoking access means rotating the token
+  file and restarting the unit.
+- **`Secure` is deliberately omitted** from the cookie. The panel is served over
+  plain HTTP on the LAN; `Secure` would make login impossible.
+
+**Exempt routes — exactly four**, everything else (including
+`GET /nav/daemon-status`) is gated:
+
+| Route | Why |
+|---|---|
+| `GET /assets/htmx.min.js` | the login page can't be styled/scripted otherwise |
+| `GET /assets/style.css` | same |
+| `GET /login` | the form itself |
+| `POST /login` | the submission |
+
+**Response shape when unauthenticated** — an `HX-Request: true` swap gets a
+plain-text `401` (never an HTML login page: htmx would splice it into whatever
+target the caller declared, e.g. the nav status dot); a browser navigation
+(`Accept: text/html`) gets a `303` to `/login`; anything else gets `401`.
+
+**Token file hygiene** (mirrors the daemon): the path is tilde-expanded,
+canonicalized, and must resolve **under the config dir**; the file must not be
+group/other-accessible. A violation **aborts startup** rather than silently
+degrading to "no auth". The middleware also fails closed at runtime — auth on
+with no token rejects everything.
+
+### Startup refusal
+
+The panel refuses to start when it is bound to a **non-loopback** address with
+auth effectively disabled (no `token_file`, or no token resolvable from it) —
+the same shape as the daemon's refusal, and reusing the **same**
+`[dev].allow_insecure_lan` flag so a node has one insecure-LAN opt-in to audit,
+not two. With that flag set the refusal downgrades to a loud `error!`-level log
+and the panel serves anyway. The check runs before the listener binds, so a
+refused configuration never opens the port.
+
+Leaving `token_file` unset is still supported and keeps the loopback dev
+experience unchanged — it is only the non-loopback combination that is refused.
+
+### Dangerous actions (`allow_dangerous`)
+
+The panel is the most privileged surface on its node: it can overwrite the
+running build, reboot, suspend, write `config.toml`, upload files and run
+`sudo -n pacman -Syu`. `[panel].allow_dangerous` defaults to **`false`**, and
+when false these routes are **not registered at all** (404, not a 403 from a
+handler) and their buttons are not rendered:
+
+`POST /dev/deploy` · `/dev/build` · `/dev/restart-daemon` · `/dev/restart-shell` ·
+`/dev/reboot` · `/dev/suspend` · `/processes/updates/apply` · `/tools/raw`
+
+`GET /dev` and `GET /dev/screenshot` stay available (observability), as do
+`POST /processes/restart/{key}` and `POST /cec/recover/restart-daemon` —
+restarting a wedged unit is *recovery*, which is the reason the panel exists.
+`POST /tools/raw` is in the dangerous set because it drives the entire IPC
+vocabulary, making it an arbitrary-command escape hatch.
 
 ## Danger tiers
 

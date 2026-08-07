@@ -25,6 +25,10 @@ struct DevTemplate {
     bridge_configured: bool,
     daemon_chip_html: String,
     shell_chip_html: String,
+    /// `[panel].allow_dangerous` (S5). When false the deploy/build/restart/
+    /// reboot/suspend forms are not rendered at all — their routes are not
+    /// registered either, so rendering them would produce buttons that 404.
+    allow_dangerous: bool,
 }
 
 /// `GET /dev` — probes daemon reachability (bridge `dev_status`, else IPC
@@ -43,6 +47,7 @@ pub async fn render_page(state: &AppState) -> String {
         bridge_configured: state.cfg.http_bridge_base.is_some(),
         daemon_chip_html,
         shell_chip_html,
+        allow_dangerous: state.cfg.allow_dangerous,
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))

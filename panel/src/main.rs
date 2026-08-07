@@ -9,10 +9,15 @@
 //! M3 added the Tools console, Processes page, and the Dev-page screenshot
 //! viewer. Controllers and CEC still render an honest stub until M4 lands.
 //!
-//! Auth: none in v1 (LAN-only deployment; `[panel].token_file` is parsed but
-//! unused for the panel's own auth surface — reserved for a later milestone).
+//! Auth (S1): every route is gated by the [`auth`] middleware except four
+//! exemptions (`GET /assets/htmx.min.js`, `GET /assets/style.css`, and both
+//! methods of `/login`). A browser exchanges the `[panel].token_file` secret
+//! for a session cookie at `/login`; scripts send `Authorization: Bearer`.
+//! With `[panel].token_file` unset the panel runs unauthenticated — which is
+//! only permitted on a loopback bind (see `config::AppConfig::validate`).
 
 mod assets;
+mod auth;
 mod bridge;
 mod config;
 mod exec;
@@ -42,18 +47,25 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = config::load();
+    // Resolves the panel's own token eagerly and refuses to start on a
+    // non-loopback bind with auth effectively disabled (S3) — deliberately
+    // BEFORE the listener below is bound.
+    let cfg = config::load()?;
     if !cfg.enabled {
         tracing::info!("tv-shell-panel: disabled ([panel].enabled = false) — exiting cleanly");
         return Ok(());
     }
 
     let panel_bind = cfg.panel_bind;
-    tracing::debug!(
-        "tv-shell-panel: config resolved — [panel].bind={:?}, [panel].token_file={:?} \
-         (parsed but unused for the panel's own auth in v1 — LAN-only, no auth yet)",
+    tracing::info!(
+        "tv-shell-panel: config resolved — [panel].bind={:?}, auth={}, allow_dangerous={}",
         cfg.panel_bind_raw,
-        cfg.panel_token_file
+        if cfg.auth_enabled() {
+            "enabled ([panel].token_file)"
+        } else {
+            "DISABLED (no [panel].token_file)"
+        },
+        cfg.allow_dangerous
     );
     let sock = config::socket_path();
     let ipc = ipc::IpcClient::new(sock);
@@ -68,6 +80,29 @@ async fn main() -> anyhow::Result<()> {
         recovery,
         updates,
     });
+
+    let app = build_router(state);
+
+    tracing::info!("tv-shell-panel listening on {panel_bind}");
+    let listener = tokio::net::TcpListener::bind(panel_bind).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Build the panel's `Router`.
+///
+/// Two security properties live here and are covered by
+/// `tests::route_table_matches_main_rs_declarations` + friends:
+///
+/// 1. **Every registered route is behind [`auth::require_auth`]**, attached
+///    with `route_layer` so it runs for every MATCHED route while an
+///    unregistered path stays a plain 404.
+/// 2. **The root-equivalent routes are only registered when
+///    `[panel].allow_dangerous = true`** (S5) — an ungated-off route is not
+///    404-by-handler, it does not exist. The corresponding UI affordances are
+///    hidden by the same flag, so the panel never renders a button that 404s.
+fn build_router(state: SharedState) -> Router {
+    let allow_dangerous = state.cfg.allow_dangerous;
 
     // Route registration is one line per page so later milestones can add
     // routes without touching neighboring lines.
@@ -84,10 +119,6 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/processes/updates/refresh",
             post(pages::processes::updates_refresh),
-        )
-        .route(
-            "/processes/updates/apply",
-            post(pages::processes::updates_apply),
         )
         .route("/processes/updates/job", get(pages::processes::updates_job))
         .route("/settings", get(pages::settings::page))
@@ -141,7 +172,6 @@ async fn main() -> anyhow::Result<()> {
             "/tools/sys/controllerdb-refresh",
             post(pages::tools::controllerdb_refresh),
         )
-        .route("/tools/raw", post(pages::tools::raw))
         .route("/controllers", get(pages::controllers::page))
         .route("/controllers/grab", post(pages::controllers::grab))
         .route("/controllers/release", post(pages::controllers::release))
@@ -218,24 +248,43 @@ async fn main() -> anyhow::Result<()> {
         .route("/logs", get(pages::logs::page))
         .route("/logs/view", get(pages::logs::view)) // htmx refresh partial
         .route("/dev", get(pages::dev::page))
-        .route("/dev/deploy", post(pages::dev::deploy))
-        .route("/dev/build", post(pages::dev::build))
-        .route("/dev/restart-daemon", post(pages::dev::restart_daemon))
-        .route("/dev/restart-shell", post(pages::dev::restart_shell))
-        .route("/dev/reboot", post(pages::dev::reboot))
-        .route("/dev/suspend", post(pages::dev::suspend))
         .route("/dev/screenshot", get(pages::dev::screenshot_png))
         .route(
             "/dev/screenshot/capture",
             post(pages::dev::screenshot_capture),
         )
         .route("/nav/daemon-status", get(pages::nav::daemon_status_dot))
+        // The four auth-exempt routes (`auth::PUBLIC_PATHS`): the two
+        // compiled-in static assets, plus the login form and its submission.
+        .route("/login", get(pages::login::page))
+        .route("/login", post(pages::login::submit))
         .route("/assets/htmx.min.js", get(assets::htmx_js))
-        .route("/assets/style.css", get(assets::style_css))
-        .with_state(state);
+        .route("/assets/style.css", get(assets::style_css));
 
-    tracing::info!("tv-shell-panel listening on {panel_bind}");
-    let listener = tokio::net::TcpListener::bind(panel_bind).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    // S5 — the root-equivalent set. Registered ONLY under
+    // `[panel].allow_dangerous = true`; otherwise these paths do not exist.
+    // `POST /processes/restart/{key}` and `POST /cec/recover/restart-daemon`
+    // are deliberately NOT here: restarting a unit is recovery, which is the
+    // reason the panel exists.
+    let app = if allow_dangerous {
+        app.route("/dev/deploy", post(pages::dev::deploy))
+            .route("/dev/build", post(pages::dev::build))
+            .route("/dev/restart-daemon", post(pages::dev::restart_daemon))
+            .route("/dev/restart-shell", post(pages::dev::restart_shell))
+            .route("/dev/reboot", post(pages::dev::reboot))
+            .route("/dev/suspend", post(pages::dev::suspend))
+            .route(
+                "/processes/updates/apply",
+                post(pages::processes::updates_apply),
+            )
+            .route("/tools/raw", post(pages::tools::raw))
+    } else {
+        app
+    };
+
+    app.route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_auth,
+    ))
+    .with_state(state)
 }

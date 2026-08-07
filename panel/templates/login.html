@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — tv-shell panel</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<main class="login-main">
+  <h1>tv-shell panel</h1>
+  {% if !error.is_empty() %}
+  <p class="banner banner-error">{{ error }}</p>
+  {% endif %}
+  {% if auth_enabled %}
+  <p class="muted">Enter the panel token (the contents of <code>[panel].token_file</code>).</p>
+  <form method="post" action="/login" class="login-form">
+    <input type="password" name="token" autocomplete="current-password" autofocus required
+           placeholder="panel token" class="field-wide">
+    <button type="submit">Sign in</button>
+  </form>
+  {% else %}
+  <p class="banner">
+    Panel authentication is disabled — <code>[panel].token_file</code> is unset in
+    <code>config.toml</code>, so every route is open. <a href="/">Go to the dashboard</a>.
+  </p>
+  {% endif %}
+</main>
+</body>
+</html>

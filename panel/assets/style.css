@@ -825,3 +825,23 @@ button.btn-mutate:hover {
 .wallpaper-actions form {
   margin: 0;
 }
+
+/* Sign-in page (login.html) — a standalone surface with no topnav, so it
+   centers its own narrow column instead of inheriting the app-shell layout. */
+.login-main {
+  max-width: 26rem;
+  margin: 4rem auto 0;
+  padding: 0 1rem;
+}
+
+.login-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.login-form .field-wide {
+  flex: 1 1 auto;
+  min-width: 12rem;
+}

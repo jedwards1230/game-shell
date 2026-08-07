@@ -1,32 +1,42 @@
 //! Panel configuration: reads the daemon's `~/.config/tv-shell/config.toml`
-//! for the `[panel]` and `[http]` sections only.
+//! for the `[panel]`, `[http]` and `[dev]` sections only.
 //!
 //! The panel cannot depend on the `tv-shell-input` daemon crate (it pulls a
 //! Linux-only evdev/zbus/bluer/cec graph), so it parses the shared
-//! `config.toml` itself with a PERMISSIVE deserializer: only the two sections
-//! it needs are declared, every other section (`[mcp]`, `[cec]`, `[plex]`,
-//! `[steam]`, `[observability]`, `[input]`, `[dev]`, ...) is silently ignored
-//! by serde's default "unknown fields are OK" behavior (no
-//! `deny_unknown_fields` anywhere in this module).
+//! `config.toml` itself with a PERMISSIVE deserializer: only the sections it
+//! needs are declared, every other section (`[mcp]`, `[cec]`, `[plex]`,
+//! `[steam]`, `[observability]`, `[input]`, ...) is silently ignored by
+//! serde's default "unknown fields are OK" behavior (no `deny_unknown_fields`
+//! anywhere in this module).
 //!
 //! ```toml
 //! [panel]
 //! enabled = true
 //! bind = "127.0.0.1:8091"
-//! token_file = "~/.config/tv-shell/panel-token"  # parsed, unused in v1 (no auth)
+//! token_file = "~/.config/tv-shell/panel-token"  # 0600; enables panel auth
+//! allow_dangerous = false                        # deploy/build/reboot/pacman
 //!
 //! [http]
 //! bind = "127.0.0.1:8089"
 //! token_file = "~/.config/tv-shell/http-token"
+//!
+//! [dev]
+//! allow_insecure_lan = false  # shared with the daemon — one flag to audit
 //! ```
 //!
-//! Loading never panics and never blocks boot: a missing file yields all
-//! defaults, a malformed file logs a warning and falls back to defaults too —
+//! Parsing never panics and never blocks boot: a missing file yields all
+//! defaults and a malformed file logs a warning and falls back to defaults —
 //! the panel must always come up so an operator can reach the Dev recovery
 //! page even when config.toml is broken.
+//!
+//! **Resolution, however, can refuse to start** (mirroring the daemon's
+//! `DaemonConfig::validate`): a `[panel].token_file` that escapes the config
+//! dir, is group/other-accessible, or is unreadable aborts startup rather than
+//! silently degrading to "no auth", and a non-loopback `[panel].bind` with
+//! auth effectively disabled aborts unless `[dev].allow_insecure_lan = true`.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -41,6 +51,10 @@ pub struct PanelConfig {
     pub enabled: bool,
     pub bind: String,
     pub token_file: Option<String>,
+    /// Gate for the root-equivalent action set (deploy, build, reboot,
+    /// suspend, `pacman -Syu`, raw IPC). `false` by default: a fresh node
+    /// gets the read-only + recovery surface until an operator opts in.
+    pub allow_dangerous: bool,
 }
 
 impl Default for PanelConfig {
@@ -49,8 +63,18 @@ impl Default for PanelConfig {
             enabled: true,
             bind: DEFAULT_PANEL_BIND.to_string(),
             token_file: None,
+            allow_dangerous: false,
         }
     }
+}
+
+/// `[dev]` section of `config.toml` — shared with the daemon. The panel reads
+/// only `allow_insecure_lan`, deliberately reusing the daemon's flag so there
+/// is ONE insecure-LAN opt-in on a node to audit, not two.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DevSection {
+    pub allow_insecure_lan: bool,
 }
 
 /// `[http]` section of `config.toml` (the daemon's opt-in LAN HTTP bridge).
@@ -63,7 +87,7 @@ pub struct HttpSection {
 
 /// Top-level shape captured from `config.toml`. Deliberately does NOT declare
 /// the daemon's other sections (`mcp`, `cec`, `plex`, `steam`, `observability`,
-/// `input`, `dev`) — serde ignores unknown top-level keys by default (no
+/// `input`) — serde ignores unknown top-level keys by default (no
 /// `deny_unknown_fields`), so this struct tolerates the full daemon config
 /// document unchanged.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -72,6 +96,8 @@ struct RawConfig {
     panel: PanelConfig,
     #[serde(default)]
     http: HttpSection,
+    #[serde(default)]
+    dev: DevSection,
 }
 
 /// Resolved, ready-to-use panel configuration.
@@ -83,9 +109,20 @@ pub struct AppConfig {
     pub panel_bind: SocketAddr,
     /// Raw `[panel].bind` string, kept for diagnostics/logging.
     pub panel_bind_raw: String,
-    /// `[panel].token_file`, parsed but unused for the panel's own auth (v1
-    /// has no auth — LAN-only). Kept for a future milestone.
+    /// `[panel].token_file` as configured. Its presence is what turns the
+    /// panel's own auth ON — see [`AppConfig::auth_enabled`].
     pub panel_token_file: Option<String>,
+    /// The panel's own credential, resolved EAGERLY at startup from
+    /// `[panel].token_file` (config-dir-confined, 0600-checked, trimmed).
+    /// `None` means "no token" — with `auth_enabled()` that is the
+    /// fail-closed combination the auth layer rejects everything on.
+    pub panel_token: Option<String>,
+    /// `[panel].allow_dangerous` — gates registration of the root-equivalent
+    /// routes (deploy/build/reboot/suspend/pacman/raw IPC).
+    pub allow_dangerous: bool,
+    /// `[dev].allow_insecure_lan` — the daemon's own escape hatch, reused
+    /// here so a node has one insecure-LAN opt-in rather than two.
+    pub allow_insecure_lan: bool,
     /// `Some("http://<http.bind>")` when the daemon's HTTP bridge is
     /// configured; `None` when `[http].bind` is absent (bridge off).
     pub http_bridge_base: Option<String>,
@@ -107,8 +144,68 @@ impl Default for AppConfig {
             panel_bind,
             panel_bind_raw: panel.bind,
             panel_token_file: panel.token_file,
+            panel_token: None,
+            allow_dangerous: panel.allow_dangerous,
+            allow_insecure_lan: false,
             http_bridge_base: None,
             http_token: None,
+        }
+    }
+}
+
+impl AppConfig {
+    /// Whether the panel enforces its own authentication. Keyed on
+    /// `[panel].token_file` being CONFIGURED, not on a token having been
+    /// resolved: "auth on but no token" must reject everything (fail closed)
+    /// rather than read as "auth off".
+    pub fn auth_enabled(&self) -> bool {
+        self.panel_token_file.is_some()
+    }
+
+    /// Refuse to start in a configuration that would expose the panel — the
+    /// most privileged surface on the node — unauthenticated on the LAN.
+    ///
+    /// Mirrors `DaemonConfig::validate` (`daemon/src/daemon_config.rs`): the
+    /// dangerous combination is a **non-loopback** bind + auth **effectively
+    /// disabled** (no `token_file`, or no token resolvable from it).
+    /// Returning `Err` aborts startup, BEFORE the listener binds.
+    fn validate(&self) -> anyhow::Result<()> {
+        let auth_effectively_disabled = !self.auth_enabled() || self.panel_token.is_none();
+        if !self.panel_bind.ip().is_loopback() && auth_effectively_disabled {
+            self.refuse_or_warn(
+                "web control panel",
+                self.panel_bind,
+                "every panel route can restart units, rewrite config.toml, upload files \
+                 and (with allow_dangerous) deploy, reboot or run a full system update",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Either return an error (refuse to start) or, when the operator has
+    /// opted into `[dev].allow_insecure_lan`, log a loud warning and continue.
+    /// Mirrors `DaemonConfig::refuse_or_warn`, including the deliberate
+    /// `error!`-not-`warn!` level on the permitted path.
+    fn refuse_or_warn(&self, surface: &str, addr: SocketAddr, why: &str) -> anyhow::Result<()> {
+        if self.allow_insecure_lan {
+            // error!, not warn!: the escape hatch is a deliberate hole, and a
+            // forgotten `allow_insecure_lan = true` (e.g. a copy-pasted dev
+            // config) silently opens an unauthenticated root-equivalent
+            // surface to the LAN. Logging at error level makes that impossible
+            // to miss at startup.
+            tracing::error!(
+                "config: {surface} bound to non-loopback {addr} with auth effectively \
+                 disabled — {why}. PERMITTED ONLY because [dev].allow_insecure_lan = true; \
+                 remove it unless this box intentionally runs an unauthenticated LAN panel."
+            );
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "refusing to start: {surface} is bound to non-loopback {addr} with auth \
+                 effectively disabled (no token) — {why}. Set [panel].token_file (0600, \
+                 under ~/.config/tv-shell/), bind to 127.0.0.1, or explicitly opt in with \
+                 [dev].allow_insecure_lan = true."
+            ))
         }
     }
 }
@@ -127,11 +224,16 @@ pub fn config_toml_path() -> PathBuf {
     tv_shell_protocol::brand::config_dir().join("config.toml")
 }
 
-/// Load and resolve the panel configuration. Never panics: a missing file
-/// yields all defaults; a malformed file logs a warning and falls back to
-/// defaults so the panel can still boot (and an operator can reach the Dev
-/// recovery page) even with a broken config.toml.
-pub fn load() -> AppConfig {
+/// Load and resolve the panel configuration.
+///
+/// PARSING never panics: a missing file yields all defaults; a malformed file
+/// logs a warning and falls back to defaults so the panel can still boot (and
+/// an operator can reach the Dev recovery page) even with a broken config.toml.
+///
+/// RESOLUTION can fail: an unusable `[panel].token_file` or a non-loopback
+/// bind with auth effectively disabled returns `Err` so `main` aborts before
+/// binding the listener.
+pub fn load() -> anyhow::Result<AppConfig> {
     let path = config_path();
     let raw = match std::fs::read_to_string(&path) {
         Ok(text) => match toml::from_str::<RawConfig>(&text) {
@@ -153,8 +255,14 @@ pub fn load() -> AppConfig {
     resolve(raw)
 }
 
-/// Resolve a parsed [`RawConfig`] into a ready-to-use [`AppConfig`].
-fn resolve(raw: RawConfig) -> AppConfig {
+/// Resolve a parsed [`RawConfig`] into a ready-to-use [`AppConfig`], resolving
+/// the panel's own token eagerly and validating the bind/auth combination.
+///
+/// Both the token resolve and the validation are skipped when
+/// `[panel].enabled = false` — a disabled panel binds no listener, so there is
+/// no surface to refuse (this mirrors the daemon, which only validates a
+/// surface whose bind is actually configured).
+fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
     let panel_bind = raw.panel.bind.parse().unwrap_or_else(|e| {
         tracing::warn!(
             "panel: invalid [panel].bind {:?} ({e}) — falling back to {DEFAULT_PANEL_BIND}",
@@ -170,14 +278,110 @@ fn resolve(raw: RawConfig) -> AppConfig {
         .map(|bind| format!("http://{bind}"));
     let http_token = raw.http.token_file.as_deref().and_then(read_token_file);
 
-    AppConfig {
+    let panel_token = match (raw.panel.enabled, raw.panel.token_file.as_deref()) {
+        (true, Some(p)) => read_panel_token(p, &tv_shell_protocol::brand::config_dir())?,
+        _ => None,
+    };
+
+    let cfg = AppConfig {
         enabled: raw.panel.enabled,
         panel_bind,
         panel_bind_raw: raw.panel.bind,
         panel_token_file: raw.panel.token_file,
+        panel_token,
+        allow_dangerous: raw.panel.allow_dangerous,
+        allow_insecure_lan: raw.dev.allow_insecure_lan,
         http_bridge_base,
         http_token,
+    };
+    if cfg.enabled {
+        cfg.validate()?;
     }
+    Ok(cfg)
+}
+
+/// Resolve `[panel].token_file` into the panel's own credential.
+///
+/// Mirrors the daemon's `resolve_token_path` + `read_token_file` pair: the
+/// path is confined to `config_dir` (CWE-22) and the file must not be
+/// group/other-accessible. Any violation is an `Err` that aborts startup —
+/// a token file the operator meant to enable auth with must never degrade
+/// silently into "no auth".
+fn read_panel_token(path: &str, config_dir: &Path) -> anyhow::Result<Option<String>> {
+    let resolved = resolve_token_path(path, config_dir, "panel.token_file")?;
+    read_owner_only_token(&resolved, "panel.token_file")
+}
+
+/// Tilde-expand, canonicalize, and require the result to live under
+/// `config_dir` — a config writer must not be able to point the panel at
+/// `/etc/shadow` or an attacker-writable `/tmp` path. Canonicalizing also
+/// resolves `..` and symlinks, so a symlink inside the config dir pointing
+/// out is caught too.
+fn resolve_token_path(p: &str, config_dir: &Path, field: &str) -> anyhow::Result<PathBuf> {
+    let expanded = expand_tilde(p);
+    let canonical = expanded.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "config: {field} {}: cannot resolve token file path: {e}",
+            expanded.display()
+        )
+    })?;
+    let config_dir = config_dir.canonicalize().map_err(|e| {
+        anyhow::anyhow!("config: cannot resolve config dir for {field} validation: {e}")
+    })?;
+    if !canonical.starts_with(&config_dir) {
+        return Err(anyhow::anyhow!(
+            "config: {field} {} escapes the config directory {} — a token file must live \
+             under it (refusing to read a secret from an arbitrary path)",
+            canonical.display(),
+            config_dir.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Read a 0600-style token file: trim, treat empty as `Ok(None)` ("no token" →
+/// fail-closed once auth is on), and hard-error on a group/other-accessible
+/// file.
+fn read_owner_only_token(path: &Path, field: &str) -> anyhow::Result<Option<String>> {
+    ensure_owner_only(path, field)?;
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("config: {field} {} unreadable: {e}", path.display()))?;
+    let token = raw.trim();
+    if token.is_empty() {
+        tracing::warn!(
+            "config: {field} {} is empty — treating as no token (the panel will reject \
+             every authenticated request)",
+            path.display()
+        );
+        Ok(None)
+    } else {
+        Ok(Some(token.to_string()))
+    }
+}
+
+/// Fail-closed if a token file is readable by group/other (mode & 0o077 != 0).
+/// Unix-only check; a no-op elsewhere (non-Unix has no POSIX mode bits).
+#[cfg(unix)]
+fn ensure_owner_only(path: &Path, field: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| anyhow::anyhow!("config: {field} {} stat failed: {e}", path.display()))?;
+    let mode = meta.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(anyhow::anyhow!(
+            "config: {field} {} is group/other-accessible (mode {:o}); refusing to \
+             start — the panel's credential must be private. Fix: chmod 600 {}",
+            path.display(),
+            mode & 0o7777,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_owner_only(_path: &Path, _field: &str) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Read a bearer token from a file path, tilde-expanding a leading `~/`.
@@ -276,9 +480,21 @@ mod tests {
     }
 
     #[test]
+    fn default_config_has_auth_off_and_dangerous_actions_off() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.auth_enabled(), "no [panel].token_file ⇒ auth off");
+        assert!(cfg.panel_token.is_none());
+        assert!(
+            !cfg.allow_dangerous,
+            "[panel].allow_dangerous must default to false (S5)"
+        );
+        assert!(!cfg.allow_insecure_lan);
+    }
+
+    #[test]
     fn resolve_missing_sections_yields_defaults() {
         let raw = RawConfig::default();
-        let cfg = resolve(raw);
+        let cfg = resolve(raw).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.panel_bind_raw, DEFAULT_PANEL_BIND);
     }
@@ -287,7 +503,7 @@ mod tests {
     fn resolve_parses_http_bind_into_bridge_base() {
         let mut raw = RawConfig::default();
         raw.http.bind = Some("127.0.0.1:8089".to_string());
-        let cfg = resolve(raw);
+        let cfg = resolve(raw).unwrap();
         assert_eq!(
             cfg.http_bridge_base.as_deref(),
             Some("http://127.0.0.1:8089")
@@ -298,7 +514,7 @@ mod tests {
     fn resolve_empty_http_bind_string_is_treated_as_off() {
         let mut raw = RawConfig::default();
         raw.http.bind = Some(String::new());
-        let cfg = resolve(raw);
+        let cfg = resolve(raw).unwrap();
         assert!(cfg.http_bridge_base.is_none());
     }
 
@@ -306,12 +522,126 @@ mod tests {
     fn resolve_falls_back_on_invalid_panel_bind() {
         let mut raw = RawConfig::default();
         raw.panel.bind = "not-an-addr".to_string();
-        let cfg = resolve(raw);
+        let cfg = resolve(raw).unwrap();
         assert_eq!(cfg.panel_bind, DEFAULT_PANEL_BIND.parse().unwrap());
     }
 
+    // ── S3: startup refusal (mirrors DaemonConfig::validate) ────────────────
+
     #[test]
-    fn permissive_parse_ignores_unrelated_sections() {
+    fn refuses_to_start_on_non_loopback_bind_with_auth_disabled() {
+        let mut raw = RawConfig::default();
+        raw.panel.bind = "0.0.0.0:8091".to_string();
+        let err = resolve(raw).expect_err("non-loopback + no token must refuse to start");
+        let msg = err.to_string();
+        assert!(msg.contains("refusing to start"), "{msg}");
+        assert!(msg.contains("0.0.0.0:8091"), "{msg}");
+        assert!(msg.contains("allow_insecure_lan"), "{msg}");
+    }
+
+    #[test]
+    fn allow_insecure_lan_downgrades_the_refusal_to_a_loud_log() {
+        let mut raw = RawConfig::default();
+        raw.panel.bind = "0.0.0.0:8091".to_string();
+        raw.dev.allow_insecure_lan = true;
+        let cfg = resolve(raw).expect("[dev].allow_insecure_lan is the documented opt-in");
+        assert!(cfg.allow_insecure_lan);
+        assert_eq!(cfg.panel_bind, "0.0.0.0:8091".parse().unwrap());
+    }
+
+    #[test]
+    fn loopback_bind_with_auth_disabled_still_starts() {
+        let mut raw = RawConfig::default();
+        raw.panel.bind = "127.0.0.1:8091".to_string();
+        resolve(raw).expect("loopback + no auth is the documented dev default");
+    }
+
+    #[test]
+    fn disabled_panel_never_refuses() {
+        // No listener is ever bound, so there is no surface to refuse.
+        let mut raw = RawConfig::default();
+        raw.panel.enabled = false;
+        raw.panel.bind = "0.0.0.0:8091".to_string();
+        let cfg = resolve(raw).expect("a disabled panel binds nothing");
+        assert!(!cfg.enabled);
+    }
+
+    // ── S1: panel token file hygiene (mirrors the daemon's eager resolve) ───
+
+    /// A throwaway "config dir" plus a token file inside it.
+    fn token_fixture(name: &str, contents: &str, mode: u32) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tv-shell-panel-token-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("panel-token");
+        std::fs::write(&token, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let _ = mode;
+        (dir, token)
+    }
+
+    #[test]
+    fn panel_token_reads_a_0600_file_inside_the_config_dir() {
+        let (dir, token) = token_fixture("ok", "  s3kret\n", 0o600);
+        let read = read_panel_token(token.to_str().unwrap(), &dir).unwrap();
+        assert_eq!(read.as_deref(), Some("s3kret"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn panel_token_empty_file_reads_as_no_token() {
+        let (dir, token) = token_fixture("empty", "   \n", 0o600);
+        let read = read_panel_token(token.to_str().unwrap(), &dir).unwrap();
+        assert_eq!(read, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panel_token_refuses_a_group_or_world_readable_file() {
+        let (dir, token) = token_fixture("perms", "s3kret\n", 0o644);
+        let err = read_panel_token(token.to_str().unwrap(), &dir)
+            .expect_err("a world-readable credential must abort startup");
+        assert!(err.to_string().contains("group/other-accessible"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn panel_token_refuses_a_path_outside_the_config_dir() {
+        let (dir, token) = token_fixture("escape", "s3kret\n", 0o600);
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let err = read_panel_token(token.to_str().unwrap(), &elsewhere)
+            .expect_err("a token file outside the config dir must abort startup");
+        assert!(
+            err.to_string().contains("escapes the config directory"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn panel_token_refuses_a_missing_file() {
+        let dir =
+            std::env::temp_dir().join(format!("tv-shell-panel-token-{}-gone", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = read_panel_token(dir.join("nope").to_str().unwrap(), &dir)
+            .expect_err("a configured-but-missing token file must abort startup");
+        assert!(
+            err.to_string().contains("cannot resolve token file path"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn permissive_parse_still_ignores_unrelated_sections() {
         let toml_text = r#"
             [panel]
             enabled = false
@@ -341,11 +671,31 @@ mod tests {
 
             [dev]
             allow_insecure_lan = true
+            some_other_dev_key = "ignored"
         "#;
         let raw: RawConfig = toml::from_str(toml_text).expect("permissive parse should succeed");
         assert!(!raw.panel.enabled);
         assert_eq!(raw.panel.bind, "127.0.0.1:9000");
         assert_eq!(raw.http.bind.as_deref(), Some("127.0.0.1:8089"));
+        // `[dev]` is no longer ignored: S3 reuses the daemon's own
+        // `allow_insecure_lan` flag rather than inventing a second opt-in.
+        // Unknown keys WITHIN `[dev]` are still tolerated.
+        assert!(raw.dev.allow_insecure_lan);
+    }
+
+    #[test]
+    fn panel_section_parses_token_file_and_allow_dangerous() {
+        let toml_text = r#"
+            [panel]
+            token_file = "~/.config/tv-shell/panel-token"
+            allow_dangerous = true
+        "#;
+        let raw: RawConfig = toml::from_str(toml_text).expect("parse");
+        assert_eq!(
+            raw.panel.token_file.as_deref(),
+            Some("~/.config/tv-shell/panel-token")
+        );
+        assert!(raw.panel.allow_dangerous);
     }
 
     #[test]
