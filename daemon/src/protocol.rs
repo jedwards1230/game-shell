@@ -322,6 +322,7 @@ pub enum Command {
     /// reports the last-known transmit state and never drives the bus. `reason`
     /// is `null` while the adapter is open; when the adapter is unavailable the
     /// reply is `{transmit:"unavailable",reason:…}` (`no_libcec` / `no_adapter` /
+    /// `adapter_busy` /
     /// `adapter_open_failed`).
     CecHealth,
     /// `cec-test` — run an explicit on-demand, side-effect-free CEC poll probe,
@@ -1452,7 +1453,8 @@ pub fn cec_health_json(
 /// reply that now replaces the bare `error:libcec unavailable` for `cec-health`
 /// and `cec-test` (and the `cec:health:<json>` event broadcast when the open
 /// handshake fails). `transmit` is fixed to `"unavailable"`, `reason` is one of
-/// `no_libcec` / `no_adapter` / `adapter_open_failed`, and `lastError` is always
+/// `no_libcec` / `no_adapter` / `adapter_open_failed` / `adapter_busy`, and
+/// `lastError` is always
 /// `null` (the actionable signal is the `reason`, not a transmit error). Pure —
 /// no `cec-rs` types — so it is callable from the non-`cec`/non-Linux ipc.rs arms
 /// and unit-tested in the default leg.

@@ -57,12 +57,17 @@ SettingsPageBase {
     //   "no_libcec"           — daemon built without libcec support
     //   "no_adapter"          — built with libcec but no USB adapter present
     //   "adapter_open_failed" — adapter present but won't open (hardware-wedged)
+    //   "adapter_busy"        — adapter present + healthy, but ANOTHER owner holds
+    //                           its exclusive serial lock (kernel pulse8_cec driver,
+    //                           or another CEC app such as Plex HTPC). Split out of
+    //                           adapter_open_failed, which told the operator to
+    //                           re-seat hardware that was working fine.
     //   ""                    — not yet known / adapter is available (cleared)
     property string cecUnavailableReason: ""
 
     // Parse a `cec-health` / `cec-test` reply or a `cec:health:` event payload
     // (compact JSON: {"transmit":"ok"|"failing"|"unknown"|"unavailable",
-    // "reason":<null|"no_libcec"|"no_adapter"|"adapter_open_failed">,
+    // "reason":<null|"no_libcec"|"no_adapter"|"adapter_open_failed"|"adapter_busy">,
     // "since":<ms>,"lastError":<string|null>}). Defensive: any non-object reply
     // (error:* from an old/unavailable daemon) or parse failure resolves to
     // "unknown" and clears the unavailable reason.
@@ -84,7 +89,7 @@ SettingsPageBase {
             // clear it. Unknown reason strings collapse to "" (generic copy).
             if (tx === "unavailable") {
                 var r = obj.reason;
-                root.cecUnavailableReason = (r === "no_libcec" || r === "no_adapter" || r === "adapter_open_failed") ? r : "";
+                root.cecUnavailableReason = (r === "no_libcec" || r === "no_adapter" || r === "adapter_open_failed" || r === "adapter_busy") ? r : "";
             } else {
                 root.cecUnavailableReason = "";
             }
@@ -106,6 +111,8 @@ SettingsPageBase {
             return "No CEC Adapter";
         case "adapter_open_failed":
             return "CEC Adapter Not Responding";
+        case "adapter_busy":
+            return "CEC Adapter In Use";
         default:
             // "no_libcec" and the not-yet-known fallback share the generic copy.
             return "HDMI-CEC Not Available";
@@ -118,6 +125,8 @@ SettingsPageBase {
             return "No CEC adapter detected — plug in the USB CEC adapter.";
         case "adapter_open_failed":
             return "CEC adapter detected but not responding — re-seat the USB adapter or power-cycle the AVR (pull mains, not standby), then retry.";
+        case "adapter_busy":
+            return "The CEC adapter is working, but another program or driver holds it — the adapter allows only one owner at a time. Quit the other CEC app (or stop the kernel pulse8-cec service), then restart the input daemon. The daemon log names the exact claimant. Do NOT re-seat the adapter; the hardware is fine.";
         default:
             return "CEC requires the daemon built with libcec support.";
         }
@@ -131,6 +140,8 @@ SettingsPageBase {
             return "HDMI-CEC unavailable — no CEC adapter detected";
         case "adapter_open_failed":
             return "CEC adapter detected but not responding — re-seat it";
+        case "adapter_busy":
+            return "CEC adapter held by another program — see the daemon log";
         default:
             return "HDMI-CEC unavailable";
         }
@@ -555,12 +566,13 @@ SettingsPageBase {
         // CEC unavailable message — reason-driven (#22). Still gated on the
         // existing `!cecAvailable` state (cec-scan returns error:* in every
         // unavailable case, including the wedged-at-open one), but the title +
-        // body now reflect WHY via cecUnavailableReason. The adapter_open_failed
-        // case is treated as a WARNING (ember title + border) because it's
-        // actionable — the adapter is physically present, just wedged.
+        // body now reflect WHY via cecUnavailableReason. adapter_open_failed and
+        // adapter_busy are both treated as WARNINGS (ember title + border) because
+        // both are actionable with the adapter physically present — one is wedged
+        // hardware, the other is a live adapter held by another owner.
         Rectangle {
             id: unavailableCard
-            readonly property bool cecWedged: root.cecUnavailableReason === "adapter_open_failed"
+            readonly property bool cecWedged: root.cecUnavailableReason === "adapter_open_failed" || root.cecUnavailableReason === "adapter_busy"
 
             Layout.fillWidth: true
             // Adapt to the wrapped body height so the longer wedged-adapter copy

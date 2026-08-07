@@ -1565,7 +1565,7 @@ drives the bus.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `transmit` | string | `"ok"` (last transmit succeeded), `"failing"` (last transmit returned `TransmitFailed`), `"unknown"` (none attempted yet / indeterminate), or `"unavailable"` (the adapter isn't open — see `reason`) |
-| `reason` | string \| null | `null` whenever the adapter is **open** (`transmit` ∈ {ok,failing,unknown}); otherwise the unavailable cause: `"no_libcec"` (daemon built without `--features cec`, or non-Linux), `"no_adapter"` (libcec found ZERO adapters — no hardware), or `"adapter_open_failed"` (an adapter IS present but the libcec open handshake failed — the hardware "wedge"; the actionable truth is "adapter detected but not responding — re-seat it") |
+| `reason` | string \| null | `null` whenever the adapter is **open** (`transmit` ∈ {ok,failing,unknown}); otherwise the unavailable cause: `"no_libcec"` (daemon built without `--features cec`, or non-Linux), `"no_adapter"` (libcec found ZERO adapters — no hardware), or `"adapter_open_failed"` (an adapter IS present but the libcec open handshake failed — the hardware "wedge"; the actionable truth is "adapter detected but not responding — re-seat it"), or `"adapter_busy"` (an adapter is present and healthy, but another owner already holds its **exclusive** serial lock — the kernel `pulse8_cec` driver, or another CEC app such as Plex HTPC. Split out of `adapter_open_failed`, which is indistinguishable at the libcec level yet tells the operator to re-seat working hardware; the daemon log names the claimant) |
 | `since` | number | Epoch **milliseconds** (UTC) of the last state CHANGE (`0` for the static `no_libcec` reply) |
 | `lastError` | string \| null | The last transmit error string while `failing`, else `null` (always `null` when `unavailable`) |
 
@@ -1592,7 +1592,7 @@ JSON object as `cec-health`. This is the "Test CEC" button's backend.
 **Response:** The health JSON object (same shape as `cec-health`, including the
 `reason` field). When the adapter isn't open it returns the same structured
 `{"transmit":"unavailable","reason":…}` object as `cec-health` (`no_libcec` when
-the feature/platform is off, `no_adapter` / `adapter_open_failed` when the open
+the feature/platform is off, `no_adapter` / `adapter_open_failed` / `adapter_busy` when the open
 handshake failed) — not a bare `error:` line.
 
 ### Session-lifecycle CEC (`[cec] lifecycle`)
@@ -2312,7 +2312,7 @@ live without re-polling.
 |-------|---------|---------|
 | `cec:device:<json>` | A CEC device was discovered or updated (emitted per device after a `cec-scan` and after a `cec-device`) | `{"logicalAddress":N,"powerStatus":"<word>"}` (same shape as a `cec-scan` element) |
 | `cec:power:<json>` | A CEC device's power status changed (emitted after `cec-power-on` / `cec-power-off`) | `{"addr":"N","power":"<word>"}` — `addr` is the wire string the command received; `<word>` is `on`/`standby`/`waking`/`sleeping`/`unknown` |
-| `cec:health:<json>` (#19) | The CEC transmit-wedge health state CHANGED (broadcast only on a real transition — from a transmit op, the `cec-scan` side-effect refresh, or `cec-test` — not on every probe), **plus** once when the libcec open handshake fails (carrying `transmit:"unavailable"` + the `reason`) | `{"transmit":"ok"\|"failing"\|"unknown"\|"unavailable","reason":<null\|"no_libcec"\|"no_adapter"\|"adapter_open_failed">,"since":N,"lastError":"…"\|null}` (same shape as the `cec-health` reply; `reason` is `null` while the adapter is open) |
+| `cec:health:<json>` (#19) | The CEC transmit-wedge health state CHANGED (broadcast only on a real transition — from a transmit op, the `cec-scan` side-effect refresh, or `cec-test` — not on every probe), **plus** once when the libcec open handshake fails (carrying `transmit:"unavailable"` + the `reason`) | `{"transmit":"ok"\|"failing"\|"unknown"\|"unavailable","reason":<null\|"no_libcec"\|"no_adapter"\|"adapter_open_failed"\|"adapter_busy">,"since":N,"lastError":"…"\|null}` (same shape as the `cec-health` reply; `reason` is `null` while the adapter is open) |
 
 Example wire lines:
 

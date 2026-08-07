@@ -350,7 +350,10 @@ fn scan_devices(conn: &cec_rs::CecConnection) -> Vec<String> {
 /// cell is RESET to [`OWNER_UNSEEN`] on every reopen: claims broadcast while the
 /// connection was down were missed, so the only honest state is "unknown", which
 /// fails safe (standby skips).
-fn reopen_connection(owner: &OwnerCell) -> Option<cec_rs::CecConnection> {
+fn reopen_connection(
+    owner: &OwnerCell,
+    key_tx: Option<&std_mpsc::Sender<cec_rs::CecKeypress>>,
+) -> Option<cec_rs::CecConnection> {
     tracing::warn!("cec: reopening libcec connection (recovery after transmit failure)");
     owner_set(
         owner,
@@ -365,8 +368,36 @@ fn reopen_connection(owner: &OwnerCell) -> Option<cec_rs::CecConnection> {
         .activate_source(false);
     if lifecycle_enabled() {
         builder = builder.command_received_callback(owner_tracking_callback(owner.clone()));
+        // Re-register the key-press callback too. Callbacks live on the CecConnection,
+        // so a reopen that registers only the command callback silently drops CEC
+        // remote input: nav from the TV/AVR remote dies and STAYS dead until the
+        // daemon restarts, with nothing logged. That is not a rare path — every
+        // transmit failure on a stale bus reopens (observed twice within 15 minutes
+        // on htpc-1), so in practice the remote stopped working almost immediately
+        // and looked like a hardware fault.
+        if let Some(key_tx) = key_tx {
+            builder = attach_key_press_callback(builder, key_tx);
+        }
     }
     builder.build().ok()?.open().ok()
+}
+
+/// Register the libcec key-press callback, forwarding each `CecKeypress` to the
+/// forwarder thread over `key_tx`.
+///
+/// Shared by the initial open and every reopen so the two cannot drift — the
+/// drift is precisely the bug above. The callback fires on libcec's OWN thread,
+/// so it must not block or re-enter libcec; it only does a non-blocking `send`
+/// on a std mpsc (`Send`, satisfying the `FnMut(CecKeypress) + Send` bound). A
+/// closed receiver just drops the key.
+fn attach_key_press_callback(
+    builder: cec_rs::CecConnectionCfgBuilder,
+    key_tx: &std_mpsc::Sender<cec_rs::CecKeypress>,
+) -> cec_rs::CecConnectionCfgBuilder {
+    let tx = key_tx.clone();
+    builder.key_press_callback(Box::new(move |kp| {
+        let _ = tx.send(kp);
+    }))
 }
 
 /// Minimum spacing between recovery reopens. A stale/wedged adapter can make
@@ -402,6 +433,7 @@ fn with_cec_reconnect<T, E: std::fmt::Debug>(
     conn: &mut cec_rs::CecConnection,
     last_reopen: &mut Option<std::time::Instant>,
     owner: &OwnerCell,
+    key_tx: Option<&std_mpsc::Sender<cec_rs::CecKeypress>>,
     label: &str,
     mut op: impl FnMut(&cec_rs::CecConnection) -> Result<T, E>,
 ) -> Result<T, E> {
@@ -415,7 +447,7 @@ fn with_cec_reconnect<T, E: std::fmt::Debug>(
                 return Err(e);
             }
             tracing::warn!("cec: {label} failed ({e:?}); reopening libcec connection and retrying");
-            match reopen_connection(owner) {
+            match reopen_connection(owner, key_tx) {
                 Some(fresh) => {
                     *conn = fresh;
                     op(conn)
@@ -871,6 +903,7 @@ fn run_lifecycle(
     health: &mut protocol::CecHealthState,
     events_tx: &broadcast::Sender<Event>,
     owner: &OwnerCell,
+    key_tx: Option<&std_mpsc::Sender<cec_rs::CecKeypress>>,
     seq: fn(&cec_rs::CecConnection, &broadcast::Sender<Event>, &OwnerCell) -> LifecycleOutcome,
 ) -> String {
     let mut outcome = seq(conn, events_tx, owner);
@@ -880,7 +913,7 @@ fn run_lifecycle(
     };
     if let Some(first_error) = first_error {
         let fresh = if reopen_allowed(last_reopen) {
-            reopen_connection(owner)
+            reopen_connection(owner, key_tx)
         } else {
             None
         };
@@ -934,6 +967,83 @@ fn open_failure_reason(e: &cec_rs::CecConnectionResultError) -> &'static str {
         cec_rs::CecConnectionResultError::NoAdapterFound => "no_adapter",
         _ => "adapter_open_failed",
     }
+}
+
+/// The kernel CEC framework's device node. Its mere existence means the kernel
+/// `pulse8_cec` driver has bound the Pulse-Eight adapter.
+const KERNEL_CEC_NODE: &str = "/dev/cec0";
+
+/// Best-effort: identify whatever ELSE currently owns the adapter.
+///
+/// The Pulse-Eight serial device takes an **exclusive** lock, so a perfectly
+/// healthy adapter fails to open whenever something else got there first. That
+/// is indistinguishable from a hardware wedge at the libcec level — both surface
+/// as `AdapterOpenFailed` — and the `adapter_open_failed` copy tells the operator
+/// to "re-seat the USB adapter or power-cycle the AVR". Both real incidents on
+/// htpc-1 were software conflicts, so that message sent someone after a cable
+/// twice. Naming the claimant turns a hardware goose-chase into a one-line fix.
+///
+/// Two claimants seen in practice, checked in that order:
+///   1. the kernel `pulse8_cec` driver (binds the adapter, exposes /dev/cec0)
+///   2. another userspace CEC app — Plex HTPC is the one that bites, since it
+///      grabs the adapter the moment a daemon restart frees it
+///
+/// Returns `None` when nothing identifiable holds it, in which case the original
+/// "hardware may be wedged" reading stands.
+fn adapter_claimant() -> Option<String> {
+    if std::path::Path::new(KERNEL_CEC_NODE).exists() {
+        return Some(format!(
+            "the kernel pulse8_cec driver ({KERNEL_CEC_NODE} is present) — stop/mask pulse8-cec, \
+             or `modprobe -r pulse8_cec` if it is already loaded"
+        ));
+    }
+    serial_device_holder()
+}
+
+/// Scan `/proc` for another process holding a `/dev/ttyACM*` fd.
+///
+/// Deliberately total: unreadable `/proc/<pid>/fd` (another user, or the process
+/// exiting mid-scan) is skipped rather than propagated — this runs on a failure
+/// path whose only job is to improve a log line, so it must never itself fail.
+fn serial_device_holder() -> Option<String> {
+    let me = std::process::id();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let Some(target) = target.to_str() else {
+                continue;
+            };
+            if !target.starts_with("/dev/ttyACM") {
+                continue;
+            }
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .map(|c| c.trim().to_string())
+                .unwrap_or_default();
+            let comm = if comm.is_empty() {
+                "an unknown process".to_string()
+            } else {
+                comm
+            };
+            return Some(format!(
+                "{comm} (pid {pid}) is holding {target} — quit it, then restart this daemon so it \
+                 wins the adapter"
+            ));
+        }
+    }
+    None
 }
 
 /// Reply to every pending request when libcec can't be brought up so a
@@ -1013,16 +1123,20 @@ fn blocking_worker(
     // a non-blocking `send` on a std mpsc (which is `Send`, satisfying the
     // `FnMut(CecKeypress) + Send` bound). When the flag is off, no callback is
     // registered at all, so dev/CI never inject keys.
-    let key_rx = if lifecycle_enabled() {
-        let (key_tx, key_rx) = std_mpsc::channel::<cec_rs::CecKeypress>();
-        builder = builder.key_press_callback(Box::new(move |kp| {
-            // Best-effort: a closed receiver (forwarder gone) just drops the key.
-            let _ = key_tx.send(kp);
-        }));
-        Some(key_rx)
+    //
+    // `key_tx` is RETAINED (not moved into the callback) so every later reopen can
+    // re-register the same channel via `attach_key_press_callback`; without that,
+    // recovery silently kills CEC remote input for the life of the process.
+    // Retaining a sender also keeps the forwarder thread alive across a reopen —
+    // it exits when all senders drop, i.e. when this worker returns.
+    let (key_tx, key_rx) = if lifecycle_enabled() {
+        let (tx, rx) = std_mpsc::channel::<cec_rs::CecKeypress>();
+        builder = attach_key_press_callback(builder, &tx);
+        (Some(tx), Some(rx))
     } else {
-        None
+        (None, None)
     };
+    let key_tx = key_tx.as_ref();
 
     // Passive display-ownership tracking, gated on the SAME lifecycle flag as the
     // key callback (nothing consumes the cell when lifecycle is off). It stays
@@ -1067,10 +1181,30 @@ fn blocking_worker(
             // Distinguish "no hardware" (NoAdapterFound) from "adapter present but
             // won't open" (AdapterOpenFailed, the Pulse-Eight wedge) so the page
             // shows the right message. open() runs libcec_detect_adapters first.
+            //
+            // Then refine once more: an exclusive-lock loss looks EXACTLY like a
+            // hardware wedge here, so if something identifiable already owns the
+            // adapter, say so (`adapter_busy`) instead of telling the operator to
+            // re-seat working hardware.
             let reason = open_failure_reason(&e);
-            tracing::warn!(
-                "cec: failed to open libcec connection ({e:?}); replying unavailable ({reason}) to all requests"
-            );
+            let claimant = if reason == "adapter_open_failed" {
+                adapter_claimant()
+            } else {
+                None
+            };
+            let reason = if claimant.is_some() {
+                "adapter_busy"
+            } else {
+                reason
+            };
+            match &claimant {
+                Some(who) => tracing::warn!(
+                    "cec: failed to open libcec connection ({e:?}); the adapter is already claimed by {who}; replying unavailable ({reason}) to all requests"
+                ),
+                None => tracing::warn!(
+                    "cec: failed to open libcec connection ({e:?}); replying unavailable ({reason}) to all requests"
+                ),
+            }
             // Broadcast once so subscribers update promptly (no Health/Test wait).
             let _ = events_tx.send(Event::CecHealth(protocol::cec_unavailable_json(
                 reason,
@@ -1216,6 +1350,7 @@ fn blocking_worker(
                             &mut conn,
                             &mut last_reopen,
                             &owner,
+                            key_tx,
                             "power-on",
                             |c| c.send_power_on_devices(logical),
                         ) {
@@ -1246,6 +1381,7 @@ fn blocking_worker(
                             &mut conn,
                             &mut last_reopen,
                             &owner,
+                            key_tx,
                             "power-off",
                             |c| c.send_standby_devices(logical),
                         ) {
@@ -1275,6 +1411,7 @@ fn blocking_worker(
                     &mut conn,
                     &mut last_reopen,
                     &owner,
+                    key_tx,
                     "active-source",
                     |c| c.set_active_source(cec_rs::CecDeviceType::PlaybackDevice),
                 ) {
@@ -1308,6 +1445,7 @@ fn blocking_worker(
                     &mut health,
                     &events_tx,
                     &owner,
+                    key_tx,
                     wake_sequence,
                 );
                 let _ = tx.send(resp);
@@ -1319,6 +1457,7 @@ fn blocking_worker(
                     &mut health,
                     &events_tx,
                     &owner,
+                    key_tx,
                     standby_all,
                 );
                 let _ = tx.send(resp);
