@@ -6,10 +6,15 @@ HTML + HTMX over the daemon's existing control surface. It runs as its own
 restart a wedged daemon — the recovery path that previously required remote
 config management.
 
-> Status: all four milestones (M1-M4) plus a final-polish pass have landed on
-> the `panel-staging` branch — every page is fully implemented. This document
-> is the panel's living doc; a final promotion sweep (merging `panel-staging`
-> into `main`) is still pending.
+> Status: all four milestones (M1-M4) plus a final-polish pass are **merged to
+> `main`** — every page is fully implemented, and the panel is deployed on
+> htpc-1. This document is the panel's living doc.
+>
+> **Single-node today.** The panel dials the daemon's Unix-socket IPC
+> unconditionally, so it serves exactly one node and does not build on Windows.
+> Extending it to every node with an agent — capability-gated pages, a transport
+> trait, and the security work that must land *first* — is designed in
+> [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md).
 
 ## Architecture
 
@@ -18,6 +23,13 @@ config management.
   must render when the network or the rest of the system is broken).
 - **Bind**: `[panel]` section in `config.toml` (`enabled`, `bind`, default
   `127.0.0.1:8091`; `token_file` reserved for future auth — v1 is LAN-only).
+  > ⚠️ The loopback default is safe; htpc-1 overrides it to `0.0.0.0:8091`. With
+  > no auth implemented, that exposes the panel's full privileged surface
+  > (deploy/build, reboot/suspend, unit restarts, `sudo pacman -Syu`, uploads) to
+  > the LAN — and, because the panel attaches the daemon's bearer token to its
+  > bridge calls, it also launders the daemon's authenticated surface to any
+  > unauthenticated caller. Tracked as S1/S2 in
+  > [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md#security-considerations).
 - **Unit**: `config/tv-shell-panel.service`, installed by `scripts/install.sh`,
   started by the session script.
 
