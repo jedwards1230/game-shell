@@ -679,13 +679,34 @@ async fn active_connection_entry(
     let (device, speed) = match ac.devices().await {
         Ok(devs) => match devs.first() {
             Some(dp) => {
-                let iface = match device_proxy(conn, dp).await {
-                    Ok(d) => d.interface().await.unwrap_or_default(),
-                    Err(_) => String::new(),
+                // One device proxy serves both reads: the interface name, and the
+                // device type that gates the Wired facet below.
+                let (iface, is_ethernet) = match device_proxy(conn, dp).await {
+                    Ok(d) => (
+                        d.interface().await.unwrap_or_default(),
+                        // DeviceType == 1 is Ethernet (same NMDeviceType literal
+                        // the Wi-Fi paths above compare against 2).
+                        d.device_type().await.unwrap_or(0) == 1,
+                    ),
+                    Err(_) => (String::new(), false),
                 };
-                // Speed: try the Wired interface; 0 for non-wired or non-linked.
-                let speed = if let Ok(w) = wired_proxy(conn, dp).await {
-                    w.speed().await.unwrap_or(0)
+                // Speed lives on `Device.Wired`, which exists ONLY on an Ethernet
+                // device. Building the proxy unconditionally made zbus attempt a
+                // `GetAll` on that interface for EVERY active connection — and
+                // `lo` (loopback) is an active connection on a normal wired host,
+                // so every poll logged
+                //   Failed to populate properties cache via GetAll: ...
+                //   No such interface "org.freedesktop.NetworkManager.Device.Wired".
+                //   Property change streams will not produce values.
+                // at warn level (176 hits in 90 minutes on the reference box).
+                // The read itself was already safe — `unwrap_or(0)` swallowed the
+                // error — so this only removes the noise and a pointless D-Bus
+                // round trip; a real Ethernet device still reports its speed.
+                let speed = if is_ethernet {
+                    match wired_proxy(conn, dp).await {
+                        Ok(w) => w.speed().await.unwrap_or(0),
+                        Err(_) => 0,
+                    }
                 } else {
                     0
                 };
