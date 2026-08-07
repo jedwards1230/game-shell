@@ -14,7 +14,7 @@ The panel is structurally single-node today, in four separate ways:
 |---|---|---|
 | Transport is concrete | `AppState` holds `IpcClient` + `BridgeClient` + `Recovery` by type; pages call `state.ipc.*` directly | No seam to serve a node that speaks HTTP instead of a Unix socket |
 | Unix socket is unconditional | `panel/` dials `AF_UNIX` with no `cfg` | The crate **does not build on Windows** (`CONTRIBUTING.md` says so explicitly) |
-| Routes are flat and ungated | ~80 routes registered unconditionally in `main.rs` | Every page assumes CEC, controllers, widgets, a QML shell — none of which a sidecar node has |
+| Routes are flat and ungated | 88 routes registered unconditionally in `main.rs`, 68 of them `post` | Every page assumes CEC, controllers, widgets, a QML shell — none of which a sidecar node has |
 | Platform ops are Linux-only | `exec.rs` (systemd), `updates.rs` (pacman) | A Windows node has no systemctl and no `checkupdates` |
 
 `protocol/` already exists as the shared daemon↔host wire-type crate, which is
@@ -149,6 +149,9 @@ Implement the reserved token: a form login setting an `HttpOnly` +
 `SameSite=Strict` cookie for humans, plus `Authorization: Bearer` for scripted
 access, both validated against the same token file with a **constant-time**
 comparison.
+
+Scale of the exposure: **88 routes are registered, 68 of them `post`.** Every one
+is reachable unauthenticated on the LAN today.
 
 **S2 — The panel is a confused deputy for the daemon's token.**
 The panel reads `[http].token_file` and attaches it to every bridge call. An
