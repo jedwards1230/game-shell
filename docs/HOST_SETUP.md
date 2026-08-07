@@ -111,9 +111,32 @@ and **hibernates** whenever hibernation is enabled. See `host/src/power.rs`.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `TV_SHELL_HOST_TOKEN` | random (logged at startup) | Bearer token. **Set it** to a stable value so the daemon can be paired. |
+| `TV_SHELL_HOST_TOKEN` | none — see below | Bearer token. **Set it** to a stable value so the daemon can be paired. |
 | `TV_SHELL_HOST_PORT`  | `47995` | Listen port (chosen outside Sunshine's 47984–47990 range). |
 | `TV_SHELL_HOST_BIND`  | `0.0.0.0` | Listen address (all LAN interfaces). |
+
+> ⚠️ **Breaking change (S4 fail-closed): the sidecar now refuses to start on a
+> non-loopback bind with no `TV_SHELL_HOST_TOKEN`.** Previously an unset token
+> made the sidecar mint a weak one (derived from boot time + pid — a small
+> search space) and keep serving `:47995` — which accepts `/launch`, `/quit`,
+> and `/sleep` (a machine-wide suspend) — over `0.0.0.0` with no real secret.
+> That is no longer a safe default:
+>
+> - **`TV_SHELL_HOST_BIND` is loopback** (`127.0.0.1`/`::1`, the default LAN
+>   bind is `0.0.0.0` so this only applies if you've explicitly narrowed it) and
+>   `TV_SHELL_HOST_TOKEN` is unset: unchanged behavior — the sidecar starts and
+>   generates a token, now with the OS CSPRNG (`ring::rand::SystemRandom`)
+>   instead of the old boot-time/pid scramble, and still logs it once at
+>   startup so you can copy it into the daemon's config.
+> - **`TV_SHELL_HOST_BIND` is non-loopback** (the default `0.0.0.0`, or any LAN
+>   address) and `TV_SHELL_HOST_TOKEN` is unset: **the sidecar now refuses to
+>   start**, with an error naming `TV_SHELL_HOST_TOKEN` explicitly. **A fresh
+>   install that never set the token will no longer come up** until you either
+>   set `TV_SHELL_HOST_TOKEN` or narrow `TV_SHELL_HOST_BIND` to `127.0.0.1`.
+>
+> There is no escape-hatch flag for this one (unlike the daemon's
+> `[dev].allow_insecure_lan`) — set a token before deploying to a LAN-reachable
+> host.
 
 Generate a token once and reuse it on both ends:
 

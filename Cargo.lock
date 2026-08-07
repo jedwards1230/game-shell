@@ -2999,6 +2999,7 @@ dependencies = [
  "axum",
  "keyvalues-parser",
  "libc",
+ "ring",
  "rumqttc",
  "rustls",
  "serde",
