@@ -63,7 +63,11 @@
 #
 # Same rules as [http].token_file: mode 0600 AND under ~/.config/tv-shell/ —
 # the panel refuses to start on a world-readable file or a path escaping the
-# config dir, rather than silently degrading to "no auth". Generate one with:
+# config dir, rather than silently degrading to "no auth". It also refuses an
+# EMPTY file (that would 401 every request and every /login submission, locking
+# you out of the recovery panel) and a token holding characters a cookie value
+# cannot carry — space, ";", ",", '"', "\" or non-ASCII — which would silently
+# break browser login forever. Generate one with:
 #   install -m600 /dev/null ~/.config/tv-shell/panel-token
 #   openssl rand -hex 32 > ~/.config/tv-shell/panel-token
 #
@@ -73,14 +77,17 @@
 
 # Allow the panel's root-equivalent actions. Default FALSE: a fresh node gets
 # the read-only + recovery surface (status, logs, settings/widgets editors,
-# per-unit restart, CEC recovery) without the actions that can overwrite the
-# running build or take the box down. When false these routes are NOT
+# unit restarts, CEC recovery) without the actions that can overwrite the
+# running build or take the box down. The rule: restarting a unit is RECOVERY
+# (ungated); changing what code runs, powering the box, or running arbitrary
+# commands is ROOT-EQUIVALENT (gated). When false these routes are NOT
 # registered at all (404) and their buttons are not rendered:
-#   POST /dev/deploy, /dev/build, /dev/restart-daemon, /dev/restart-shell,
-#   /dev/reboot, /dev/suspend, /processes/updates/apply (sudo pacman -Syu),
+#   POST /dev/deploy, /dev/build, /dev/reboot, /dev/suspend,
+#   /processes/updates/apply (sudo pacman -Syu),
 #   /tools/raw (the arbitrary-IPC console)
-# Unit restart (/processes/restart/{key}) and CEC daemon recovery stay
-# available — recovery is the reason the panel exists.
+# Every unit-restart route stays available — /processes/restart/{key},
+# /dev/restart-daemon, /dev/restart-shell and /cec/recover/restart-daemon all
+# drive the same systemd units, and recovery is the reason the panel exists.
 #allow_dangerous = false
 
 # --- MCP server (optional, requires the daemon built with --features mcp) -----

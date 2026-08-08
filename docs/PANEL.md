@@ -54,7 +54,7 @@ config management.
 | Tools | IPC console grouped by domain — Navigation (intent/key), Apps (list/launch/recents), Bluetooth (power/scan/list/connect-disconnect-pair-trust), Network (status/wifi/throughput/ping), Power (can-suspend/battery), System (sys-status/sys-metrics/storage-status/build-info/controllerdb); plus a raw-line escape hatch with a warning on commands owned by another page's guarded flow. CEC and controller/pads/bindings commands live on their own Controllers/CEC pages (below) instead. |
 | Controllers | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Settings raw JSON hatch); controller-DB status/refresh |
 | CEC | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides from Settings); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname) — **the panel's one config.toml write**, done format-preservingly via `toml_edit`, applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
-| Dev | deploy/build/restart daemon/restart shell/reboot with tier labels + confirms; screenshot viewer (provenance sha/branch/version/captured-at, proxied via `/dev/screenshot`) |
+| Dev | restart daemon/restart shell (always available — unit restart is recovery) plus deploy/build/reboot/suspend behind `allow_dangerous`, all with tier labels + confirms; screenshot viewer (provenance sha/branch/version/captured-at, proxied via `/dev/screenshot`) |
 | Logs | shell + daemon log tails (ANSI-stripped — including "bare" ESC-dropped residue like `[33m`/`[0m` — and wrapped rather than clipped), free-text filter plus one-click "Errors only"/"Hide icon noise" presets, and a Focus Shell/Focus Daemon toggle to expand one pane to full width (state lives on `#log-panels` itself, so it survives every htmx refresh of the panes inside it) |
 
 A small daemon-reachability dot lives in the topnav on every page (`base.html`
@@ -175,9 +175,14 @@ target the caller declared, e.g. the nav status dot); a browser navigation
 
 **Token file hygiene** (mirrors the daemon): the path is tilde-expanded,
 canonicalized, and must resolve **under the config dir**; the file must not be
-group/other-accessible. A violation **aborts startup** rather than silently
-degrading to "no auth". The middleware also fails closed at runtime — auth on
-with no token rejects everything.
+group/other-accessible; its contents must be non-empty and **cookie-value-safe**
+(RFC 6265 `cookie-octet` — printable ASCII without space, `"`, `,`, `;` or `\`).
+Every one of those violations **aborts startup** rather than silently degrading:
+an empty file would 401 every request *and* every `/login` submission, and a
+token carrying a `;` or a space would come back from the `Cookie:` header
+truncated, breaking browser login forever while `Bearer` kept working. The
+middleware also fails closed at runtime — auth on with no token rejects
+everything.
 
 ### Startup refusal
 
@@ -196,16 +201,24 @@ experience unchanged — it is only the non-loopback combination that is refused
 
 The panel is the most privileged surface on its node: it can overwrite the
 running build, reboot, suspend, write `config.toml`, upload files and run
-`sudo -n pacman -Syu`. `[panel].allow_dangerous` defaults to **`false`**, and
-when false these routes are **not registered at all** (404, not a 403 from a
-handler) and their buttons are not rendered:
+`sudo -n pacman -Syu`. The line the gate draws:
 
-`POST /dev/deploy` · `/dev/build` · `/dev/restart-daemon` · `/dev/restart-shell` ·
-`/dev/reboot` · `/dev/suspend` · `/processes/updates/apply` · `/tools/raw`
+> **Restarting a unit is recovery** — ungated, because it is the reason the
+> panel exists. **Changing what code runs, powering the box, or running
+> arbitrary commands is root-equivalent** — gated.
 
-`GET /dev` and `GET /dev/screenshot` stay available (observability), as do
-`POST /processes/restart/{key}` and `POST /cec/recover/restart-daemon` —
-restarting a wedged unit is *recovery*, which is the reason the panel exists.
+`[panel].allow_dangerous` defaults to **`false`**, and when false these routes
+are **not registered at all** (404, not a 403 from a handler) and their buttons
+are not rendered:
+
+`POST /dev/deploy` · `/dev/build` · `/dev/reboot` · `/dev/suspend` ·
+`/processes/updates/apply` · `/tools/raw`
+
+`GET /dev` and `GET /dev/screenshot` stay available (observability), as do every
+unit-restart route: `POST /processes/restart/{key}`, `/cec/recover/restart-daemon`,
+`/dev/restart-daemon` and `/dev/restart-shell`. The last two used to be gated,
+which bought nothing — they drive the *same* two systemd units that the ungated
+`/processes/restart/{key}` does, so the gate only hid one door to the same room.
 `POST /tools/raw` is in the dangerous set because it drives the entire IPC
 vocabulary, making it an arbitrary-command escape hatch.
 

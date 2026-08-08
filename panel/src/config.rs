@@ -279,7 +279,10 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
     let http_token = raw.http.token_file.as_deref().and_then(read_token_file);
 
     let panel_token = match (raw.panel.enabled, raw.panel.token_file.as_deref()) {
-        (true, Some(p)) => read_panel_token(p, &tv_shell_protocol::brand::config_dir())?,
+        (true, Some(p)) => Some(read_panel_token(
+            p,
+            &tv_shell_protocol::brand::config_dir(),
+        )?),
         _ => None,
     };
 
@@ -303,11 +306,12 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
 /// Resolve `[panel].token_file` into the panel's own credential.
 ///
 /// Mirrors the daemon's `resolve_token_path` + `read_token_file` pair: the
-/// path is confined to `config_dir` (CWE-22) and the file must not be
-/// group/other-accessible. Any violation is an `Err` that aborts startup —
+/// path is confined to `config_dir` (CWE-22), the file must not be
+/// group/other-accessible, and its contents must be a non-empty
+/// cookie-value-safe token. Any violation is an `Err` that aborts startup —
 /// a token file the operator meant to enable auth with must never degrade
-/// silently into "no auth".
-fn read_panel_token(path: &str, config_dir: &Path) -> anyhow::Result<Option<String>> {
+/// silently into "no auth" or into "auth nobody can pass".
+fn read_panel_token(path: &str, config_dir: &Path) -> anyhow::Result<String> {
     let resolved = resolve_token_path(path, config_dir, "panel.token_file")?;
     read_owner_only_token(&resolved, "panel.token_file")
 }
@@ -339,24 +343,67 @@ fn resolve_token_path(p: &str, config_dir: &Path, field: &str) -> anyhow::Result
     Ok(canonical)
 }
 
-/// Read a 0600-style token file: trim, treat empty as `Ok(None)` ("no token" →
-/// fail-closed once auth is on), and hard-error on a group/other-accessible
-/// file.
-fn read_owner_only_token(path: &Path, field: &str) -> anyhow::Result<Option<String>> {
+/// Read a 0600-style token file: trim, then hard-error on every way the file
+/// can be unusable — group/other-accessible, unreadable, empty, or holding a
+/// value that cannot survive a round trip through the session cookie.
+///
+/// **Empty is an error, not `Ok(None)`.** A configured-but-empty token file
+/// used to start the panel with `auth_enabled() == true` and no token: every
+/// route 401s and `/login` rejects every submission, so the operator's
+/// browser-based recovery path for a wedged daemon is gone — with only a
+/// `warn!` line as the signal. That is exactly the silent degradation the rest
+/// of this module refuses.
+fn read_owner_only_token(path: &Path, field: &str) -> anyhow::Result<String> {
     ensure_owner_only(path, field)?;
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("config: {field} {} unreadable: {e}", path.display()))?;
     let token = raw.trim();
     if token.is_empty() {
-        tracing::warn!(
-            "config: {field} {} is empty — treating as no token (the panel will reject \
-             every authenticated request)",
+        return Err(anyhow::anyhow!(
+            "config: {field} {} is empty; refusing to start — with a token file \
+             configured the panel authenticates every route, so an empty token would \
+             reject every request AND every /login submission, locking the recovery \
+             panel out. Fix: write a token (openssl rand -hex 32 > {}) or remove \
+             [panel].token_file to run unauthenticated on a loopback bind.",
+            path.display(),
             path.display()
-        );
-        Ok(None)
-    } else {
-        Ok(Some(token.to_string()))
+        ));
     }
+    ensure_cookie_safe_token(token, field, path)?;
+    Ok(token.to_string())
+}
+
+/// Refuse a token that cannot round-trip through the session cookie.
+///
+/// `auth::session_cookie` interpolates the token into `Set-Cookie` and
+/// `auth::presented_token` parses it back by splitting the `Cookie:` header on
+/// `;` and trimming — so a token containing `;` (or a leading/trailing space,
+/// or any other non-`cookie-octet`) comes back as a PREFIX and the constant-time
+/// compare then fails forever. Browser login would be permanently broken with
+/// no diagnostic while `Authorization: Bearer` kept working. Refuse at startup
+/// instead, naming the offending character.
+fn ensure_cookie_safe_token(token: &str, field: &str, path: &Path) -> anyhow::Result<()> {
+    if let Some(bad) = token.chars().find(|c| !is_cookie_octet(*c)) {
+        return Err(anyhow::anyhow!(
+            "config: {field} {} contains {bad:?}, which is not valid in a cookie value; \
+             refusing to start — the panel's session cookie carries the token verbatim, \
+             so such a token silently breaks browser login forever. Use a token of \
+             printable ASCII without space, {:?}, {:?}, {:?} or {:?} — e.g. \
+             openssl rand -hex 32.",
+            path.display(),
+            '"',
+            ',',
+            ';',
+            '\\'
+        ));
+    }
+    Ok(())
+}
+
+/// RFC 6265 `cookie-octet`: US-ASCII printable characters excluding space,
+/// double quote, comma, semicolon and backslash.
+fn is_cookie_octet(c: char) -> bool {
+    matches!(c, '\x21' | '\x23'..='\x2B' | '\x2D'..='\x3A' | '\x3C'..='\x5B' | '\x5D'..='\x7E')
 }
 
 /// Fail-closed if a token file is readable by group/other (mode & 0o077 != 0).
@@ -590,15 +637,71 @@ mod tests {
     fn panel_token_reads_a_0600_file_inside_the_config_dir() {
         let (dir, token) = token_fixture("ok", "  s3kret\n", 0o600);
         let read = read_panel_token(token.to_str().unwrap(), &dir).unwrap();
-        assert_eq!(read.as_deref(), Some("s3kret"));
+        assert_eq!(read, "s3kret");
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// An empty token file is as unusable as a missing one, and must abort
+    /// startup for the same reason: with `[panel].token_file` configured the
+    /// panel authenticates every route, so "no token" means every request AND
+    /// every `/login` submission is rejected — the recovery panel is bricked.
     #[test]
-    fn panel_token_empty_file_reads_as_no_token() {
+    fn panel_token_refuses_an_empty_file() {
         let (dir, token) = token_fixture("empty", "   \n", 0o600);
+        let err = read_panel_token(token.to_str().unwrap(), &dir)
+            .expect_err("an empty token file must abort startup, not degrade to no-token");
+        let msg = err.to_string();
+        assert!(msg.contains("is empty"), "{msg}");
+        assert!(msg.contains("refusing to start"), "{msg}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A token holding `;`, a space, or any other non-`cookie-octet` would be
+    /// truncated on the way back out of the `Cookie:` header, so browser login
+    /// would fail forever with no diagnostic. Refuse it at startup.
+    #[test]
+    fn panel_token_refuses_characters_that_break_the_session_cookie() {
+        for (name, contents) in [
+            ("semicolon", "abc;def\n"),
+            ("space", "abc def\n"),
+            ("comma", "abc,def\n"),
+            ("quote", "abc\"def\n"),
+            ("backslash", "abc\\def\n"),
+            ("non-ascii", "abcédef\n"),
+        ] {
+            let (dir, token) = token_fixture(name, contents, 0o600);
+            let outcome = read_panel_token(token.to_str().unwrap(), &dir)
+                .map(|t| format!("ACCEPTED {t:?}"))
+                .unwrap_or_else(|e| e.to_string());
+            assert!(
+                outcome.contains("not valid in a cookie value"),
+                "{name}: must be refused at startup, got: {outcome}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// Every token this module accepts survives the `Set-Cookie` →
+    /// `Cookie:` → `presented_token` round trip byte for byte — the property
+    /// `ensure_cookie_safe_token` exists to guarantee.
+    #[test]
+    fn an_accepted_token_round_trips_through_the_session_cookie() {
+        let (dir, token) = token_fixture("roundtrip", "aZ09-_.~+/=!#$%&'*^`|{}[]()<>:?@\n", 0o600);
         let read = read_panel_token(token.to_str().unwrap(), &dir).unwrap();
-        assert_eq!(read, None);
+
+        let set_cookie = crate::auth::session_cookie(&read);
+        // What a browser sends back: just the `name=value` pair.
+        let pair = set_cookie.split(';').next().unwrap().to_string();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_str(&pair).unwrap(),
+        );
+        assert_eq!(
+            crate::auth::presented_token(&headers),
+            Some(read.as_str()),
+            "an accepted token must come back out of the cookie unchanged"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

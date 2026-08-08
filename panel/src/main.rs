@@ -248,6 +248,11 @@ fn build_router(state: SharedState) -> Router {
         .route("/logs", get(pages::logs::page))
         .route("/logs/view", get(pages::logs::view)) // htmx refresh partial
         .route("/dev", get(pages::dev::page))
+        // Recovery, NOT part of the S5 set: these restart the same two systemd
+        // units `POST /processes/restart/{key}` restarts, so gating them while
+        // that stays open would buy nothing.
+        .route("/dev/restart-daemon", post(pages::dev::restart_daemon))
+        .route("/dev/restart-shell", post(pages::dev::restart_shell))
         .route("/dev/screenshot", get(pages::dev::screenshot_png))
         .route(
             "/dev/screenshot/capture",
@@ -263,14 +268,15 @@ fn build_router(state: SharedState) -> Router {
 
     // S5 — the root-equivalent set. Registered ONLY under
     // `[panel].allow_dangerous = true`; otherwise these paths do not exist.
+    // The line: **restarting a unit is recovery** (ungated — it is the reason
+    // the panel exists); **changing what code runs, powering the box, or
+    // running arbitrary commands is root-equivalent** (gated, below). So
+    // `/dev/restart-daemon`, `/dev/restart-shell`,
     // `POST /processes/restart/{key}` and `POST /cec/recover/restart-daemon`
-    // are deliberately NOT here: restarting a unit is recovery, which is the
-    // reason the panel exists.
+    // are all deliberately NOT here.
     let app = if allow_dangerous {
         app.route("/dev/deploy", post(pages::dev::deploy))
             .route("/dev/build", post(pages::dev::build))
-            .route("/dev/restart-daemon", post(pages::dev::restart_daemon))
-            .route("/dev/restart-shell", post(pages::dev::restart_shell))
             .route("/dev/reboot", post(pages::dev::reboot))
             .route("/dev/suspend", post(pages::dev::suspend))
             .route(

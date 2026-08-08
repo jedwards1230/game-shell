@@ -25,9 +25,10 @@ struct DevTemplate {
     bridge_configured: bool,
     daemon_chip_html: String,
     shell_chip_html: String,
-    /// `[panel].allow_dangerous` (S5). When false the deploy/build/restart/
-    /// reboot/suspend forms are not rendered at all — their routes are not
-    /// registered either, so rendering them would produce buttons that 404.
+    /// `[panel].allow_dangerous` (S5). When false the deploy/build/reboot/
+    /// suspend forms are not rendered at all — their routes are not registered
+    /// either, so rendering them would produce buttons that 404. The two
+    /// restart forms are NOT gated by this: restarting a unit is recovery.
     allow_dangerous: bool,
 }
 

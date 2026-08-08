@@ -1619,6 +1619,10 @@ fn route_table() -> Vec<RouteSpec> {
         r("/logs", "/logs", Get, Authenticated),
         r("/logs/view", "/logs/view", Get, Authenticated),
         r("/dev", "/dev", Get, Authenticated),
+        // Recovery, deliberately NOT part of the dangerous set: these restart
+        // the very same units `POST /processes/restart/{key}` restarts.
+        recovery("/dev/restart-daemon", "/dev/restart-daemon", Post),
+        recovery("/dev/restart-shell", "/dev/restart-shell", Post),
         r("/dev/screenshot", "/dev/screenshot", Get, Authenticated),
         r(
             "/dev/screenshot/capture",
@@ -1640,8 +1644,6 @@ fn route_table() -> Vec<RouteSpec> {
         // ── the S5 root-equivalent set ──
         danger("/dev/deploy", Post),
         danger("/dev/build", Post),
-        danger("/dev/restart-daemon", Post),
-        danger("/dev/restart-shell", Post),
         danger("/dev/reboot", Post),
         danger("/dev/suspend", Post),
         danger("/processes/updates/apply", Post),
@@ -1654,34 +1656,117 @@ fn route_table() -> Vec<RouteSpec> {
 /// Multi-line tolerant: rustfmt wraps a number of these across three lines, so
 /// whitespace (including newlines) is skipped between every token rather than
 /// matching a single line.
+///
+/// **Every `.route(` must parse.** An earlier version `continue`d past any
+/// form it did not recognize, which made a route declared with a method other
+/// than `get`/`post` — `.route("/x", axum::routing::put(h))` — vanish from the
+/// table silently, so the route-completeness gate below passed while an ungated
+/// route was live. Anything unrecognized now panics with the offending snippet:
+/// a new method form must be taught to this parser (and added to
+/// `route_table()`), never skipped.
 fn parse_declared_routes(src: &str) -> Vec<(String, Method)> {
+    /// The offending declaration, clipped, for the panic message.
+    fn snippet(s: &str) -> String {
+        s.chars().take(80).collect::<String>().replace('\n', " ")
+    }
+
     let mut out = Vec::new();
     let mut rest = src;
     while let Some(idx) = rest.find(".route(") {
         rest = &rest[idx + ".route(".len()..];
         let after_open = rest.trim_start();
-        let Some(quoted) = after_open.strip_prefix('"') else {
-            continue;
-        };
-        let Some(end) = quoted.find('"') else {
-            continue;
-        };
+        let quoted = after_open.strip_prefix('"').unwrap_or_else(|| {
+            panic!(
+                "main.rs: `.route(` whose first argument is not a string literal — \
+                 the route-completeness gate cannot see it: `{}`",
+                snippet(after_open)
+            )
+        });
+        let end = quoted.find('"').unwrap_or_else(|| {
+            panic!(
+                "main.rs: `.route(` with an unterminated path literal: `{}`",
+                snippet(quoted)
+            )
+        });
         let path = &quoted[..end];
         let after_path = quoted[end + 1..].trim_start();
-        let Some(after_comma) = after_path.strip_prefix(',') else {
-            continue;
-        };
+        let after_comma = after_path.strip_prefix(',').unwrap_or_else(|| {
+            panic!(
+                "main.rs: `.route(\"{path}\"` is not followed by `, <method>(`: `{}`",
+                snippet(after_path)
+            )
+        });
         let after_comma = after_comma.trim_start();
         let method = if after_comma.starts_with("get(") {
             Method::Get
         } else if after_comma.starts_with("post(") {
             Method::Post
         } else {
-            continue;
+            panic!(
+                "main.rs: `.route(\"{path}\"` uses a method form this parser does not \
+                 recognize (only bare `get(` / `post(` are): `{}`. Teach \
+                 `parse_declared_routes` the new form AND add the route to \
+                 `route_table()` — an unparsed route is an UNCHECKED route.",
+                snippet(after_comma)
+            )
         };
         out.push((path.to_string(), method));
     }
     out
+}
+
+/// Ways to register a handler that the parser above and/or the `route_layer`
+/// auth gate would not see. `route_service` bypasses the method-router form
+/// the parser reads; `.merge(`/`.nest(`/`.nest_service(` graft in a sub-router
+/// whose routes are never named in `main.rs`; `.fallback(` registers a
+/// catch-all that `route_layer` (matched routes only) does not wrap.
+const ROUTER_FORMS_THE_GATE_CANNOT_SEE: [&str; 5] = [
+    "route_service",
+    ".merge(",
+    ".nest(",
+    ".nest_service(",
+    ".fallback(",
+];
+
+/// The parser must see EVERY `.route(` in `main.rs`, every one of them must be
+/// declared BEFORE the auth layer, and no route may enter the router by a form
+/// the parser cannot read.
+///
+/// This is the gate that closes the hole `route_table_matches_main_rs_declarations`
+/// alone left open: `Router::route_layer` documents that "routes added after
+/// this call are not wrapped", so a `.route(...)` appended below `.route_layer(...)`
+/// is live and unauthenticated no matter how correct the table is.
+#[test]
+fn every_route_is_visible_to_the_parser_and_declared_before_the_auth_layer() {
+    let src = include_str!("main.rs");
+
+    let declared = parse_declared_routes(src);
+    assert_eq!(
+        declared.len(),
+        src.matches(".route(").count(),
+        "the parser did not account for every `.route(` in main.rs"
+    );
+
+    let last_route = src
+        .rfind(".route(")
+        .expect("main.rs must declare at least one route");
+    let layer = src
+        .find(".route_layer(")
+        .expect("main.rs must attach the auth layer with route_layer");
+    assert!(
+        last_route < layer,
+        "a `.route(` is declared AFTER `.route_layer(` — axum does not wrap routes \
+         added after that call, so it would serve unauthenticated"
+    );
+
+    for form in ROUTER_FORMS_THE_GATE_CANNOT_SEE {
+        assert!(
+            !src.contains(form),
+            "main.rs uses `{form}`, which registers a handler the route-completeness \
+             gate cannot see. Register routes with `.route(\"<path>\", get|post(..))` \
+             before `.route_layer(..)`, or extend this test to cover the new form."
+        );
+    }
 }
 
 /// The gate that stops the auth layer regressing silently: the table above
@@ -1743,9 +1828,11 @@ fn public_routes_are_exactly_the_four_documented_exemptions() {
     assert_eq!(public_paths, middleware_paths);
 }
 
-/// The S5 set, pinned. `POST /processes/restart/{key}` and
-/// `POST /cec/recover/restart-daemon` are deliberately absent: unit restart is
-/// recovery, not a root-equivalent action.
+/// The S5 set, pinned. The rule: **restarting a unit is recovery** (ungated);
+/// **changing what code runs, powering the box, or running arbitrary commands
+/// is root-equivalent** (gated). So every `restart` route — including
+/// `/dev/restart-daemon` and `/dev/restart-shell`, which drive the SAME systemd
+/// units as `POST /processes/restart/{key}` — is deliberately absent.
 #[test]
 fn dangerous_set_is_exactly_the_root_equivalent_actions() {
     let table = route_table();
@@ -1761,20 +1848,30 @@ fn dangerous_set_is_exactly_the_root_equivalent_actions() {
             "/dev/build",
             "/dev/deploy",
             "/dev/reboot",
-            "/dev/restart-daemon",
-            "/dev/restart-shell",
             "/dev/suspend",
             "/processes/updates/apply",
             "/tools/raw",
         ]
     );
-    assert!(table
-        .iter()
-        .any(|r| r.declared == "/processes/restart/{key}" && !r.dangerous));
-    assert!(table
-        .iter()
-        .any(|r| r.declared == "/cec/recover/restart-daemon" && !r.dangerous));
+    for recovery_route in RECOVERY_ROUTES {
+        assert!(
+            table
+                .iter()
+                .any(|r| r.declared == recovery_route && !r.dangerous),
+            "{recovery_route} restarts a unit — it is recovery and must stay ungated"
+        );
+    }
 }
+
+/// The unit-restart routes: recovery, always registered, never in the S5 set.
+/// `/dev/restart-{daemon,shell}` and `/processes/restart/{key}` hit the same
+/// two systemd units, so gating one and leaving the other open bought nothing.
+const RECOVERY_ROUTES: [&str; 4] = [
+    "/processes/restart/{key}",
+    "/cec/recover/restart-daemon",
+    "/dev/restart-daemon",
+    "/dev/restart-shell",
+];
 
 // ── live-router harness ────────────────────────────────────────────────────
 
@@ -1896,11 +1993,14 @@ async fn dangerous_routes_are_unregistered_when_allow_dangerous_is_false() {
             spec.request
         );
     }
-    // The two recovery routes are NOT dangerous and must stay registered:
-    // 401 (gated) rather than 404 (gone).
+    // The recovery routes are NOT dangerous and must stay registered:
+    // 401 (gated) rather than 404 (gone). Probed with GET so the handler is
+    // never reached even if the auth layer were missing (see `exec_backed`).
     for path in [
         "/processes/restart/not-a-unit",
         "/cec/recover/restart-daemon",
+        "/dev/restart-daemon",
+        "/dev/restart-shell",
     ] {
         let status = c
             .get(format!("{base}{path}"))
