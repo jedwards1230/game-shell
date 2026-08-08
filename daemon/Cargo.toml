@@ -1,6 +1,12 @@
 [package]
 name = "tv-shell-input"
-version = "0.1.0"
+# Tracks the last released `input-v*` tag — a floor for local/dev builds, NOT the
+# release source of truth. release-input.yml rewrites this key with the tag it is
+# building before `cargo build`, so a released binary's `CARGO_PKG_VERSION` (the
+# `build-info` IPC reply, `GET /dev/status`, the MQTT `ShellSnapshot`, the HA
+# `daemon_version` entity, the MCP server version) is the real version. Editing
+# it here cuts no release; the `semver:input:*` label does.
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-3.0"

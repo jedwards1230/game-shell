@@ -3,9 +3,9 @@
 //! this one." Moonlight remains the stream engine; this service never touches
 //! Sunshine config, so other Moonlight clients are unaffected.
 //!
-//! Endpoints (`/library`, `/launch`, `/open-bpm`, `/quit`, `/sleep`, `/status`
-//! require `Authorization: Bearer <token>`; `/art/{appid}` is intentionally
-//! PUBLIC — see below):
+//! Endpoints (`/library`, `/launch`, `/open-bpm`, `/quit`, `/sleep`, `/status`,
+//! `/capabilities` require `Authorization: Bearer <token>`; `/art/{appid}` is
+//! intentionally PUBLIC — see below):
 //!   GET  /library      → { games: [LibraryEntry, ...] }   (VDF/ACF enumeration)
 //!   POST /launch       { appid }  → { ok: true }  (navigates Big Picture to the
 //!                                                  game's page; user presses Play)
@@ -23,6 +23,8 @@
 //!                                                    while a game is running or
 //!                                                    a stream is live)
 //!   GET  /status       → { version, running_appid, streaming }
+//!   GET  /capabilities → { node_id, kind, agent_version, platform, features }
+//!                        (what this node declares it can do — see `capabilities`)
 //!   GET  /art/{appid}  → image/jpeg of the local Steam library art for `appid`,
 //!                        or 404. PUBLIC (no bearer): cover art isn't sensitive
 //!                        and QML's `Image.source` can't send an Authorization
@@ -62,16 +64,23 @@ use serde_json::json;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tv_shell_protocol::{
-    LaunchRequest, LibraryEntry, LibraryResponse, QuitResponse, SleepResponse, StatusResponse,
+    Capabilities, Feature, LaunchRequest, LibraryEntry, LibraryResponse, NodeKind, Platform,
+    QuitResponse, SleepResponse, StatusResponse,
 };
 
 /// Default listen port. Picked outside Sunshine/Moonlight's 47984–47990 range to
 /// avoid any collision with a co-hosted Sunshine.
 const DEFAULT_PORT: u16 = 47995;
 
-/// Shared service state: the bearer token (for constant-time compare).
+/// Fallback node identity when nothing else resolves. See [`resolve_node_id`].
+const DEFAULT_NODE_ID: &str = "tv-shell-host";
+
+/// Shared service state: the bearer token (for constant-time compare) and this
+/// node's identity (resolved once at startup — it can't change while we run, and
+/// resolving it per request would put a filesystem read on a hot path).
 struct AppState {
     token: String,
+    node_id: String,
 }
 
 #[tokio::main]
@@ -127,7 +136,11 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    let state = Arc::new(AppState { token });
+    let state = Arc::new(AppState {
+        token,
+        node_id: resolve_node_id(),
+    });
+    tracing::info!("node_id: {}", state.node_id);
 
     let app = Router::new()
         .route("/library", get(library))
@@ -136,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/quit", post(quit_game))
         .route("/sleep", post(sleep))
         .route("/status", get(status))
+        .route("/capabilities", get(capabilities))
         // PUBLIC — no bearer (cover art isn't sensitive; QML's Image.source can't
         // send an Authorization header). `appid` is typed `u32` so a non-numeric
         // path segment 404s before any filesystem access.
@@ -211,6 +225,106 @@ fn generate_token() -> anyhow::Result<String> {
     rng.fill(&mut bytes)
         .map_err(|_| anyhow::anyhow!("failed to read from the OS CSPRNG"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Read every node-identity candidate from the live environment and hand them to
+/// [`pick_node_id`], which owns the ordering.
+///
+/// This half is impure by necessity (env vars + a procfs read) and holds no
+/// policy; the precedence lives in the pure core so it is testable on every
+/// platform. Resolved once at startup, not per request.
+fn resolve_node_id() -> String {
+    let mqtt_device_id = tv_shell_protocol::brand::env("MQTT_DEVICE_ID");
+    let computername = std::env::var("COMPUTERNAME").ok();
+    let procfs_hostname = linux_hostname();
+    let env_hostname = std::env::var("HOSTNAME").ok();
+    pick_node_id(
+        mqtt_device_id.as_deref(),
+        computername.as_deref(),
+        procfs_hostname.as_deref(),
+        env_hostname.as_deref(),
+    )
+}
+
+/// Pick this node's stable identity from its candidate sources, in order:
+///
+/// 1. **`mqtt_device_id`** (`TV_SHELL_MQTT_DEVICE_ID`) — the sidecar's existing
+///    *explicit, never-derived* identity (see [`mqtt`]). Reusing it means the
+///    node that appears in Home Assistant and the node that answers
+///    `/capabilities` cannot end up with two different names for one machine.
+///    Read through `brand::env`, so the legacy `GAME_SHELL_*` spelling works.
+/// 2. **The machine hostname**, best-effort and dependency-free:
+///    `computername` (`COMPUTERNAME`, always set on Windows), then
+///    `procfs_hostname` (`/proc/sys/kernel/hostname` on Linux), and only then
+///    `env_hostname` (`HOSTNAME`). The procfs read outranks `HOSTNAME`
+///    deliberately: it is the kernel's answer, whereas `HOSTNAME` is a bash-only
+///    variable that a systemd service normally doesn't even see — and when it
+///    *is* exported (a container, `docker exec`, an inherited shell) it can be
+///    stale, which would have the sidecar answer to a name the machine no longer
+///    has. `HOSTNAME` survives as a last resort for non-Linux unix hosts. There
+///    is no dependency-free hostname source on macOS, and adding a crate for a
+///    CI-only target is not worth it.
+/// 3. **[`DEFAULT_NODE_ID`]** — a constant, never a generated/random value: an
+///    identity that changes per run is worse than a duplicated one.
+///
+/// Blank and whitespace-only candidates are skipped, not accepted — a
+/// `TV_SHELL_MQTT_DEVICE_ID=""` must fall through rather than name the node `""`.
+///
+/// Pure: it takes its inputs instead of reading them, the same shape the daemon
+/// uses for `ipc::resolve_node_id(configured, hostname)` and
+/// `daemon_config::resolve_osd_name`, so the precedence is pinned by tests on
+/// every platform rather than varying with the machine running them.
+fn pick_node_id(
+    mqtt_device_id: Option<&str>,
+    computername: Option<&str>,
+    procfs_hostname: Option<&str>,
+    env_hostname: Option<&str>,
+) -> String {
+    first_non_blank(&[mqtt_device_id, computername, procfs_hostname, env_hostname])
+        .unwrap_or_else(|| DEFAULT_NODE_ID.to_string())
+}
+
+/// First trimmed non-empty candidate, if any. Pure, so the precedence is
+/// testable on every platform.
+fn first_non_blank(candidates: &[Option<&str>]) -> Option<String> {
+    candidates
+        .iter()
+        .flatten()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// `/proc/sys/kernel/hostname`, or `None` off Linux / on any read error.
+fn linux_hostname() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
+}
+
+/// Everything this sidecar declares it can do.
+///
+/// **Declared, never inferred, and never health-derived** — each entry answers
+/// "is this wired on this build target?", not "would it succeed right now". A
+/// Steam that happens to be closed does not remove `game_launch`.
+///
+/// | Feature | Gate |
+/// |---|---|
+/// | `steam_library` | unconditional — [`steam::enumerate`] has install roots for all three targets |
+/// | `game_launch` | `linux`/`windows` — [`steam::quit`] and [`steam::running_appid`] are only wired there; macOS can open the launch URL but can never stop or even see a running game, so claiming it would make `/quit` a silent no-op the panel presents as a working button |
+/// | `sleep` | `linux`/`windows` — exactly [`power::suspend`]'s own `cfg` |
+///
+/// Everything else in [`Feature`] is a shell-node or panel-tier concern this
+/// binary has no route for, so it is never claimed.
+fn capability_features() -> std::collections::BTreeSet<Feature> {
+    let mut f = std::collections::BTreeSet::new();
+    f.insert(Feature::SteamLibrary);
+    if cfg!(any(target_os = "linux", target_os = "windows")) {
+        f.insert(Feature::GameLaunch);
+        f.insert(Feature::Sleep);
+    }
+    f
 }
 
 /// Constant-time bearer check. Returns `Ok(())` when the `Authorization` header
@@ -430,6 +544,31 @@ async fn status(
     }))
 }
 
+/// `GET /capabilities` — what this node declares it can do, as the shared
+/// [`Capabilities`] wire type. The panel builds its nav **and registers its
+/// routes** from this set; it never probes or guesses.
+///
+/// Bearer-authenticated like every route but `/art/{appid}`: the feature set is
+/// an inventory of what is reachable on this machine, which is exactly the map
+/// an attacker would want, and the daemon that consumes it already holds a token.
+///
+/// Pure compile-time + startup-resolved data (no probes, no I/O), so it never
+/// touches the blocking pool — unlike [`status`], and deliberately: a capability
+/// answer must stay available while a probe would hang.
+async fn capabilities(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Capabilities>, StatusCode> {
+    authorize(&state, &headers)?;
+    Ok(Json(Capabilities {
+        node_id: state.node_id.clone(),
+        kind: NodeKind::Sidecar,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: Platform::current(),
+        features: capability_features(),
+    }))
+}
+
 /// `GET /art/{appid}` — serve the local Steam portrait library art (capsule,
 /// else header) for `appid` as `image/jpeg`. PUBLIC: no `authorize()` call —
 /// cover art isn't sensitive and QML's `Image.source` can't attach a bearer.
@@ -461,6 +600,7 @@ mod tests {
     fn state(tok: &str) -> AppState {
         AppState {
             token: tok.to_string(),
+            node_id: "test-node".to_string(),
         }
     }
 
@@ -597,5 +737,95 @@ mod tests {
         assert!(!is_loopback_bind("192.168.1.10"));
         assert!(!is_loopback_bind("localhost"));
         assert!(!is_loopback_bind(""));
+    }
+
+    // --- /capabilities -----------------------------------------------------
+
+    #[tokio::test]
+    async fn capabilities_requires_a_bearer() {
+        // Same posture as every route but /art: the feature set is an inventory
+        // of what's reachable here and must not be readable unauthenticated.
+        let st = Arc::new(state("sekret"));
+        assert!(matches!(
+            capabilities(State(st.clone()), HeaderMap::new()).await,
+            Err(StatusCode::UNAUTHORIZED)
+        ));
+        assert!(capabilities(State(st), bearer("sekret")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn capabilities_declares_a_sidecar_with_the_real_platform() {
+        let st = Arc::new(state("sekret"));
+        let Json(caps) = capabilities(State(st), bearer("sekret")).await.unwrap();
+        assert_eq!(caps.kind, NodeKind::Sidecar);
+        assert_eq!(caps.platform, Platform::current());
+        assert_eq!(caps.agent_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(caps.node_id, "test-node");
+        // Library enumeration is wired on every target we build for.
+        assert!(caps.features.contains(&Feature::SteamLibrary));
+        // Launch/quit and suspend follow the same cfg their implementations do.
+        let os_wired = cfg!(any(target_os = "linux", target_os = "windows"));
+        assert_eq!(caps.features.contains(&Feature::GameLaunch), os_wired);
+        assert_eq!(caps.features.contains(&Feature::Sleep), os_wired);
+        // Shell-node and panel-tier features are never claimed by the sidecar.
+        for never in [
+            Feature::Cec,
+            Feature::Controllers,
+            Feature::Widgets,
+            Feature::SettingsStore,
+            Feature::ShellLifecycle,
+            Feature::Screenshot,
+            Feature::DevDeploy,
+        ] {
+            assert!(!caps.features.contains(&never), "must not claim {never:?}");
+        }
+    }
+
+    #[test]
+    fn node_id_precedence_skips_blank_candidates() {
+        assert_eq!(
+            first_non_blank(&[None, Some("  "), Some(" pc-1 ")]),
+            Some("pc-1".to_string())
+        );
+        assert_eq!(first_non_blank(&[]), None);
+        assert_eq!(first_non_blank(&[None, Some("")]), None);
+    }
+
+    #[test]
+    fn pick_node_id_follows_the_documented_precedence() {
+        // Every candidate present: the explicit mqtt device_id wins outright.
+        assert_eq!(
+            pick_node_id(Some("htpc-1"), Some("WINBOX"), Some("procfs"), Some("envh")),
+            "htpc-1"
+        );
+        // Then COMPUTERNAME (always set on Windows)...
+        assert_eq!(
+            pick_node_id(None, Some("WINBOX"), Some("procfs"), Some("envh")),
+            "WINBOX"
+        );
+        // ...then the kernel's own answer from procfs...
+        assert_eq!(
+            pick_node_id(None, None, Some("procfs"), Some("envh")),
+            "procfs"
+        );
+        // ...and only then the (possibly stale, bash-only) HOSTNAME.
+        assert_eq!(pick_node_id(None, None, None, Some("envh")), "envh");
+        // Nothing resolvable → the constant, never a generated value.
+        assert_eq!(pick_node_id(None, None, None, None), DEFAULT_NODE_ID);
+
+        // A BLANK higher-precedence candidate falls through rather than naming
+        // the node "" — `TV_SHELL_MQTT_DEVICE_ID=""` must not win.
+        assert_eq!(
+            pick_node_id(Some(""), Some("  "), Some(" pc-1 "), Some("envh")),
+            "pc-1"
+        );
+        // Blank all the way down is the same as absent.
+        assert_eq!(
+            pick_node_id(Some(" "), Some(""), Some("\n"), Some("\t")),
+            DEFAULT_NODE_ID
+        );
+        // Procfs reads carry the kernel's trailing newline — it must be trimmed,
+        // not treated as content (`linux_hostname` returns the raw file).
+        assert_eq!(pick_node_id(None, None, Some("box\n"), None), "box");
     }
 }

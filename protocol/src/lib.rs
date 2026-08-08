@@ -27,6 +27,248 @@ pub mod brand;
 pub mod mqtt;
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+/// What a node *is*, structurally — which of the two tv-shell binaries answers
+/// for it. A shell node runs `tv-shell-input` beside the QML shell; a sidecar
+/// node runs `tv-shell-host` and has no UI of its own.
+///
+/// Informational: route gating is done on [`Capabilities::features`], never on
+/// the kind. A node with no shell surface simply doesn't declare the shell
+/// features, which is a finer-grained (and non-lying) statement than its kind.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeKind {
+    /// Runs `tv-shell-input` + the QML shell (e.g. the TV client).
+    Shell,
+    /// Runs `tv-shell-host` only (e.g. the gaming PC).
+    Sidecar,
+}
+
+/// The OS a node runs on, resolved at **compile time** by [`Platform::current`].
+///
+/// Shaped like [`mqtt::DeviceOs`] (same `lowercase` wire form) but deliberately
+/// a separate type: `DeviceOs` is a Home Assistant device attribute with an
+/// `Unknown` escape hatch, while this one enumerates exactly the three targets
+/// the workspace builds for.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    /// Linux — the TV client and the Linux boot of the gaming PC.
+    Linux,
+    /// Windows — the Windows boot of the gaming PC.
+    Windows,
+    /// macOS — CI and developer machines.
+    MacOS,
+}
+
+impl Platform {
+    /// The platform this binary was compiled for. Total; never panics.
+    ///
+    /// The workspace releases for exactly linux / macOS / Windows (see
+    /// `.github/workflows/release-*.yml`), so any other target — a BSD, say —
+    /// falls through to `Linux` rather than growing an `Unknown` variant a
+    /// consumer would have to handle for a build that is never produced.
+    pub fn current() -> Platform {
+        #[cfg(target_os = "windows")]
+        {
+            Platform::Windows
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Platform::MacOS
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            Platform::Linux
+        }
+    }
+}
+
+/// One thing a node declares it can do. The panel builds its nav **and
+/// registers its routes** from the set a node reports — it never probes,
+/// sniffs, or guesses (see `docs/MULTI_NODE_PANEL.md`).
+///
+/// ## Wire form and forward compatibility
+///
+/// Serialized as a plain snake_case string (`"web_apps"`, `"steam_library"`),
+/// matching the crate's other wire types. Anything this build does not know
+/// deserializes into [`Feature::Unknown`] **holding the original string**, which
+/// re-serializes byte-identically. That is the whole point: in a mixed-version
+/// fleet a newer node reports a feature an older panel has never heard of, and
+/// the older panel must round-trip it rather than failing the entire
+/// [`Capabilities`] parse (which would ungate *everything* on that node).
+/// `#[serde(other)]` is not usable here — it collapses every unknown into one
+/// valueless variant, so two different unknown features would compare equal and
+/// neither would survive a round-trip.
+///
+/// Ordering is the derived `Ord` (declaration order, `Unknown` last), so a
+/// `BTreeSet<Feature>` serializes byte-stably.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Feature {
+    // --- shell node ---
+    /// HDMI-CEC control (`cec-*` IPC).
+    Cec,
+    /// Gamepad fleet: grab/release, per-pad battery/rumble, bindings.
+    Controllers,
+    /// Home-screen widget registry + per-widget config.
+    Widgets,
+    /// Wallpaper library.
+    Wallpapers,
+    /// The daemon-owned web-app registry (`webapp-*` IPC).
+    WebApps,
+    /// Read/write of the shared settings store (`get-config` / `set-config`).
+    SettingsStore,
+    /// Screen-ownership push (`shell-focus on|off`). Deliberately NOT the
+    /// shell *restart* path: that is `POST /dev/restart-shell` / the MCP
+    /// `restart_shell` tool, which ride the optional network bridges rather
+    /// than the always-present IPC, so promising it here would have a client
+    /// register a route a socket-only node can't serve.
+    ShellLifecycle,
+    /// Capture a frame of the live session.
+    Screenshot,
+
+    // --- sidecar ---
+    /// Enumerate the installed Steam library.
+    SteamLibrary,
+    /// Launch / quit a game on this node.
+    GameLaunch,
+    /// Suspend **this** node to RAM.
+    Sleep,
+
+    // --- shared / platform-dependent ---
+    /// Pull a git ref and rebuild on-device.
+    DevDeploy,
+    /// Read this node's logs.
+    Logs,
+    /// Enumerate / manage processes on this node.
+    Processes,
+    /// Query and apply OS package updates.
+    SystemUpdates,
+
+    /// A feature this build does not know. Preserved verbatim so an older panel
+    /// round-trips a newer node's set without data loss and without erroring.
+    ///
+    /// `#[non_exhaustive]` so **no other crate can construct it directly** —
+    /// everyone outside this one must go through [`From<String>`], which
+    /// canonicalizes. Without that, `Feature::Unknown("cec".into())` would be a
+    /// second, `Eq`/`Ord`-distinct value that serializes to the same `"cec"`
+    /// string: a `BTreeSet` could hold both, emit a duplicate in the JSON array,
+    /// and stop round-tripping. The panel builds its sets from strings, so this
+    /// is exactly the mistake it is positioned to make.
+    #[non_exhaustive]
+    Unknown(String),
+}
+
+impl Feature {
+    /// The snake_case wire name. For [`Feature::Unknown`] this is the original
+    /// string, which is what makes the round-trip lossless.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Feature::Cec => "cec",
+            Feature::Controllers => "controllers",
+            Feature::Widgets => "widgets",
+            Feature::Wallpapers => "wallpapers",
+            Feature::WebApps => "web_apps",
+            Feature::SettingsStore => "settings_store",
+            Feature::ShellLifecycle => "shell_lifecycle",
+            Feature::Screenshot => "screenshot",
+            Feature::SteamLibrary => "steam_library",
+            Feature::GameLaunch => "game_launch",
+            Feature::Sleep => "sleep",
+            Feature::DevDeploy => "dev_deploy",
+            Feature::Logs => "logs",
+            Feature::Processes => "processes",
+            Feature::SystemUpdates => "system_updates",
+            Feature::Unknown(s) => s,
+        }
+    }
+
+    /// The known variant for a wire name, or `None` when this build doesn't
+    /// know it. Split out of `From<String>` so the string can be *moved* into
+    /// [`Feature::Unknown`] instead of cloned.
+    fn known(s: &str) -> Option<Feature> {
+        Some(match s {
+            "cec" => Feature::Cec,
+            "controllers" => Feature::Controllers,
+            "widgets" => Feature::Widgets,
+            "wallpapers" => Feature::Wallpapers,
+            "web_apps" => Feature::WebApps,
+            "settings_store" => Feature::SettingsStore,
+            "shell_lifecycle" => Feature::ShellLifecycle,
+            "screenshot" => Feature::Screenshot,
+            "steam_library" => Feature::SteamLibrary,
+            "game_launch" => Feature::GameLaunch,
+            "sleep" => Feature::Sleep,
+            "dev_deploy" => Feature::DevDeploy,
+            "logs" => Feature::Logs,
+            "processes" => Feature::Processes,
+            "system_updates" => Feature::SystemUpdates,
+            _ => return None,
+        })
+    }
+}
+
+impl From<String> for Feature {
+    fn from(s: String) -> Feature {
+        Feature::known(&s).unwrap_or(Feature::Unknown(s))
+    }
+}
+
+impl From<Feature> for String {
+    fn from(f: Feature) -> String {
+        match f {
+            // Move the original string out rather than re-allocating it.
+            Feature::Unknown(s) => s,
+            other => other.as_str().to_string(),
+        }
+    }
+}
+
+/// What a node declares it can do — served as the `capabilities` IPC command by
+/// the daemon (shell node) and `GET /capabilities` by the sidecar.
+///
+/// **Capability is declared by the node, never inferred by the panel.** Same
+/// principle as `shell-focus` ("screen ownership is declared, never inferred"),
+/// and the same failure mode if violated: a probe answers a question adjacent to
+/// the one you asked, and is confidently wrong.
+///
+/// `#[serde(default)]` is applied per field by which direction is safe when a
+/// node **omits** it. It covers **absence only** — an explicit `null` still
+/// fails the whole parse (`"node_id":null` → `invalid type: null, expected a
+/// string`), which is fine because every producer in this workspace is Rust and
+/// emits a real string or a real array:
+///
+/// - `features` — an absent array defaults to **empty**, i.e. "this node can do
+///   nothing". The panel gates routes on this set, so a set the node didn't
+///   state must ungate nothing.
+/// - `node_id` / `agent_version` — display-only, so an absent one degrades to
+///   `""` instead of failing the parse.
+/// - `kind` and `platform` have **no default on purpose**. Both are structural
+///   claims about what the node *is*; inventing one would make a sidecar render
+///   as a shell node. A body that can't state them is not a capability
+///   handshake, and failing the parse is the fail-closed direction.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Stable identity of this node (`"htpc-1"`, `"desktop-2"`). Resolution
+    /// order is the serving binary's business — see `docs/IPC_PROTOCOL.md`
+    /// (daemon) and `docs/HOST_SETUP.md` (sidecar).
+    #[serde(default)]
+    pub node_id: String,
+    /// Which binary answers for this node.
+    pub kind: NodeKind,
+    /// The serving binary's release version (`CARGO_PKG_VERSION`, stamped from
+    /// the tag by the release workflow).
+    #[serde(default)]
+    pub agent_version: String,
+    /// The OS this node's binary was compiled for.
+    pub platform: Platform,
+    /// Everything this node can do. Ordered (`BTreeSet`) so the serialized JSON
+    /// is byte-stable across calls.
+    #[serde(default)]
+    pub features: BTreeSet<Feature>,
+}
 
 /// One installed Steam game, derived from an `appmanifest_*.acf` file.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -298,6 +540,223 @@ mod tests {
         assert_eq!(back, QuitResponse::default());
         assert!(!back.ok);
         assert!(back.reason.is_none());
+    }
+
+    /// Every known [`Feature`] variant, in declaration order — the widest set a
+    /// node could report. Used by the round-trip and line-length tests.
+    fn all_known_features() -> Vec<Feature> {
+        vec![
+            Feature::Cec,
+            Feature::Controllers,
+            Feature::Widgets,
+            Feature::Wallpapers,
+            Feature::WebApps,
+            Feature::SettingsStore,
+            Feature::ShellLifecycle,
+            Feature::Screenshot,
+            Feature::SteamLibrary,
+            Feature::GameLaunch,
+            Feature::Sleep,
+            Feature::DevDeploy,
+            Feature::Logs,
+            Feature::Processes,
+            Feature::SystemUpdates,
+        ]
+    }
+
+    #[test]
+    fn every_known_feature_roundtrips_through_its_wire_name() {
+        for f in all_known_features() {
+            let json = serde_json::to_string(&f).unwrap();
+            assert_eq!(json, format!("\"{}\"", f.as_str()));
+            let back: Feature = serde_json::from_str(&json).unwrap();
+            assert_eq!(f, back);
+        }
+    }
+
+    #[test]
+    fn feature_wire_names_are_snake_case_and_unique() {
+        let features = all_known_features();
+        let names: Vec<&str> = features.iter().map(|f| f.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate feature wire name");
+        for n in names {
+            assert!(
+                n.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{n} is not snake_case"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_feature_roundtrips_verbatim() {
+        // A feature a NEWER node reports must survive an older build untouched:
+        // same string in, same string out, and no parse error.
+        let json = r#""quantum_teleport""#;
+        let f: Feature = serde_json::from_str(json).unwrap();
+        assert_eq!(f, Feature::Unknown("quantum_teleport".to_string()));
+        assert_eq!(serde_json::to_string(&f).unwrap(), json);
+    }
+
+    #[test]
+    fn from_string_canonicalizes_known_names() {
+        // The ONLY way another crate can build a `Feature` from a string
+        // (`Unknown` is `#[non_exhaustive]`), so this is what keeps a
+        // string-built set from carrying a second, Eq-distinct `Unknown("cec")`
+        // beside `Feature::Cec` that serializes to the same `"cec"`.
+        assert_eq!(Feature::from("cec".to_string()), Feature::Cec);
+        for f in all_known_features() {
+            assert_eq!(Feature::from(f.as_str().to_string()), f);
+        }
+        // A round-trip through a set therefore can't grow a duplicate.
+        let set: BTreeSet<Feature> = ["cec", "cec", "web_apps"]
+            .into_iter()
+            .map(|s| Feature::from(s.to_string()))
+            .collect();
+        assert_eq!(
+            serde_json::to_string(&set).unwrap(),
+            r#"["cec","web_apps"]"#
+        );
+    }
+
+    #[test]
+    fn two_distinct_unknown_features_stay_distinct() {
+        // The reason `#[serde(other)]` is unusable: it would collapse these two
+        // into one valueless variant, so a set would silently lose one.
+        let a: Feature = serde_json::from_str(r#""future_a""#).unwrap();
+        let b: Feature = serde_json::from_str(r#""future_b""#).unwrap();
+        assert_ne!(a, b);
+        let set: BTreeSet<Feature> = [a, b].into_iter().collect();
+        assert_eq!(set.len(), 2);
+        assert_eq!(
+            serde_json::to_string(&set).unwrap(),
+            r#"["future_a","future_b"]"#
+        );
+    }
+
+    #[test]
+    fn capabilities_roundtrips() {
+        let c = Capabilities {
+            node_id: "htpc-1".to_string(),
+            kind: NodeKind::Shell,
+            agent_version: "0.2.2".to_string(),
+            platform: Platform::Linux,
+            features: [Feature::Cec, Feature::Controllers].into_iter().collect(),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        // Field order is declaration order; the feature array is BTreeSet order
+        // (declaration order), so the whole body is byte-stable.
+        assert_eq!(
+            json,
+            r#"{"node_id":"htpc-1","kind":"shell","agent_version":"0.2.2","platform":"linux","features":["cec","controllers"]}"#
+        );
+        let back: Capabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn capabilities_mixing_known_and_unknown_features_parses() {
+        // The mixed-version case: an older panel reading a newer node.
+        let json = r#"{"node_id":"desktop-2","kind":"sidecar","agent_version":"9.9.9","platform":"windows","features":["steam_library","holodeck"]}"#;
+        let c: Capabilities = serde_json::from_str(json).unwrap();
+        assert_eq!(c.kind, NodeKind::Sidecar);
+        assert_eq!(c.platform, Platform::Windows);
+        assert!(c.features.contains(&Feature::SteamLibrary));
+        assert!(c
+            .features
+            .contains(&Feature::Unknown("holodeck".to_string())));
+        // Unknown sorts last (declaration order), so the re-serialized body is
+        // NOT byte-identical to the input here — but no feature is lost.
+        let back: Capabilities = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn capabilities_defaults_absent_optional_fields() {
+        // node_id / agent_version / features degrade; an empty feature set means
+        // "this node can do nothing", which ungates nothing panel-side.
+        let c: Capabilities =
+            serde_json::from_str(r#"{"kind":"sidecar","platform":"macos"}"#).unwrap();
+        assert_eq!(c.node_id, "");
+        assert_eq!(c.agent_version, "");
+        assert!(c.features.is_empty());
+        assert_eq!(c.platform, Platform::MacOS);
+    }
+
+    #[test]
+    fn capabilities_explicit_null_is_not_a_default() {
+        // `#[serde(default)]` covers ABSENCE only — an explicit null fails the
+        // whole parse. Pinned so the documented boundary is explicit rather than
+        // assumed: every in-tree producer is Rust and emits real values, so this
+        // is a statement about the contract, not a live failure mode. If a
+        // JSON-emitting node ever joins the fleet, this test is the tripwire.
+        assert!(serde_json::from_str::<Capabilities>(
+            r#"{"node_id":null,"kind":"shell","platform":"linux"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Capabilities>(
+            r#"{"features":null,"kind":"shell","platform":"linux"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn capabilities_without_kind_or_platform_fails_closed() {
+        // Structural claims have no default: a body that can't say what the node
+        // IS is not a capability handshake.
+        assert!(serde_json::from_str::<Capabilities>(r#"{"platform":"linux"}"#).is_err());
+        assert!(serde_json::from_str::<Capabilities>(r#"{"kind":"shell"}"#).is_err());
+        assert!(serde_json::from_str::<Capabilities>("{}").is_err());
+    }
+
+    #[test]
+    fn capabilities_unknown_fields_are_ignored() {
+        // Forward compat the other way: a NEWER node adding a field must not
+        // break an older reader.
+        let c: Capabilities = serde_json::from_str(
+            r#"{"node_id":"n","kind":"shell","platform":"linux","uptime_secs":42}"#,
+        )
+        .unwrap();
+        assert_eq!(c.node_id, "n");
+    }
+
+    #[test]
+    fn full_capabilities_fit_the_ipc_line_limit() {
+        // A deliberate REPLY-SIZE BUDGET, not a codec limit. The daemon's
+        // `LinesCodec::new_with_max_length(4096)` (daemon/src/ipc.rs) constrains
+        // the INBOUND command line only — `LinesCodec`'s `Encoder` ignores
+        // `max_length`, and the one in-tree reader (panel/src/ipc.rs) uses an
+        // unbounded `BufReader::read_line` — so nothing truncates an oversized
+        // reply today. The assertion is here to keep one newline-framed
+        // capability reply small enough to stay comfortably inside that budget
+        // as features accrue.
+        //
+        // This is a wide-but-not-maximal sample: every known feature plus a
+        // generous node_id/version. It is not an upper bound — `node_id` comes
+        // from `[mqtt].device_id`, an unbounded config string.
+        let c = Capabilities {
+            node_id: "a-deliberately-long-node-identifier-for-headroom".to_string(),
+            kind: NodeKind::Shell,
+            agent_version: "123.456.789-rc.1+build.20260807".to_string(),
+            platform: Platform::Linux,
+            features: all_known_features().into_iter().collect(),
+        };
+        let len = serde_json::to_string(&c).unwrap().len();
+        assert!(len < 1024, "capabilities JSON is {len} bytes, want < 1024");
+    }
+
+    #[test]
+    fn platform_current_matches_the_build_target() {
+        let p = Platform::current();
+        if cfg!(target_os = "windows") {
+            assert_eq!(p, Platform::Windows);
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(p, Platform::MacOS);
+        } else {
+            assert_eq!(p, Platform::Linux);
+        }
     }
 
     #[test]

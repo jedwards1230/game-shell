@@ -1,6 +1,10 @@
 [package]
 name = "tv-shell-protocol"
-version = "0.1.0"
+# 0.0.0 on purpose: internal path-only crate, never published, never released
+# under its own tag series, and nothing reports its `CARGO_PKG_VERSION`. A
+# plausible-looking `0.1.0` here would be a version that can't distinguish two
+# builds — the exact failure this workspace just removed from host/daemon.
+version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

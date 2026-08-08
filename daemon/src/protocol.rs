@@ -426,6 +426,12 @@ pub enum Command {
     /// `/dev/deploy` HEAD swap under the running daemon is reflected without a
     /// restart.
     BuildInfo,
+    /// `capabilities` — return this node's declared capability handshake as a
+    /// compact JSON object `{node_id, kind, agent_version, platform, features}`
+    /// ([`tv_shell_protocol::Capabilities`]). Declared, never inferred: the
+    /// feature set follows the cargo features / target / config this daemon was
+    /// actually built and configured with, not runtime health.
+    Capabilities,
 
     /// Anything unrecognized -> the daemon replies `unknown`.
     Unknown,
@@ -582,6 +588,7 @@ impl Command {
             "storage-status" => Command::StorageStatus,
             "sys-metrics" => Command::SysMetrics,
             "build-info" => Command::BuildInfo,
+            "capabilities" => Command::Capabilities,
             _ => {
                 // `set-config <json>` / `record-launch <json>`: the rest of the
                 // line is a compact single-line JSON body. The command word must

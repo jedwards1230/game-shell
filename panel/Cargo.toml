@@ -1,6 +1,10 @@
 [package]
 name = "tv-shell-panel"
-version = "0.1.0"
+# 0.0.0 on purpose: no `panel-v*` release stream exists (the panel is built from
+# source on-device) and nothing reads its `CARGO_PKG_VERSION`. If a stream is
+# ever added, give it the host/daemon treatment — a release workflow that stamps
+# the tag here — rather than hand-maintaining a number nothing verifies.
+version = "0.0.0"
 edition.workspace = true
 # Not inherited from the workspace (1.75): axum/reqwest/askama transitives pull
 # edition2024 crates that require Cargo >=1.85, exactly like the host crate.
