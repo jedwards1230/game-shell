@@ -106,7 +106,7 @@ fn error_result(msg: &str) -> String {
 }
 
 /// Send `line` over IPC and render the reply: pretty-printed JSON when the
-/// reply parses as JSON, the bare text otherwise. An `TransportError` (including
+/// reply parses as JSON, the bare text otherwise. A `TransportError` (including
 /// daemon-unreachable) renders as a failed result, never a 500.
 pub async fn run_line(state: &AppState, line: &str) -> String {
     match state.node.command(line).await {
