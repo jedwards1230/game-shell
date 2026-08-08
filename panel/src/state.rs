@@ -3,19 +3,24 @@
 
 use std::sync::Arc;
 
-use crate::bridge::BridgeClient;
+use crate::bridge::DevBridge;
 use crate::config::AppConfig;
 use crate::exec::Recovery;
-use crate::ipc::IpcClient;
+use crate::transport::NodeTransport;
 use crate::updates::UpdatesState;
 
 /// The panel's shared state: resolved config plus the three data-tier
-/// clients (IPC primary, HTTP bridge dev-ops, direct-exec recovery) and the
-/// Updates feature's cache/job state.
+/// clients (node transport primary, HTTP bridge dev-ops, direct-exec
+/// recovery) and the Updates feature's cache/job state.
 pub struct AppState {
     pub cfg: AppConfig,
-    pub ipc: IpcClient,
-    pub bridge: BridgeClient,
+    /// The node this panel speaks for. Held as a trait object so the pages
+    /// depend on *what* a node can do, not on the Unix socket that happens to
+    /// serve the local one — see [`crate::transport`].
+    pub node: Arc<dyn NodeTransport>,
+    /// The daemon's opt-in HTTP dev-ops tier, held as a trait object for the
+    /// same reason — see [`crate::bridge::DevBridge`].
+    pub bridge: Arc<dyn DevBridge>,
     pub recovery: Recovery,
     pub updates: UpdatesState,
 }

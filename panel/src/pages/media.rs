@@ -34,6 +34,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 /// Upload cap. Generous for a 4K wallpaper, far below anything that would
 /// wedge the box's memory.
@@ -217,7 +218,7 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 
 pub async fn render_page(state: &AppState) -> String {
     let dir = wallpapers_dir();
-    let cfg = state.ipc.get_config().await.ok();
+    let cfg = state.node.get_config().await.ok();
     let daemon_up = cfg.is_some();
     let selected = cfg
         .as_ref()
@@ -237,7 +238,7 @@ pub async fn render_page(state: &AppState) -> String {
         .collect();
     let any_selected = wallpapers.iter().any(|w| w.selected);
 
-    let (webapps, webapps_error) = match state.ipc.command("webapp-list").await {
+    let (webapps, webapps_error) = match state.node.command("webapp-list").await {
         Ok(reply) => (parse_webapps(&reply), String::new()),
         Err(e) => (Vec::new(), format!("Could not read the registry: {e}")),
     };
@@ -404,7 +405,7 @@ pub async fn render_select(state: &AppState, name: &str) -> String {
         }
     };
     match state
-        .ipc
+        .node
         .set_config(&json!({ "wallpaperPath": value }))
         .await
     {
@@ -442,7 +443,7 @@ pub async fn render_delete(state: &AppState, name: &str) -> String {
     }
     // Clear the selection when the deleted file was the active wallpaper.
     let was_selected = state
-        .ipc
+        .node
         .get_config()
         .await
         .ok()
@@ -455,7 +456,7 @@ pub async fn render_delete(state: &AppState, name: &str) -> String {
         .unwrap_or(false);
     let mut msg = format!("Deleted {name}.");
     if was_selected {
-        match state.ipc.set_config(&json!({ "wallpaperPath": "" })).await {
+        match state.node.set_config(&json!({ "wallpaperPath": "" })).await {
             Ok(()) => msg.push_str(" It was the active wallpaper, so the selection was cleared."),
             Err(e) => msg.push_str(&format!(
                 " WARNING: it was the active wallpaper but clearing the selection failed: {e}"
@@ -551,7 +552,7 @@ pub async fn webapp_add(
 pub async fn render_webapp_add(state: &AppState, name: &str, url: &str) -> String {
     let body = json!({ "name": name.trim(), "url": url.trim() });
     let line = format!("webapp-add {body}");
-    match state.ipc.command(&line).await {
+    match state.node.command(&line).await {
         Ok(reply) => {
             let added: Option<String> = serde_json::from_str::<serde_json::Value>(&reply)
                 .ok()
@@ -590,7 +591,7 @@ pub async fn webapp_remove(
 
 pub async fn render_webapp_remove(state: &AppState, id: &str) -> String {
     match state
-        .ipc
+        .node
         .command(&format!("webapp-remove {}", id.trim()))
         .await
     {

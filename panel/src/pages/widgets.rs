@@ -29,6 +29,7 @@ use axum::Form;
 use serde_json::Value;
 
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 // ---------------------------------------------------------------------------
 // Widget manifest mirror — KEEP IN SYNC with
@@ -247,7 +248,7 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 pub async fn render_page(state: &AppState) -> String {
-    match state.ipc.get_config().await {
+    match state.node.get_config().await {
         Ok(cfg) => render_ok(&cfg),
         Err(_e) => render_degraded(),
     }
@@ -363,7 +364,7 @@ pub async fn reorder_down(
 /// reset to their last-persisted value when the grid re-renders, rather than
 /// deferred to the page's "Save widgets" button.
 pub async fn render_reorder(state: &AppState, id: &str, dir: &str) -> String {
-    let cfg = match state.ipc.get_config().await {
+    let cfg = match state.node.get_config().await {
         Ok(cfg) => cfg,
         Err(e) => {
             return format!(
@@ -404,7 +405,7 @@ pub async fn render_reorder(state: &AppState, id: &str, dir: &str) -> String {
         .map(|(m, cur)| build_card_view(m, cur))
         .collect();
 
-    match state.ipc.set_config(&patch).await {
+    match state.node.set_config(&patch).await {
         Ok(()) => render_grid(cards),
         Err(e) => format!(
             "<p class=\"banner banner-error\">Reorder failed to save: {e}</p>{}",
@@ -455,7 +456,7 @@ pub async fn save(
 
 pub async fn render_save(state: &AppState, form: &HashMap<String, String>) -> String {
     match build_widgets_patch(form) {
-        Ok(patch) => match state.ipc.set_config(&patch).await {
+        Ok(patch) => match state.node.set_config(&patch).await {
             Ok(()) => result_html(true, "Widgets saved."),
             Err(e) => result_html(false, &format!("Save failed: {e}")),
         },

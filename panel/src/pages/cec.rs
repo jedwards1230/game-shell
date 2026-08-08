@@ -25,6 +25,7 @@ use serde_json::Value;
 
 use crate::bridge::BridgeError;
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 // ---------------------------------------------------------------------------
 // Shared small helpers (own copy per page — see `pages::controllers`'s doc
@@ -95,7 +96,7 @@ fn cec_unavailable_reason(msg: &str) -> Option<&'static str> {
 /// [`oob_health_refresh`]) so the health panel stays current after any bus
 /// action, not just the two ladder steps that already target it directly.
 async fn run_cec(state: &AppState, line: &str) -> String {
-    let result = match state.ipc.command(line).await {
+    let result = match state.node.command(line).await {
         Ok(reply) => result_html(true, &pretty_block(&reply)),
         Err(e) => {
             let msg = e.to_string();
@@ -431,7 +432,7 @@ async fn render_health_view(
     action: Option<(bool, String)>,
     oob: bool,
 ) -> String {
-    let view = match state.ipc.command_json::<CecHealthJson>(cmd).await {
+    let view = match state.node.command_json::<CecHealthJson>(cmd).await {
         Ok(h) => classify_health(&h),
         Err(e) => HealthView {
             banner_class: "banner-error",
@@ -548,7 +549,7 @@ pub async fn render_scan(state: &AppState) -> String {
 
 async fn render_scan_result(state: &AppState) -> String {
     let names = state
-        .ipc
+        .node
         .get_config()
         .await
         .ok()
@@ -556,7 +557,7 @@ async fn render_scan_result(state: &AppState) -> String {
         .unwrap_or_else(|| Value::Object(Default::default()));
 
     match state
-        .ipc
+        .node
         .command_json::<Vec<CecDeviceJson>>("cec-scan")
         .await
     {

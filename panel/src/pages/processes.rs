@@ -15,8 +15,8 @@ use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 
 use crate::config;
-use crate::ipc::IpcError;
 use crate::state::{AppState, SharedState};
+use crate::transport::TransportError;
 
 struct UnitView {
     key: &'static str,
@@ -137,9 +137,9 @@ pub async fn render_page(state: &AppState) -> String {
         unit_view(state, "panel", "Panel", config::panel_unit()).await,
     ];
 
-    let active_res = state.ipc.command("hypr-active").await;
-    let clients_res = state.ipc.command("hypr-clients").await;
-    let monitors_res = state.ipc.command("hypr-monitors").await;
+    let active_res = state.node.command("hypr-active").await;
+    let clients_res = state.node.command("hypr-clients").await;
+    let monitors_res = state.node.command("hypr-monitors").await;
     // Reachable if any one of the three succeeded — a single command
     // failing (e.g. a transient IPC hiccup) shouldn't blank the whole
     // section when the others came back fine.
@@ -362,7 +362,7 @@ async fn unit_view(
     }
 }
 
-fn pretty_or_raw(res: Result<String, IpcError>) -> String {
+fn pretty_or_raw(res: Result<String, TransportError>) -> String {
     match res {
         Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
             Ok(v) => serde_json::to_string_pretty(&v).unwrap_or(s),

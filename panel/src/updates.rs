@@ -593,8 +593,8 @@ mod tests {
         ));
         let app: SharedState = Arc::new(AppState {
             cfg: crate::config::AppConfig::default(),
-            ipc: crate::ipc::IpcClient::new(sock),
-            bridge: crate::bridge::BridgeClient::new(None, None),
+            node: Arc::new(crate::ipc::IpcTransport::new(sock)),
+            bridge: Arc::new(crate::bridge::BridgeClient::new(None, None)),
             recovery: crate::exec::Recovery::new(),
             updates: UpdatesState::default(),
         });

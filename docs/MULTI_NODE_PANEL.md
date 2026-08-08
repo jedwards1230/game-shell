@@ -12,7 +12,7 @@ The panel is structurally single-node today, in four separate ways:
 
 | Coupling | Where | Consequence |
 |---|---|---|
-| Transport is concrete | `AppState` holds `IpcClient` + `BridgeClient` + `Recovery` by type; pages call `state.ipc.*` directly | No seam to serve a node that speaks HTTP instead of a Unix socket |
+| ~~Transport is concrete~~ — **fixed**, see §2 | `AppState` now holds `Arc<dyn NodeTransport>` + `Arc<dyn DevBridge>`; pages call `state.node.*` | — |
 | Unix socket is unconditional | `panel/` dials `AF_UNIX` with no `cfg` | The crate **does not build on Windows** (`CONTRIBUTING.md` says so explicitly) |
 | Routes are flat and ungated | 88 routes registered unconditionally in `main.rs`, 68 of them `post` | Every page assumes CEC, controllers, widgets, a QML shell — none of which a sidecar node has |
 | Platform ops are Linux-only | `exec.rs` (systemd), `updates.rs` (pacman) | A Windows node has no systemctl and no `checkupdates` |
@@ -59,26 +59,48 @@ asked, and is confidently wrong.
 behind it is not a gate. Registering an ungated mutating route should be a test
 failure, not a review comment.
 
-### 2. A transport trait replaces the concrete clients
+### 2. A transport trait replaces the concrete clients — **landed**
+
+`panel/src/transport.rs`:
 
 ```rust
 #[async_trait]
 pub trait NodeTransport: Send + Sync {
     async fn capabilities(&self) -> Result<Capabilities, TransportError>;
-    async fn command(&self, cmd: &Command) -> Result<Response, TransportError>;
+    async fn command(&self, line: &str) -> Result<String, TransportError>;
+    async fn command_timeout(&self, line: &str, t: Duration) -> Result<String, TransportError>;
     fn reachability(&self) -> Reachability;
 }
 ```
 
-Two implementations:
+The generic and derived helpers (`command_json::<T>`, `get_config`,
+`set_config`) live on a blanket-implemented `NodeTransportExt`, defined purely
+in terms of `command` — the base trait has to stay object-safe because
+`AppState` holds `Arc<dyn NodeTransport>`. The dev-ops tier gets a parallel
+`DevBridge` trait (`bridge.rs`); it stays separate because it is a fixed set of
+named HTTP operations, not a `command(line)` surface.
 
-- `IpcTransport` — the existing `ipc.rs`, gated `#[cfg(unix)]`.
-- `HttpTransport` — bearer-auth HTTP, wrapping the sidecar's routes.
+The command is a **`&str` line, not a typed `Command`/`Response` pair**, as this
+section originally sketched. No such wire vocabulary exists to reuse — the
+daemon's `Command` enum is private to `daemon/src/protocol.rs` and `protocol/`
+models none of it — so introducing one would be new surface plus a rewrite of
+every call site's error handling, not a refactor. The panel keeps speaking the
+line protocol of `docs/IPC_PROTOCOL.md`.
 
-Pages call `node.command(…)`. `AppState` holds `Box<dyn NodeTransport>` plus an
-optional `PlatformOps`. With `IpcTransport` behind `cfg(unix)`, the panel
-compiles on Windows against `HttpTransport` alone — add Windows to the panel's
-CI matrix, mirroring what `host.yml` already does for three targets.
+Implementations:
+
+- `IpcTransport` — the existing `ipc.rs`, gated `#[cfg(unix)]`. **Landed.**
+- `HttpTransport` — bearer-auth HTTP wrapping the sidecar's routes. **Deferred**
+  until there is a consumer (§4's node switcher).
+
+**Windows is still blocked, and `cfg(unix)` alone does not unblock it.** With no
+`HttpTransport`, a Windows build has *zero* transport implementations and cannot
+construct `AppState` at all — so Windows needs `HttpTransport` **plus** new
+config for a remote base URL. Independently, `config.rs` and `pages/cec.rs` call
+`libc` unconditionally while `libc` is a `cfg(unix)` dependency, `exec.rs` shells
+to `systemctl`/`journalctl`, and most of the test suite binds a
+`tokio::net::UnixListener`. `CONTRIBUTING.md`'s "does not build on Windows"
+therefore remains true, and the panel's CI stays Linux/macOS.
 
 ### 3. Platform ops behind a second trait
 
