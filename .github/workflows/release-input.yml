@@ -144,10 +144,18 @@ jobs:
       # Static libcec (#179) downloads a prebuilt archive (no cmake/libclang); it
       # only needs the udev dev symlink + pkg-config for the link hint, plus
       # libdbus for bluer. Same deps as the rust.yml cec leg.
-      - name: Install CEC + D-Bus build deps
+      #
+      # `jq` is NOT a build dep — it is for the "Verify the stamp landed" step
+      # below. This job runs in the `rust:1-trixie` container, which ships no
+      # jq, while release-host.yml's build jobs run on GitHub runners where jq
+      # is preinstalled. That difference is why the identical verify step passed
+      # for host-v0.7.0 and killed input-v0.3.0 with `jq: command not found`
+      # (exit 127) — after the tag had already been pushed, leaving a tag with
+      # no release behind it.
+      - name: Install CEC + D-Bus build deps (+ jq for the stamp check)
         run: |
           apt-get update && apt-get install -y --no-install-recommends \
-            libudev-dev libdbus-1-dev pkg-config
+            libudev-dev libdbus-1-dev pkg-config jq
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
