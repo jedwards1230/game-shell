@@ -25,11 +25,20 @@
 {% if chrome.recovery_mode %}
 <p class="banner banner-error">
   <strong>Recovery mode.</strong>
+  {% if chrome.refused_reason.is_empty() %}
   The node did not answer the capability handshake when this panel started, so only the
   daemon-independent pages are registered — unit restarts, logs, processes, system updates
   and the wallpaper files. Route registration is fixed at startup, so once the daemon is
   back, <strong>restart the panel</strong> to get the rest: use Restart <code>panel</code>
   on the <a href="/processes">Processes</a> page.
+  {% else %}
+  The node answered but does not speak <code>capabilities</code>
+  (<code>{{ chrome.refused_reason }}</code>), so only the daemon-independent pages are
+  registered. This usually means <strong>the daemon is older than this panel</strong> —
+  restarting the panel will not help. Rebuild and redeploy the daemon (Deploy then Build on
+  the <a href="/dev">Dev</a> page, or <code>scripts/build-daemon.sh</code>), restart it, then
+  restart the panel.
+  {% endif %}
 </p>
 {% endif %}
 {% block content %}{% endblock %}

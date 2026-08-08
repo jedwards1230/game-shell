@@ -84,13 +84,25 @@ async fn main() -> anyhow::Result<()> {
     // registration is static. A failed handshake yields the empty set, which
     // registers the recovery tier and nothing else (see `capabilities`).
     let caps = capabilities::handshake(node.as_ref()).await;
+    // The two failure modes get different journal text for the same reason the
+    // banner does: "restart the panel once the daemon is back" is wrong advice
+    // when the daemon is already back and merely too old to answer.
+    let handshake = match &caps.handshake {
+        capabilities::Handshake::Ok => "ok".to_string(),
+        capabilities::Handshake::Unreachable => {
+            "FAILED, node unreachable (recovery tier only — restart the panel once the \
+             daemon is back)"
+                .to_string()
+        }
+        capabilities::Handshake::Refused(why) => format!(
+            "FAILED, node refused: {why} (recovery tier only — the daemon is up but does \
+             not speak `capabilities`; it is probably older than this panel, so rebuild \
+             and redeploy it rather than restarting the panel)"
+        ),
+    };
     tracing::info!(
         "tv-shell-panel: capabilities — handshake={}, node_id={:?}, features=[{}]",
-        if caps.handshake_ok {
-            "ok"
-        } else {
-            "FAILED (recovery tier only — restart the panel once the daemon is back)"
-        },
+        handshake,
         caps.node_id,
         caps.feature_list(),
     );
@@ -372,8 +384,19 @@ fn build_router(state: SharedState) -> Router {
     };
 
     // Both routes proxy the daemon's bridge `/screenshot`. The daemon emits
-    // `Feature::Screenshot` only on Linux WITH a network bridge configured —
-    // exactly the condition under which this proxy can return a frame.
+    // `Feature::Screenshot` on Linux with EITHER network bridge configured
+    // (`[http]` or `[mcp]`), while this proxy speaks only to the HTTP one — so
+    // an MCP-only node declares the capability and registers these routes while
+    // the panel has no bridge to call. That is a handled degradation, not a
+    // dangling route: `BridgeClient` with no base URL returns
+    // `BridgeError::NotConfigured` and `pages::dev` renders the honest
+    // "bridge not configured" message. Deliberately NOT additionally gated on
+    // `http_bridge_base.is_some()`: the capability is the NODE's statement
+    // about itself, and folding a local config check into it would make the
+    // route set depend on two different kinds of fact. `dev.html` already
+    // carries `bridge_configured` for the UI half.
+    //
+    // No htpc-1 impact either way — it sets `[http].bind`.
     let app = if caps.allows(Gate::Screenshot) {
         app.route("/dev/screenshot", get(pages::dev::screenshot_png))
             .route(
@@ -409,10 +432,15 @@ fn build_router(state: SharedState) -> Router {
     // are all deliberately NOT here.
     //
     // Reboot/suspend and the pacman apply are the PANEL's own exec tier, so
-    // they carry no capability gate. `/tools/raw` deliberately keeps none
-    // either: it is the arbitrary-IPC escape hatch, and an operator who has
-    // opted into it should keep it when a handshake failed but the daemon has
-    // since come back.
+    // they carry no capability gate.
+    //
+    // `/tools/raw` keeps none either, but the honest statement is narrower than
+    // it looks: with the handshake failed, `/tools` — the only UI that drives
+    // it — is gone, so what survives is a curl-only escape hatch. It is kept
+    // ungated because `allow_dangerous` is already the operator's explicit
+    // opt-in to an arbitrary-command surface and narrowing it would not remove
+    // a capability lie (the route reports the node's own error when the node is
+    // down). It is NOT kept because the UI still works, which it does not.
     let app = if allow_dangerous {
         app.route("/dev/reboot", post(pages::dev::reboot))
             .route("/dev/suspend", post(pages::dev::suspend))

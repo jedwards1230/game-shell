@@ -268,8 +268,12 @@ saying so, and the resolved set is logged at `info!` beside the
 `bind`/`auth`/`allow_dangerous` line:
 
 ```
-tv-shell-panel: capabilities — handshake=ok, node_id="htpc-1", features=[cec,controllers,dev_deploy,logs,screenshot,settings_store,shell_lifecycle,sleep,web_apps,widgets]
+tv-shell-panel: capabilities — handshake=ok, node_id="htpc-1", features=[cec,controllers,widgets,web_apps,settings_store,shell_lifecycle,screenshot,sleep,dev_deploy,logs]
 ```
+
+(The order is `Feature`'s derived `Ord`, i.e. **declaration** order — not
+alphabetical. `BTreeSet<Feature>` therefore serializes byte-stably but not
+sorted by name.)
 
 **A capability change needs a panel restart.** Registration is fixed at startup.
 That is sound because the node's set is static too — `features()` derives it from
@@ -277,6 +281,12 @@ compile-time cfgs (cargo features, `target_os`) plus startup config
 (`[http]`/`[mcp]` binds), and health is deliberately *not* in it, so a wedged CEC
 adapter does not drop `cec` and nothing transient can flip a gate. The one-click
 recovery is the Processes page's own panel-restart button.
+
+**Deployment dependency.** The panel now requires the deployed daemon to be at
+or past the commit that added the `capabilities` IPC command. An older daemon
+answers, but not with a capability set — the panel fails closed to five pages and
+says so, naming version skew rather than telling the operator to wait for a
+daemon that is already running. Deploy the daemon first, or deploy both together.
 
 The handshake itself is bounded: 4 attempts on a 1.2s budget each, 1.5s apart
 (~9.3s worst case), retried **only** while the node is unreachable — the
@@ -320,8 +330,11 @@ which bought nothing — they drive the *same* two systemd units that the ungate
 `/processes/restart/{key}` does, so the gate only hid one door to the same room.
 `POST /tools/raw` is in the dangerous set because it drives the entire IPC
 vocabulary, making it an arbitrary-command escape hatch. It carries **no**
-capability gate on top: it is the escape hatch, and an operator who opted into it
-should keep it when a handshake failed but the daemon has since come back.
+capability gate on top — `allow_dangerous` is already an explicit opt-in to an
+arbitrary-command surface, and gating it further would not remove a capability
+lie (it reports the node's own error when the node is down). Note the scope
+honestly: with the handshake failed, `/tools` is gone too, so what survives is
+reachable by `curl`, not from the UI.
 
 `/dev/deploy` and `/dev/build` are the one intersection — they need
 `allow_dangerous` **and** the node's `dev_deploy` capability, since they proxy

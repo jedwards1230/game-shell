@@ -73,110 +73,141 @@ const ATTEMPTS: usize = 4;
 /// panel unit starts before the daemon's socket exists.
 const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
-/// Which gate a panel surface — a route-registration block or a nav item —
-/// sits behind.
+/// Declare the [`Gate`] enum, its [`Gate::ALL`] list, its [`Gate::ident`] and
+/// its [`Gate::feature`] mapping from **one** list of variants.
 ///
-/// One value per registration block in `crate::build_router`, and one per nav
-/// item, so the two cannot drift: both ask [`CapabilitySnapshot::allows`].
-///
-/// `Copy` on purpose. [`Feature`] is not (`Feature::Unknown` carries a
-/// `String`), but no gate can name an unknown feature — the panel only gates on
-/// surfaces it actually implements — so the mapping is a small closed set.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Gate {
-    /// Always available: panel-local exec, panel-local filesystem, or static.
-    Recovery,
-    /// Needs a node that answered the capability handshake, but no specific
-    /// feature.
-    Node,
-    /// [`Feature::Cec`] — HDMI-CEC control.
-    Cec,
-    /// [`Feature::Controllers`] — the gamepad fleet.
-    Controllers,
-    /// [`Feature::Widgets`] — the per-widget config subtree.
-    Widgets,
-    /// [`Feature::SettingsStore`] — `get-config` / `set-config`.
-    SettingsStore,
-    /// [`Feature::WebApps`] — the daemon-owned web-app registry.
-    WebApps,
-    /// [`Feature::Screenshot`] — a frame of the live session.
-    Screenshot,
-    /// [`Feature::DevDeploy`] — pull a ref and rebuild on-device.
-    DevDeploy,
+/// This exists for exactly one reason: `ALL` must be exhaustive, and a
+/// hand-written `const ALL` is not. Adding a variant forces new arms in the
+/// `match`es (the compiler checks those), but nothing forces the const — and
+/// **no test that iterates `ALL` can detect a variant missing from `ALL`**,
+/// because the missing variant is precisely what it never visits. A witness
+/// `index()` match plus an in-bounds assertion does not close it either; that
+/// was tried and stayed green. Generating both from the same list is what makes
+/// the exhaustiveness claim true rather than merely asserted.
+macro_rules! gates {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident => $feature:expr, )+
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum $name {
+            $( $(#[$variant_meta])* $variant, )+
+        }
+
+        impl $name {
+            /// Every gate, in declaration order.
+            ///
+            /// Generated from the same list as the enum itself, so it cannot
+            /// omit a variant. `crate::tests`'s `main.rs` parser resolves a
+            /// `Gate::<Ident>` out of a registration condition through it.
+            ///
+            /// Test-only, and `#[cfg(test)]` rather than `#[allow(dead_code)]`
+            /// because that consumer exists NOW — there is no later milestone
+            /// to keep it alive for.
+            #[cfg(test)]
+            pub const ALL: &'static [$name] = &[ $( $name::$variant, )+ ];
+
+            /// The Rust identifier of this variant — the literal text that
+            /// appears in `main.rs` as `Gate::<ident>`.
+            #[cfg(test)]
+            pub fn ident(self) -> &'static str {
+                match self { $( $name::$variant => stringify!($variant), )+ }
+            }
+
+            /// The declared [`Feature`] this gate requires, or `None` for the
+            /// two non-feature tiers ([`Gate::Recovery`], [`Gate::Node`]).
+            ///
+            /// **Every feature named here must be one
+            /// `daemon/src/ipc.rs::features()` actually emits.** That function
+            /// deliberately never emits `wallpapers`, `processes`,
+            /// `system_updates`, `steam_library` or `game_launch` — the daemon
+            /// serves none of them (they belong to QML, to the panel's own exec
+            /// tier, or to the sidecar it merely proxies). Gating
+            /// `/media/wallpaper/*` on `Feature::Wallpapers` or `/processes*`
+            /// on `Feature::Processes` would therefore delete working pages
+            /// from a live node. Those routes are recovery tier precisely
+            /// because the panel serves them itself.
+            pub fn feature(self) -> Option<Feature> {
+                match self { $( $name::$variant => $feature, )+ }
+            }
+        }
+    };
 }
 
-impl Gate {
-    /// Every gate, in declaration order.
+gates! {
+    /// Which gate a panel surface — a route-registration block or a nav item —
+    /// sits behind.
     ///
-    /// Exhaustive by construction (`gates_are_exhaustive_and_idents_are_unique`
-    /// fails if a variant is added without landing here), which is what lets
-    /// `crate::tests`'s `main.rs` parser resolve a `Gate::<Ident>` out of a
-    /// registration condition without a second, drift-prone table.
+    /// One value per registration block in `crate::build_router`, and one per
+    /// nav item, so the two cannot drift: both ask
+    /// [`CapabilitySnapshot::allows`].
     ///
-    /// Test-only, and `#[cfg(test)]` rather than `#[allow(dead_code)]` because
-    /// that consumer exists NOW — there is no later milestone to keep it alive
-    /// for.
-    #[cfg(test)]
-    pub const ALL: &'static [Gate] = &[
-        Gate::Recovery,
-        Gate::Node,
-        Gate::Cec,
-        Gate::Controllers,
-        Gate::Widgets,
-        Gate::SettingsStore,
-        Gate::WebApps,
-        Gate::Screenshot,
-        Gate::DevDeploy,
-    ];
-
-    /// The Rust identifier of this variant — the literal text that appears in
-    /// `main.rs` as `Gate::<ident>`.
-    #[cfg(test)]
-    pub fn ident(self) -> &'static str {
-        match self {
-            Gate::Recovery => "Recovery",
-            Gate::Node => "Node",
-            Gate::Cec => "Cec",
-            Gate::Controllers => "Controllers",
-            Gate::Widgets => "Widgets",
-            Gate::SettingsStore => "SettingsStore",
-            Gate::WebApps => "WebApps",
-            Gate::Screenshot => "Screenshot",
-            Gate::DevDeploy => "DevDeploy",
-        }
+    /// `Copy` on purpose. [`Feature`] is not (`Feature::Unknown` carries a
+    /// `String`), but no gate can name an unknown feature — the panel only
+    /// gates on surfaces it actually implements — so the mapping is a small
+    /// closed set.
+    pub enum Gate {
+        /// Always available: panel-local exec, panel-local filesystem, or static.
+        Recovery => None,
+        /// Needs a node that answered the capability handshake, but no specific
+        /// feature.
+        Node => None,
+        /// [`Feature::Cec`] — HDMI-CEC control.
+        Cec => Some(Feature::Cec),
+        /// [`Feature::Controllers`] — the gamepad fleet.
+        Controllers => Some(Feature::Controllers),
+        /// [`Feature::Widgets`] — the per-widget config subtree.
+        Widgets => Some(Feature::Widgets),
+        /// [`Feature::SettingsStore`] — `get-config` / `set-config`.
+        SettingsStore => Some(Feature::SettingsStore),
+        /// [`Feature::WebApps`] — the daemon-owned web-app registry.
+        WebApps => Some(Feature::WebApps),
+        /// [`Feature::Screenshot`] — a frame of the live session.
+        Screenshot => Some(Feature::Screenshot),
+        /// [`Feature::DevDeploy`] — pull a ref and rebuild on-device.
+        DevDeploy => Some(Feature::DevDeploy),
     }
+}
 
-    /// The declared [`Feature`] this gate requires, or `None` for the two
-    /// non-feature tiers ([`Gate::Recovery`], [`Gate::Node`]).
-    ///
-    /// **Every feature named here must be one `daemon/src/ipc.rs::features()`
-    /// actually emits.** That function deliberately never emits `wallpapers`,
-    /// `processes`, `system_updates`, `steam_library` or `game_launch` — the
-    /// daemon serves none of them (they belong to QML, to the panel's own exec
-    /// tier, or to the sidecar it merely proxies). Gating `/media/wallpaper/*`
-    /// on `Feature::Wallpapers` or `/processes*` on `Feature::Processes` would
-    /// therefore delete working pages from a live node. Those routes are
-    /// recovery tier precisely because the panel serves them itself.
-    pub fn feature(self) -> Option<Feature> {
-        Some(match self {
-            Gate::Recovery | Gate::Node => return None,
-            Gate::Cec => Feature::Cec,
-            Gate::Controllers => Feature::Controllers,
-            Gate::Widgets => Feature::Widgets,
-            Gate::SettingsStore => Feature::SettingsStore,
-            Gate::WebApps => Feature::WebApps,
-            Gate::Screenshot => Feature::Screenshot,
-            Gate::DevDeploy => Feature::DevDeploy,
-        })
+/// How the startup handshake ended.
+///
+/// The two failure modes need **different operator advice**, which a bare
+/// "did it work" bool cannot carry:
+///
+/// - [`Handshake::Unreachable`] — the daemon was down. It will come back, and
+///   restarting the panel then is the fix.
+/// - [`Handshake::Refused`] — the daemon is UP and answered, it just does not
+///   speak `capabilities`. The realistic trigger is a panel binary newer than
+///   the on-device daemon. Telling that operator to "restart the panel once the
+///   daemon is back" is advice about a daemon that is already back, and it
+///   would stay wrong forever.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Handshake {
+    /// The node answered with a capability set.
+    Ok,
+    /// Nothing answered within the retry window.
+    Unreachable,
+    /// The node answered, but not with a capability set — carries its own
+    /// message (an `error:` reply, or a parse failure).
+    Refused(String),
+}
+
+impl Handshake {
+    /// Whether a capability set was actually received.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Handshake::Ok)
     }
 }
 
 /// What the node said it can do, resolved once at startup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilitySnapshot {
-    /// Whether the node answered the handshake at all. `false` puts the panel
+    /// How the handshake ended. Anything but [`Handshake::Ok`] puts the panel
     /// in recovery mode: only [`Gate::Recovery`] surfaces are registered.
-    pub handshake_ok: bool,
+    pub handshake: Handshake,
     /// The node's declared identity, for display. Empty when the handshake
     /// failed.
     pub node_id: String,
@@ -185,10 +216,21 @@ pub struct CapabilitySnapshot {
 }
 
 impl CapabilitySnapshot {
-    /// The fail-closed snapshot: no handshake, no features, recovery tier only.
+    /// The fail-closed snapshot for a node that never answered.
     pub fn unreachable() -> Self {
+        Self::failed(Handshake::Unreachable)
+    }
+
+    /// The fail-closed snapshot for a node that answered with something other
+    /// than a capability set. Same empty feature set — only the operator advice
+    /// differs.
+    pub fn refused(why: impl Into<String>) -> Self {
+        Self::failed(Handshake::Refused(why.into()))
+    }
+
+    fn failed(handshake: Handshake) -> Self {
         Self {
-            handshake_ok: false,
+            handshake,
             node_id: String::new(),
             features: BTreeSet::new(),
         }
@@ -202,7 +244,7 @@ impl CapabilitySnapshot {
     #[cfg(test)]
     pub fn fully_capable() -> Self {
         Self {
-            handshake_ok: true,
+            handshake: Handshake::Ok,
             node_id: "test-node".to_string(),
             features: Gate::ALL.iter().filter_map(|g| g.feature()).collect(),
         }
@@ -215,10 +257,10 @@ impl CapabilitySnapshot {
     pub fn allows(&self, gate: Gate) -> bool {
         match gate {
             Gate::Recovery => true,
-            Gate::Node => self.handshake_ok,
+            Gate::Node => self.handshake.is_ok(),
             other => other
                 .feature()
-                .is_some_and(|f| self.handshake_ok && self.features.contains(&f)),
+                .is_some_and(|f| self.handshake.is_ok() && self.features.contains(&f)),
         }
     }
 
@@ -236,7 +278,7 @@ impl CapabilitySnapshot {
 impl From<Capabilities> for CapabilitySnapshot {
     fn from(caps: Capabilities) -> Self {
         Self {
-            handshake_ok: true,
+            handshake: Handshake::Ok,
             node_id: caps.node_id,
             features: caps.features,
         }
@@ -259,7 +301,7 @@ pub async fn handshake(node: &dyn NodeTransport) -> CapabilitySnapshot {
                     "capability handshake refused by the node ({e}) — \
                      serving the recovery tier only"
                 );
-                return CapabilitySnapshot::unreachable();
+                return CapabilitySnapshot::refused(e.to_string());
             }
             Ok(Err(e)) => tracing::warn!("capability handshake attempt {attempt}/{ATTEMPTS}: {e}"),
             Err(_) => tracing::warn!(
@@ -362,16 +404,23 @@ pub const NAV: &[NavItem] = &[
 /// The chrome every full page template carries: which nav entry is current,
 /// which links exist on this node, and whether the panel is in recovery mode.
 ///
-/// One struct rather than three template fields so adding a fourth piece of
+/// One struct rather than four template fields so adding a fifth piece of
 /// chrome does not touch ten page structs again.
 pub struct Chrome {
     /// The current page's [`NavItem::key`].
     pub active: &'static str,
     /// The links this node's capability set supports.
     pub nav: Vec<&'static NavItem>,
-    /// The handshake failed — the panel is serving the recovery tier only and
-    /// needs a restart once the daemon is back. Rendered as a banner.
+    /// The handshake failed — the panel is serving the recovery tier only.
+    /// Rendered as a banner.
     pub recovery_mode: bool,
+    /// The node answered but does not speak `capabilities`, and this is what it
+    /// said. Empty unless the handshake was [`Handshake::Refused`].
+    ///
+    /// Separate from `recovery_mode` because the two need opposite advice:
+    /// "wait for the daemon and restart the panel" is actively wrong when the
+    /// daemon is already up and simply too old.
+    pub refused_reason: String,
 }
 
 impl Chrome {
@@ -380,7 +429,11 @@ impl Chrome {
         Self {
             active,
             nav: NAV.iter().filter(|i| caps.allows(i.gate)).collect(),
-            recovery_mode: !caps.handshake_ok,
+            recovery_mode: !caps.handshake.is_ok(),
+            refused_reason: match &caps.handshake {
+                Handshake::Refused(why) => why.clone(),
+                _ => String::new(),
+            },
         }
     }
 }
@@ -493,7 +546,7 @@ mod tests {
     async fn handshake_retries_an_unreachable_node_within_its_window() {
         let node = FlakyNode::unreachable_for(2);
         let snap = handshake(&node).await;
-        assert!(snap.handshake_ok, "the third attempt answered");
+        assert!(snap.handshake.is_ok(), "the third attempt answered");
         assert!(snap.allows(Gate::Cec));
         assert_eq!(node.calls(), 3);
     }
@@ -504,13 +557,27 @@ mod tests {
     async fn handshake_gives_up_and_falls_back_to_recovery_only() {
         let started = tokio::time::Instant::now();
         let snap = handshake(&DeadNode).await;
-        assert!(!snap.handshake_ok);
+        assert_eq!(snap.handshake, Handshake::Unreachable);
         assert!(snap.features.is_empty(), "must not fail open");
         assert!(snap.allows(Gate::Recovery));
         assert!(!snap.allows(Gate::Node));
 
         let elapsed = started.elapsed();
         let ceiling = ATTEMPT_TIMEOUT * ATTEMPTS as u32 + RETRY_DELAY * (ATTEMPTS as u32 - 1);
+
+        // ABSOLUTE pin first. `ceiling` is derived from the very constants this
+        // test guards, so on its own it is satisfied by ANY window — raising
+        // ATTEMPTS to 100 would keep it green while startup grew to ~4 minutes
+        // and `docs/PANEL.md`'s documented "~9.3s worst case" quietly became a
+        // lie. This is the startup path: the panel is not answering until it
+        // returns.
+        assert!(
+            ceiling <= Duration::from_secs(10),
+            "the capability handshake's worst-case window grew to {ceiling:?}, past \
+             the 10s bound documented in docs/PANEL.md — the panel does not serve \
+             until this returns, so widening it is a deployment decision, not a \
+             constant tweak"
+        );
         assert!(
             elapsed <= ceiling,
             "handshake ran {elapsed:?}, past its own {ceiling:?} bound"
@@ -524,39 +591,52 @@ mod tests {
     async fn handshake_does_not_retry_a_node_that_refused() {
         let node = FlakyNode::refusing();
         let snap = handshake(&node).await;
-        assert!(!snap.handshake_ok);
+        assert!(!snap.handshake.is_ok());
         assert_eq!(node.calls(), 1, "a refusal is an answer — do not retry it");
+
+        // The refusal must survive as a REASON, not collapse into
+        // "unreachable" — the banner's advice depends on telling them apart.
+        match &snap.handshake {
+            Handshake::Refused(why) => assert!(
+                why.contains("unknown command"),
+                "the node's own message must reach the operator: {why}"
+            ),
+            other => panic!("a refusal must not be reported as {other:?}"),
+        }
+        let chrome = Chrome::new(&snap, "dashboard");
+        assert!(chrome.recovery_mode);
+        assert!(
+            !chrome.refused_reason.is_empty(),
+            "the refusal banner has nothing to show"
+        );
     }
 
     fn snapshot(features: &[Feature]) -> CapabilitySnapshot {
         CapabilitySnapshot {
-            handshake_ok: true,
+            handshake: Handshake::Ok,
             node_id: "htpc-1".to_string(),
             features: features.iter().cloned().collect(),
         }
     }
 
-    /// [`Gate::ALL`] really is every variant — the `main.rs` parser resolves
-    /// `Gate::<Ident>` through it, so a variant missing here would be a gate
-    /// the parser silently cannot attribute.
+    /// [`Gate::ALL`] is generated from the enum's own variant list by the
+    /// `gates!` macro, so **exhaustiveness is structural, not asserted** —
+    /// there is no way to add a variant and leave `ALL` behind.
+    ///
+    /// What is still worth pinning is that `ident()` is injective: the
+    /// `main.rs` parser resolves a registration condition by matching the
+    /// ident text, so two gates sharing one would make it silently attribute
+    /// routes to the wrong tier. (`stringify!` makes a collision impossible
+    /// while the idents come from variant names, but that is the macro's
+    /// doing, and this test is what notices if the macro stops doing it.)
     #[test]
-    fn gates_are_exhaustive_and_idents_are_unique() {
-        // Exhaustiveness: every variant must be constructible from its own
-        // ident via ALL. The match below is the compiler's half — adding a
-        // variant fails to compile until it is handled — and the length check
-        // is the half that catches a variant handled in `ident()` but never
-        // listed in ALL.
+    fn gate_idents_are_unique_and_match_their_variant_names() {
         let idents: BTreeSet<&str> = Gate::ALL.iter().map(|g| g.ident()).collect();
         assert_eq!(idents.len(), Gate::ALL.len(), "duplicate Gate::ident()");
-        for gate in Gate::ALL {
-            let round = Gate::ALL
-                .iter()
-                .find(|g| g.ident() == gate.ident())
-                .copied()
-                .expect("every gate resolves from its own ident");
-            assert_eq!(round, *gate);
-        }
-        assert_eq!(Gate::ALL.len(), 9, "a Gate variant was added or removed");
+        assert!(Gate::ALL.contains(&Gate::Recovery));
+        assert_eq!(Gate::Recovery.ident(), "Recovery");
+        assert_eq!(Gate::SettingsStore.ident(), "SettingsStore");
+        assert_eq!(Gate::ALL.first(), Some(&Gate::Recovery));
     }
 
     /// Every gate that names a feature names one the daemon can actually emit.
@@ -607,7 +687,7 @@ mod tests {
     #[test]
     fn features_without_a_handshake_ungate_nothing() {
         let lying = CapabilitySnapshot {
-            handshake_ok: false,
+            handshake: Handshake::Unreachable,
             node_id: String::new(),
             features: [Feature::Cec, Feature::Widgets].into_iter().collect(),
         };
@@ -651,6 +731,19 @@ mod tests {
         let hrefs: Vec<&str> = down.nav.iter().map(|i| i.href).collect();
         assert_eq!(hrefs, vec!["/", "/processes", "/media", "/dev", "/logs"]);
         assert!(down.recovery_mode);
+        assert!(
+            down.refused_reason.is_empty(),
+            "an unreachable node did not refuse anything"
+        );
+
+        // A refusal gates identically but carries the reason that changes the
+        // advice.
+        let refused = Chrome::new(&CapabilitySnapshot::refused("unknown command"), "dashboard");
+        assert_eq!(
+            refused.nav.iter().map(|i| i.href).collect::<Vec<_>>(),
+            hrefs
+        );
+        assert_eq!(refused.refused_reason, "unknown command");
     }
 
     #[test]
@@ -690,7 +783,7 @@ mod tests {
             features: [Feature::Cec].into_iter().collect(),
         };
         let snap: CapabilitySnapshot = caps.into();
-        assert!(snap.handshake_ok);
+        assert!(snap.handshake.is_ok());
         assert_eq!(snap.node_id, "htpc-1");
         assert!(snap.allows(Gate::Cec));
     }

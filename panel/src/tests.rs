@@ -2151,6 +2151,14 @@ fn route_table_matches_main_rs_declarations() {
 ///
 /// `docs/MULTI_NODE_PANEL.md`: *"Registering an ungated mutating route should
 /// be a test failure, not a review comment."* This is that failure.
+///
+/// **Known limit — it keys on the DECLARED METHOD, not on what the handler
+/// does.** A mutating handler registered as `get(..)` in the unconditional
+/// chain passes this gate untouched. There is no such route today (every
+/// unconditional `get` renders or reads), and axum gives no way to ask a
+/// handler whether it mutates, so the honest coverage statement is "no ungated
+/// `post`" rather than "no ungated mutation". A reviewer still owns the
+/// method choice; this owns everything downstream of it.
 #[test]
 fn unconditional_mutating_routes_are_an_explicit_allowlist() {
     let declared = parse_declared_routes(include_str!("main.rs"));
@@ -2314,7 +2322,7 @@ fn htpc_1_features() -> BTreeSet<Feature> {
 /// A successful handshake declaring `features`.
 fn caps_with(features: BTreeSet<Feature>) -> CapabilitySnapshot {
     CapabilitySnapshot {
-        handshake_ok: true,
+        handshake: crate::capabilities::Handshake::Ok,
         node_id: "htpc-1".to_string(),
         features,
     }
@@ -2748,6 +2756,71 @@ fn replies_for_tiles() -> std::collections::HashMap<&'static str, &'static str> 
             r#"[{"id":"a","index":0,"name":"Pad","grabbed":true}]"#,
         ),
     ])
+}
+
+/// The recovery banner must give the RIGHT advice for each failure mode.
+///
+/// Both modes gate identically (empty set, recovery tier only), but the
+/// operator instruction is opposite. The realistic refusal trigger is a panel
+/// binary newer than the on-device daemon: telling that operator to "restart
+/// the panel once the daemon is back" describes a daemon that is already back,
+/// and it would stay wrong forever.
+#[tokio::test]
+async fn the_recovery_banner_distinguishes_a_down_node_from_an_old_one() {
+    let c = client();
+
+    let down = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        CapabilitySnapshot::unreachable(),
+    ))
+    .await;
+    let body = c
+        .get(format!("{down}/dashboard"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Recovery mode"), "{body}");
+    assert!(
+        body.contains("once the daemon is\n  back") || body.contains("once the daemon is back"),
+        "an unreachable node's advice is to wait and restart the panel: {body}"
+    );
+    assert!(
+        !body.contains("older than this panel"),
+        "an unreachable node is not a version-skew problem: {body}"
+    );
+
+    let refused = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        CapabilitySnapshot::refused("unknown command"),
+    ))
+    .await;
+    let body = c
+        .get(format!("{refused}/dashboard"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Recovery mode"), "{body}");
+    assert!(
+        body.contains("older than this panel"),
+        "a refusal must be diagnosed as version skew: {body}"
+    );
+    assert!(
+        body.contains("restarting the panel will not help")
+            || body.contains("restarting the panel will not\n  help"),
+        "the refusal banner must contradict the restart advice, not repeat it: {body}"
+    );
+    assert!(
+        body.contains("unknown command"),
+        "the node's own message must reach the operator: {body}"
+    );
 }
 
 /// **The nav/route drift gate** (the half `allows()` alone does not give).
