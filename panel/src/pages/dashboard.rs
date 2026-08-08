@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::config;
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
@@ -184,14 +185,14 @@ struct DashboardTilesTemplate {
 /// `status`/`build-info`/`sys-status`/`sys-metrics`/`storage-status`/
 /// `get-pads`, and exec for the three systemd unit states. When the daemon
 /// is unreachable (the `status` probe fails with
-/// [`crate::ipc::IpcError::is_unreachable`]), renders a degraded view that
+/// [`crate::transport::TransportError::is_unreachable`]), renders a degraded view that
 /// still shows unit states and a link to `/dev` — never a 500.
 pub async fn render_tiles(state: &AppState) -> String {
     let daemon_unit = unit_state_view(state.recovery.unit_active(&config::daemon_unit()).await);
     let shell_unit = unit_state_view(state.recovery.unit_active(&config::shell_unit()).await);
     let panel_unit = unit_state_view(state.recovery.unit_active(&config::panel_unit()).await);
 
-    let status = state.ipc.command("status").await;
+    let status = state.node.command("status").await;
     let reachable = match &status {
         Ok(_) => true,
         Err(e) => !e.is_unreachable(),
@@ -230,7 +231,7 @@ pub async fn render_tiles(state: &AppState) -> String {
         }
     } else {
         let build: BuildInfo = state
-            .ipc
+            .node
             .command_json("build-info")
             .await
             .unwrap_or_else(|_| BuildInfo {
@@ -239,7 +240,7 @@ pub async fn render_tiles(state: &AppState) -> String {
                 branch: "unknown".into(),
             });
         let sys: SysStatus = state
-            .ipc
+            .node
             .command_json("sys-status")
             .await
             .unwrap_or_else(|_| SysStatus {
@@ -249,16 +250,20 @@ pub async fn render_tiles(state: &AppState) -> String {
                 uptime: "unknown".into(),
             });
         let metrics: SysMetrics = state
-            .ipc
+            .node
             .command_json("sys-metrics")
             .await
             .unwrap_or_default();
         let mounts: Vec<MountEntry> = state
-            .ipc
+            .node
             .command_json("storage-status")
             .await
             .unwrap_or_default();
-        let pads: Vec<Pad> = state.ipc.command_json("get-pads").await.unwrap_or_default();
+        let pads: Vec<Pad> = state
+            .node
+            .command_json("get-pads")
+            .await
+            .unwrap_or_default();
 
         // `reachable` is only true when `status` itself returned Ok, so
         // `status_text` here is always the raw `<connection>:<grab>` token,

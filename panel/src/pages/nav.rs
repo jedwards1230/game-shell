@@ -11,7 +11,7 @@ use axum::response::{Html, IntoResponse};
 use crate::state::{AppState, SharedState};
 
 /// Timeout for the nav dot's `status` probe — deliberately much shorter
-/// than [`crate::ipc::IpcClient`]'s 3s default so a hung/unreachable daemon
+/// than [`crate::ipc::IpcTransport`]'s 3s default so a hung/unreachable daemon
 /// can never make the ~10s polling loop pile up requests.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
@@ -26,7 +26,7 @@ pub async fn daemon_status_dot(State(state): State<SharedState>) -> impl IntoRes
 /// slow or break page navigation.
 pub async fn render_dot(state: &AppState) -> String {
     let reachable = state
-        .ipc
+        .node
         .command_timeout("status", PROBE_TIMEOUT)
         .await
         .is_ok();

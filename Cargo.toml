@@ -26,6 +26,10 @@ tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
+# Object-safe async traits — the panel's `NodeTransport` is held as
+# `Arc<dyn NodeTransport>`, and native `async fn` in traits is not yet
+# dyn-compatible. Already in the lockfile as a transitive dep.
+async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

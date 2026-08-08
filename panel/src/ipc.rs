@@ -1,4 +1,5 @@
-//! Async Unix-socket IPC client — the PRIMARY data tier for the panel.
+//! [`IpcTransport`] — the Unix-socket [`NodeTransport`] implementation, and
+//! the PRIMARY data tier for the panel's local node.
 //!
 //! Wire protocol (authoritative: `daemon/src/ipc.rs`): the client writes ONE
 //! command line terminated by `\n` (e.g. `sys-status\n`); the daemon replies
@@ -7,60 +8,34 @@
 //! `disconnected:released` for `status`, `unknown`, or `error:<message>`).
 //! Requests are capped at 4096 bytes by the daemon; replies can be large, so
 //! this client reads until the first `\n` rather than using a fixed buffer.
+//!
+//! The module is `cfg(unix)`-gated because `AF_UNIX` is the whole premise. A
+//! Windows panel would need `HttpTransport` (and a remote-node config surface)
+//! instead — see `docs/MULTI_NODE_PANEL.md`; nothing else here is portable
+//! today anyway (`config.rs` calls `libc::getuid`, `exec.rs` shells to
+//! `systemctl`).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tv_shell_protocol::Capabilities;
+
+use crate::transport::{NodeTransport, NodeTransportExt, Reachability, TransportError};
 
 /// Default per-request timeout (connect + write + read-one-line).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Errors a single IPC command can produce.
-#[derive(Debug)]
-pub enum IpcError {
-    /// The socket could not be reached (connect refused, socket file
-    /// missing, or the request/read timed out).
-    Unreachable,
-    /// The request timed out.
-    Timeout,
-    /// The daemon replied `error:<message>` — `<message>` is carried here
-    /// (the `error:` prefix is stripped).
-    Command(String),
-    /// The reply could not be parsed as the expected type.
-    Parse(String),
-}
-
-impl IpcError {
-    /// `true` for the two "daemon is not there" variants (`Unreachable` and
-    /// `Timeout`), letting callers render a single degraded state for both.
-    pub fn is_unreachable(&self) -> bool {
-        matches!(self, IpcError::Unreachable | IpcError::Timeout)
-    }
-}
-
-impl std::fmt::Display for IpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IpcError::Unreachable => write!(f, "daemon unreachable"),
-            IpcError::Timeout => write!(f, "daemon request timed out"),
-            IpcError::Command(msg) => write!(f, "{msg}"),
-            IpcError::Parse(msg) => write!(f, "failed to parse daemon reply: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for IpcError {}
-
-/// A client for the daemon's Unix-socket IPC protocol.
-pub struct IpcClient {
+/// A [`NodeTransport`] speaking the daemon's Unix-socket IPC protocol.
+pub struct IpcTransport {
     sock: PathBuf,
     timeout: Duration,
 }
 
-impl IpcClient {
-    /// Build a client for the socket at `sock`, using [`DEFAULT_TIMEOUT`].
+impl IpcTransport {
+    /// Build a transport for the socket at `sock`, using [`DEFAULT_TIMEOUT`].
     pub fn new(sock: PathBuf) -> Self {
         Self {
             sock,
@@ -68,88 +43,63 @@ impl IpcClient {
         }
     }
 
-    /// Send `line` (without a trailing `\n` — one is appended) and return the
-    /// daemon's reply line, with the `error:` prefix translated to
-    /// `Err(IpcError::Command(_))`.
-    pub async fn command(&self, line: &str) -> Result<String, IpcError> {
-        tokio::time::timeout(self.timeout, self.command_inner(line))
-            .await
-            .unwrap_or(Err(IpcError::Timeout))
-    }
-
-    async fn command_inner(&self, line: &str) -> Result<String, IpcError> {
+    async fn command_inner(&self, line: &str) -> Result<String, TransportError> {
         let mut stream = UnixStream::connect(&self.sock)
             .await
-            .map_err(|_| IpcError::Unreachable)?;
+            .map_err(|_| TransportError::Unreachable)?;
         stream
             .write_all(format!("{line}\n").as_bytes())
             .await
-            .map_err(|_| IpcError::Unreachable)?;
+            .map_err(|_| TransportError::Unreachable)?;
 
         let mut reader = BufReader::new(stream);
         let mut reply = String::new();
         let n = reader
             .read_line(&mut reply)
             .await
-            .map_err(|_| IpcError::Unreachable)?;
+            .map_err(|_| TransportError::Unreachable)?;
         if n == 0 {
             // EOF before any data — the daemon closed the connection.
-            return Err(IpcError::Unreachable);
+            return Err(TransportError::Unreachable);
         }
         let reply = reply.trim_end().to_string();
         if let Some(msg) = reply.strip_prefix("error:") {
-            return Err(IpcError::Command(msg.to_string()));
+            return Err(TransportError::Command(msg.to_string()));
         }
         Ok(reply)
     }
+}
 
-    /// Like [`command`](Self::command), but parse the reply as JSON into `T`.
-    pub async fn command_json<T: serde::de::DeserializeOwned>(
+#[async_trait]
+impl NodeTransport for IpcTransport {
+    /// The daemon's `capabilities` handshake — a single-line JSON reply, so
+    /// this is exactly a `command_json` over the same socket as everything
+    /// else (`docs/IPC_PROTOCOL.md` § `capabilities`).
+    async fn capabilities(&self) -> Result<Capabilities, TransportError> {
+        self.command_json::<Capabilities>("capabilities").await
+    }
+
+    /// Send `line` (without a trailing `\n` — one is appended) and return the
+    /// daemon's reply line, with the `error:` prefix translated to
+    /// `Err(TransportError::Command(_))`.
+    async fn command(&self, line: &str) -> Result<String, TransportError> {
+        tokio::time::timeout(self.timeout, self.command_inner(line))
+            .await
+            .unwrap_or(Err(TransportError::Timeout))
+    }
+
+    async fn command_timeout(
         &self,
         line: &str,
-    ) -> Result<T, IpcError> {
-        let reply = self.command(line).await?;
-        serde_json::from_str(&reply).map_err(|e| IpcError::Parse(e.to_string()))
-    }
-
-    /// Like [`command`](Self::command), but with a caller-supplied `timeout`
-    /// instead of [`DEFAULT_TIMEOUT`] — for commands whose protocol-level wait
-    /// can exceed the default (e.g. `capture-next`, which blocks up to 10s
-    /// server-side waiting for a gamepad button press; see
-    /// `pages::controllers`).
-    pub async fn command_timeout(&self, line: &str, timeout: Duration) -> Result<String, IpcError> {
+        timeout: Duration,
+    ) -> Result<String, TransportError> {
         tokio::time::timeout(timeout, self.command_inner(line))
             .await
-            .unwrap_or(Err(IpcError::Timeout))
+            .unwrap_or(Err(TransportError::Timeout))
     }
 
-    /// Fetch the full settings document (`~/.config/tv-shell/settings.json`)
-    /// via `get-config`. Stateless on the daemon side: a missing or
-    /// unparseable file yields `{}` rather than an error (see
-    /// `docs/IPC_PROTOCOL.md` § `get-config`).
-    pub async fn get_config(&self) -> Result<serde_json::Value, IpcError> {
-        self.command_json("get-config").await
-    }
-
-    /// Shallow-merge `patch` into `settings.json` via `set-config
-    /// <json-object>` (read-modify-write; a top-level key with a JSON `null`
-    /// value deletes that key; foreign keys the caller omits — notably the
-    /// daemon-owned `keyBindings` — are preserved untouched).
-    ///
-    /// Confirmed against `daemon/src/ipc.rs`'s `Command::SetConfig` handler
-    /// (`dispatch_stateless`): on success the daemon replies with the **full
-    /// merged document** as compact JSON (`config::set_config`'s `Ok(merged)`
-    /// returned verbatim) — NOT a bare `ok`. On failure it replies
-    /// `error:<msg>` (missing body, invalid JSON, non-object body, or a
-    /// write failure), which `command()` already maps to
-    /// `IpcError::Command`. This method treats any non-error reply as
-    /// success and discards the echoed document — callers that need the
-    /// post-merge state should call [`Self::get_config`] again.
-    pub async fn set_config(&self, patch: &serde_json::Value) -> Result<(), IpcError> {
-        let body = serde_json::to_string(patch)
-            .map_err(|e| IpcError::Parse(format!("failed to serialize set-config patch: {e}")))?;
-        self.command(&format!("set-config {body}")).await?;
-        Ok(())
+    fn reachability(&self) -> Reachability {
+        Reachability::LocalSocket(self.sock.clone())
     }
 }
 
@@ -252,7 +202,7 @@ mod tests {
         let sock = spawn_fake_daemon("status", "connected:grabbed");
         // Give the listener a moment to be ready to accept.
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let reply = client.command("status").await.unwrap();
         assert_eq!(reply, "connected:grabbed");
     }
@@ -264,7 +214,7 @@ mod tests {
             r#"{"os":"x","kernel":"y","hostname":"z","uptime":"1h"}"#,
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let status: SysStatus = client.command_json("sys-status").await.unwrap();
         assert_eq!(
             status,
@@ -284,7 +234,7 @@ mod tests {
             r#"[{"id":"uniq:a","index":0,"name":"Pad","grabbed":true}]"#,
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let pads: Vec<Pad> = client.command_json("get-pads").await.unwrap();
         assert_eq!(
             pads,
@@ -301,10 +251,10 @@ mod tests {
     async fn error_line_maps_to_command_error() {
         let sock = spawn_fake_daemon("error", "error:input-runtime-down");
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let err = client.command("status").await.unwrap_err();
         match err {
-            IpcError::Command(msg) => assert_eq!(msg, "input-runtime-down"),
+            TransportError::Command(msg) => assert_eq!(msg, "input-runtime-down"),
             other => panic!("expected Command error, got {other:?}"),
         }
     }
@@ -313,7 +263,7 @@ mod tests {
     async fn get_config_happy_path() {
         let sock = spawn_fake_daemon("get-config", r#"{"themeMode":"dark","rumbleEnabled":true}"#);
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let cfg = client.get_config().await.unwrap();
         assert_eq!(cfg["themeMode"], "dark");
         assert_eq!(cfg["rumbleEnabled"], true);
@@ -326,7 +276,7 @@ mod tests {
         // exercise that with a realistic echoed-document reply.
         let (sock, captured) = spawn_fake_daemon_capture("set-config", r#"{"themeMode":"light"}"#);
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let patch = serde_json::json!({"themeMode": "light"});
         client.set_config(&patch).await.unwrap();
         let sent = captured.lock().unwrap().clone().unwrap();
@@ -340,10 +290,12 @@ mod tests {
             "error:set-config body must be a JSON object",
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let err = client.set_config(&serde_json::json!({})).await.unwrap_err();
         match err {
-            IpcError::Command(msg) => assert_eq!(msg, "set-config body must be a JSON object"),
+            TransportError::Command(msg) => {
+                assert_eq!(msg, "set-config body must be a JSON object")
+            }
             other => panic!("expected Command error, got {other:?}"),
         }
     }
@@ -355,7 +307,7 @@ mod tests {
             std::process::id(),
             uniquifier()
         ));
-        let client = IpcClient::new(sock);
+        let client = IpcTransport::new(sock);
         let err = client.command("status").await.unwrap_err();
         assert!(err.is_unreachable(), "expected unreachable, got {err:?}");
     }

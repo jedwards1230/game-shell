@@ -101,7 +101,7 @@ async fn probe_daemon_up(state: &AppState) -> bool {
     if state.bridge.dev_status().await.is_ok() {
         return true;
     }
-    state.ipc.command("status").await.is_ok()
+    state.node.command("status").await.is_ok()
 }
 
 #[derive(Template)]
@@ -336,7 +336,7 @@ mod tests {
     use crate::bridge::BridgeClient;
     use crate::config::AppConfig;
     use crate::exec::Recovery;
-    use crate::ipc::IpcClient;
+    use crate::ipc::IpcTransport;
     use std::sync::Arc;
 
     /// Hermetic `AppState` (unreachable IPC socket, no HTTP bridge) — mirrors
@@ -351,7 +351,7 @@ mod tests {
         ));
         Arc::new(AppState {
             cfg: AppConfig::default(),
-            ipc: IpcClient::new(sock),
+            node: Arc::new(IpcTransport::new(sock)),
             bridge: BridgeClient::new(None, None),
             recovery: Recovery::new(),
             updates: crate::updates::UpdatesState::default(),

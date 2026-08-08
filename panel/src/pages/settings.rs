@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 // ---------------------------------------------------------------------------
 // Settings schema — mirrors the QML-owned keys SettingsStore.qml persists.
@@ -333,7 +334,7 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 pub async fn render_page(state: &AppState) -> String {
-    match state.ipc.get_config().await {
+    match state.node.get_config().await {
         Ok(cfg) => render_ok(&cfg),
         Err(_e) => render_degraded(),
     }
@@ -351,7 +352,7 @@ fn render_ok(cfg: &Value) -> String {
         config_toml_path,
         // Pretty-printed for editing; `render_save_raw` accepts this
         // unchanged (`serde_json::from_str` tolerates whitespace) and
-        // `IpcClient::set_config` already compacts it back to a single line
+        // `NodeTransportExt::set_config` already compacts it back to a single line
         // before it ever reaches the daemon.
         raw_json: serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".to_string()),
     };
@@ -556,7 +557,7 @@ pub async fn save(
 
 pub async fn render_save(state: &AppState, form: &HashMap<String, String>) -> String {
     match build_patch(form) {
-        Ok(patch) => match state.ipc.set_config(&patch).await {
+        Ok(patch) => match state.node.set_config(&patch).await {
             Ok(()) => result_html(true, "Settings saved."),
             Err(e) => result_html(false, &format!("Save failed: {e}")),
         },
@@ -666,7 +667,7 @@ pub async fn save_raw(
 
 pub async fn render_save_raw(state: &AppState, raw: &str) -> String {
     match serde_json::from_str::<Value>(raw) {
-        Ok(v) if v.is_object() => match state.ipc.set_config(&v).await {
+        Ok(v) if v.is_object() => match state.node.set_config(&v).await {
             Ok(()) => result_html(true, "Raw JSON merged into settings.json."),
             Err(e) => result_html(false, &format!("Save failed: {e}")),
         },

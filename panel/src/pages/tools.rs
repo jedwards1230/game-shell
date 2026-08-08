@@ -19,6 +19,7 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 // ---------------------------------------------------------------------------
 // Fixed vocabularies (also drive the page's quick-action buttons)
@@ -105,10 +106,10 @@ fn error_result(msg: &str) -> String {
 }
 
 /// Send `line` over IPC and render the reply: pretty-printed JSON when the
-/// reply parses as JSON, the bare text otherwise. An `IpcError` (including
+/// reply parses as JSON, the bare text otherwise. An `TransportError` (including
 /// daemon-unreachable) renders as a failed result, never a 500.
 pub async fn run_line(state: &AppState, line: &str) -> String {
-    match state.ipc.command(line).await {
+    match state.node.command(line).await {
         Ok(reply) => result_html(true, "", &pretty_block(&reply)),
         Err(e) => error_result(&e.to_string()),
     }
@@ -214,7 +215,7 @@ pub async fn list_apps(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 async fn render_list_apps(state: &AppState) -> String {
-    match state.ipc.command_json::<Vec<AppEntry>>("list-apps").await {
+    match state.node.command_json::<Vec<AppEntry>>("list-apps").await {
         Ok(apps) => {
             if apps.is_empty() {
                 return result_html(true, "", "<p class=\"muted\">No launchable apps found.</p>");
@@ -308,7 +309,7 @@ pub async fn bt_list(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 async fn render_bt_list(state: &AppState) -> String {
-    match state.ipc.command_json::<Vec<BtDevice>>("bt-list").await {
+    match state.node.command_json::<Vec<BtDevice>>("bt-list").await {
         Ok(devices) => {
             if devices.is_empty() {
                 return result_html(
@@ -538,7 +539,7 @@ pub async fn render_raw(state: &AppState, cmd: &str) -> String {
     } else {
         String::new()
     };
-    match state.ipc.command(line).await {
+    match state.node.command(line).await {
         Ok(reply) => result_html(true, &warning, &pretty_block(&reply)),
         Err(e) => result_html(
             false,

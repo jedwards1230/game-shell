@@ -22,10 +22,12 @@ mod bridge;
 mod config;
 mod exec;
 mod humanize;
+#[cfg(unix)]
 mod ipc;
 mod pages;
 mod state;
 mod text;
+mod transport;
 mod updates;
 
 #[cfg(test)]
@@ -68,14 +70,14 @@ async fn main() -> anyhow::Result<()> {
         cfg.allow_dangerous
     );
     let sock = config::socket_path();
-    let ipc = ipc::IpcClient::new(sock);
+    let node: Arc<dyn transport::NodeTransport> = Arc::new(ipc::IpcTransport::new(sock));
     let bridge = bridge::BridgeClient::new(cfg.http_bridge_base.clone(), cfg.http_token.clone());
     let recovery = exec::Recovery::new();
     let updates = updates::UpdatesState::default();
 
     let state: SharedState = Arc::new(AppState {
         cfg,
-        ipc,
+        node,
         bridge,
         recovery,
         updates,

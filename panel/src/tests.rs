@@ -15,7 +15,7 @@ use tokio::net::UnixListener;
 use crate::bridge::BridgeClient;
 use crate::config::AppConfig;
 use crate::exec::Recovery;
-use crate::ipc::IpcClient;
+use crate::ipc::IpcTransport;
 use crate::pages;
 use crate::state::AppState;
 
@@ -30,7 +30,7 @@ fn hermetic_state() -> Arc<AppState> {
     ));
     Arc::new(AppState {
         cfg: AppConfig::default(),
-        ipc: IpcClient::new(sock),
+        node: Arc::new(IpcTransport::new(sock)),
         bridge: BridgeClient::new(None, None),
         recovery: Recovery::new(),
         updates: crate::updates::UpdatesState::default(),
@@ -174,9 +174,9 @@ async fn nav_dot_shows_error_when_daemon_unreachable() {
 
 /// A minimal multi-connection fake daemon for `get-config`/`set-config`
 /// round-trip tests. Unlike `ipc`'s private one-shot `spawn_fake_daemon`
-/// (good for a single `IpcClient::command` call), the real Settings/Widgets
+/// (good for a single `IpcTransport::command` call), the real Settings/Widgets
 /// flows make TWO separate connections per page load or save (each
-/// `IpcClient` request opens its own connection — see `ipc.rs`'s doc
+/// `IpcTransport` request opens its own connection — see `ipc.rs`'s doc
 /// comment), so this helper loops accepting connections indefinitely rather
 /// than closing after one.
 ///
@@ -191,7 +191,7 @@ async fn nav_dot_shows_error_when_daemon_unreachable() {
 ///
 /// Reusable as-is by the Widgets-page implementer for its own
 /// `widgets`-subtree round-trip tests — just spawn it and point a fresh
-/// `IpcClient` at the returned socket path.
+/// `IpcTransport` at the returned socket path.
 pub fn spawn_config_daemon(
     name: &str,
     canned_get_config: &'static str,
@@ -322,7 +322,7 @@ pub fn spawn_canned_daemon(
 fn state_for_socket(sock: std::path::PathBuf) -> Arc<AppState> {
     Arc::new(AppState {
         cfg: AppConfig::default(),
-        ipc: IpcClient::new(sock),
+        node: Arc::new(IpcTransport::new(sock)),
         bridge: BridgeClient::new(None, None),
         recovery: Recovery::new(),
         updates: crate::updates::UpdatesState::default(),
@@ -1895,7 +1895,7 @@ fn state_with(cfg: AppConfig) -> SharedState {
     let bridge = BridgeClient::new(cfg.http_bridge_base.clone(), cfg.http_token.clone());
     Arc::new(AppState {
         cfg,
-        ipc: IpcClient::new(sock),
+        node: Arc::new(IpcTransport::new(sock)),
         bridge,
         recovery: Recovery::new(),
         updates: crate::updates::UpdatesState::default(),

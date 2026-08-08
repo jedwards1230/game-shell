@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::state::{AppState, SharedState};
+use crate::transport::NodeTransportExt;
 
 // ---------------------------------------------------------------------------
 // Fixed vocabularies (docs/IPC_PROTOCOL.md § `set-binding` / Remappable
@@ -45,7 +46,7 @@ const BUTTONS: &[&str] = &[
 ];
 /// `capture-next` blocks up to 10s server-side waiting for a button press
 /// (`docs/IPC_PROTOCOL.md` § `capture-next`) — give the client enough
-/// headroom over [`crate::ipc::IpcClient`]'s 3s default so we receive that
+/// headroom over [`crate::ipc::IpcTransport`]'s 3s default so we receive that
 /// reply instead of timing out first.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(12);
 /// Bounds for the rumble-test `ms` field — long enough to feel, capped well
@@ -126,7 +127,7 @@ fn pretty_block(reply: &str) -> String {
 
 /// Send `line` and render the reply into the shared result panel.
 async fn run_line(state: &AppState, line: &str) -> String {
-    match state.ipc.command(line).await {
+    match state.node.command(line).await {
         Ok(reply) => result_html(true, &pretty_block(&reply)),
         Err(e) => error_result(&e.to_string()),
     }
@@ -190,7 +191,7 @@ struct BindingsTemplate {
 /// banner (`ok`, message) from whatever action triggered the re-render.
 async fn render_bindings_section(state: &AppState, msg: Option<(bool, String)>) -> String {
     let (bindings, bindings_error) = match state
-        .ipc
+        .node
         .command_json::<HashMap<String, String>>("get-bindings")
         .await
     {
@@ -244,7 +245,7 @@ pub async fn render_set_binding(state: &AppState, action: &str, button: &str) ->
         .await;
     }
     match state
-        .ipc
+        .node
         .command(&format!("set-binding {action} {button}"))
         .await
     {
@@ -276,7 +277,7 @@ pub async fn render_capture(state: &AppState, action: &str) -> String {
             .await;
     }
     match state
-        .ipc
+        .node
         .command_timeout("capture-next", CAPTURE_TIMEOUT)
         .await
     {
@@ -295,7 +296,7 @@ pub async fn render_capture(state: &AppState, action: &str) -> String {
         }
         Ok(reply) => match reply.strip_prefix("captured:") {
             Some(button) => match state
-                .ipc
+                .node
                 .command(&format!("set-binding {action} {button}"))
                 .await
             {
@@ -333,7 +334,7 @@ pub async fn bindings_capture_cancel(State(state): State<SharedState>) -> impl I
 }
 
 pub async fn render_capture_cancel(state: &AppState) -> String {
-    match state.ipc.command("capture-cancel").await {
+    match state.node.command("capture-cancel").await {
         Ok(_) => {
             render_bindings_section(state, Some((true, "capture cancel requested".to_string())))
                 .await
@@ -383,8 +384,8 @@ struct FleetTemplate {
 /// action's response (see [`run_line_refresh_fleet`]); `false` for the
 /// section's own place in the normal page render.
 async fn render_fleet_section(state: &AppState, oob: bool) -> String {
-    let status_res = state.ipc.command("status").await;
-    let pads_res = state.ipc.command_json::<Vec<Pad>>("get-pads").await;
+    let status_res = state.node.command("status").await;
+    let pads_res = state.node.command_json::<Vec<Pad>>("get-pads").await;
 
     let (status_label, status_dot_class, status_raw) = match &status_res {
         Ok(s) => match crate::humanize::humanize_status(s) {
@@ -438,8 +439,8 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 pub async fn render_page(state: &AppState) -> String {
-    let config_res = state.ipc.get_config().await;
-    let controllerdb_res = state.ipc.command("controllerdb-status").await;
+    let config_res = state.node.get_config().await;
+    let controllerdb_res = state.node.command("controllerdb-status").await;
 
     let (per_game_json, per_player_json, config_error) = match &config_res {
         Ok(cfg) => (
@@ -591,7 +592,7 @@ pub async fn input_devices(State(state): State<SharedState>) -> impl IntoRespons
 
 pub async fn render_input_devices(state: &AppState) -> String {
     match state
-        .ipc
+        .node
         .command_json::<Vec<InputDevice>>("list-input-devices")
         .await
     {
