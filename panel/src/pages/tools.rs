@@ -18,6 +18,7 @@ use axum::response::{Html, IntoResponse};
 use axum::Form;
 use serde::Deserialize;
 
+use crate::capabilities::Chrome;
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -55,7 +56,7 @@ const WARN_COMMANDS: &[&str] = &["set-config", "set-binding", "grab", "release",
 #[derive(Template)]
 #[template(path = "tools.html")]
 struct ToolsTemplate {
-    active: &'static str,
+    chrome: Chrome,
     intent_quick: &'static [&'static str],
     overlay_quick: &'static [&'static str],
     settings_slugs: &'static [&'static str],
@@ -70,7 +71,7 @@ struct ToolsTemplate {
 /// by an htmx action.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(ToolsTemplate {
-        active: "tools",
+        chrome: Chrome::new(&state.caps, "tools"),
         intent_quick: INTENT_QUICK,
         overlay_quick: OVERLAY_QUICK,
         settings_slugs: SETTINGS_SLUGS,

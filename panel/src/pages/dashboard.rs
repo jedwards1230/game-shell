@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 
+use crate::capabilities::Chrome;
 use crate::config;
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
@@ -14,14 +15,14 @@ use crate::transport::NodeTransportExt;
 #[derive(Template)]
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
-    active: &'static str,
+    chrome: Chrome,
 }
 
 /// `GET /` and `GET /dashboard` — the page shell. The tile region is filled
 /// in by an htmx poll against `/dashboard/tiles`.
-pub async fn page(State(_state): State<SharedState>) -> impl IntoResponse {
+pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(DashboardTemplate {
-        active: "dashboard",
+        chrome: Chrome::new(&state.caps, "dashboard"),
     })
 }
 

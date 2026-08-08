@@ -14,6 +14,7 @@ use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 
+use crate::capabilities::Chrome;
 use crate::config;
 use crate::state::{AppState, SharedState};
 use crate::transport::TransportError;
@@ -110,7 +111,7 @@ fn parse_top_processes(raw: &str) -> Vec<ProcRow> {
 #[derive(Template)]
 #[template(path = "processes.html")]
 struct ProcessesTemplate {
-    active: &'static str,
+    chrome: Chrome,
     units: Vec<UnitView>,
     hypr_available: bool,
     hypr_active: String,
@@ -175,7 +176,7 @@ pub async fn render_page(state: &AppState) -> String {
     let update_job_html = render_update_job(state).await;
 
     let tmpl = ProcessesTemplate {
-        active: "processes",
+        chrome: Chrome::new(&state.caps, "processes"),
         units,
         hypr_available,
         hypr_active: pretty_or_raw(active_res),

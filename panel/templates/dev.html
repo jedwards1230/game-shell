@@ -39,6 +39,10 @@
 </p>
 {% else %}
 <div class="dev-actions">
+  {# Deploy/Build need `allow_dangerous` AND the node's `dev_deploy` capability
+     (they proxy the daemon bridge). Reboot/Suspend are the panel's own exec
+     tier, so `allow_dangerous` alone registers them. #}
+  {% if deploy_enabled %}
   <form class="dev-action" hx-post="/dev/deploy" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Deploy the latest ref? This runs git fetch/checkout/reset on the daemon host.">
     <h3>Deploy <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
@@ -51,6 +55,7 @@
     <h3>Build <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
     <button class="danger-severe" type="submit">Build</button>
   </form>
+  {% endif %}
 
   <form class="dev-action" hx-post="/dev/reboot" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Reboot the whole machine now?">
@@ -64,11 +69,20 @@
     <button class="danger-severe" type="submit">Suspend</button>
   </form>
 </div>
+{% if !deploy_enabled %}
+<p class="banner">
+  Deploy and Build are not registered: this node did not declare the
+  <code>dev_deploy</code> capability, which the daemon emits only when its HTTP bridge
+  (<code>[http].bind</code>) or a dev-enabled MCP server is configured.
+</p>
+{% endif %}
 {% endif %}
 
+{% if screenshot_enabled %}
 <div class="dev-screenshot">
   <h3>Screenshot <span class="tier">Bridge</span></h3>
   <button hx-post="/dev/screenshot/capture" hx-disabled-elt="this" hx-target="#dev-screenshot-result" hx-swap="innerHTML">Load screenshot</button>
   <div id="dev-screenshot-result"></div>
 </div>
+{% endif %}
 {% endblock %}

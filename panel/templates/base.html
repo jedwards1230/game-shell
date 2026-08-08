@@ -10,16 +10,11 @@
 <body>
 <nav class="topnav">
   <span class="brand">tv-shell panel</span>
-  <a href="/" class="{% if active == "dashboard" %}active{% endif %}">Dashboard</a>
-  <a href="/processes" class="{% if active == "processes" %}active{% endif %}">Processes</a>
-  <a href="/settings" class="{% if active == "settings" %}active{% endif %}">Settings</a>
-  <a href="/widgets" class="{% if active == "widgets" %}active{% endif %}">Widgets</a>
-  <a href="/media" class="{% if active == "media" %}active{% endif %}">Media</a>
-  <a href="/tools" class="{% if active == "tools" %}active{% endif %}">Tools</a>
-  <a href="/controllers" class="{% if active == "controllers" %}active{% endif %}">Controllers</a>
-  <a href="/cec" class="{% if active == "cec" %}active{% endif %}">CEC</a>
-  <a href="/dev" class="{% if active == "dev" %}active{% endif %}">Dev</a>
-  <a href="/logs" class="{% if active == "logs" %}active{% endif %}">Logs</a>
+  {# Driven from the capability snapshot resolved at startup, so the nav never
+     links to a route that was not registered — see panel/src/capabilities.rs. #}
+  {% for item in chrome.nav %}
+  <a href="{{ item.href }}" class="{% if chrome.active == item.key %}active{% endif %}">{{ item.label }}</a>
+  {% endfor %}
   <span class="nav-spacer"></span>
   <span class="nav-daemon-status" id="nav-daemon-status"
         hx-get="/nav/daemon-status" hx-trigger="load, every 10s" hx-swap="innerHTML">
@@ -27,6 +22,16 @@
   </span>
 </nav>
 <main>
+{% if chrome.recovery_mode %}
+<p class="banner banner-error">
+  <strong>Recovery mode.</strong>
+  The node did not answer the capability handshake when this panel started, so only the
+  daemon-independent pages are registered — unit restarts, logs, processes, system updates
+  and the wallpaper files. Route registration is fixed at startup, so once the daemon is
+  back, <strong>restart the panel</strong> to get the rest: use Restart <code>panel</code>
+  on the <a href="/processes">Processes</a> page.
+</p>
+{% endif %}
 {% block content %}{% endblock %}
 </main>
 <script>

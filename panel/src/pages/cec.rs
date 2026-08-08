@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bridge::BridgeError;
+use crate::capabilities::Chrome;
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -867,7 +868,7 @@ fn default_osd_name() -> String {
 #[derive(Template)]
 #[template(path = "cec.html")]
 struct CecTemplate {
-    active: &'static str,
+    chrome: Chrome,
     health_section_html: String,
     /// The name the daemon will announce: override else hostname else fallback.
     osd_effective: String,
@@ -895,7 +896,7 @@ pub async fn render_page(state: &AppState) -> String {
         },
     };
     let tmpl = CecTemplate {
-        active: "cec",
+        chrome: Chrome::new(&state.caps, "cec"),
         health_section_html,
         osd_effective,
         osd_source,

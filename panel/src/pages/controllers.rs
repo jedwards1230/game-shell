@@ -22,6 +22,7 @@ use axum::Form;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::capabilities::Chrome;
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -425,7 +426,7 @@ async fn render_fleet_section(state: &AppState, oob: bool) -> String {
 #[derive(Template)]
 #[template(path = "controllers.html")]
 struct ControllersTemplate {
-    active: &'static str,
+    chrome: Chrome,
     fleet_section_html: String,
     bindings_section_html: String,
     per_game_json: String,
@@ -460,7 +461,7 @@ pub async fn render_page(state: &AppState) -> String {
     let bindings_section_html = render_bindings_section(state, None).await;
 
     let tmpl = ControllersTemplate {
-        active: "controllers",
+        chrome: Chrome::new(&state.caps, "controllers"),
         fleet_section_html,
         bindings_section_html,
         per_game_json,
