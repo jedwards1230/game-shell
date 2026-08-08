@@ -14,6 +14,31 @@
 <div id="dev-result"></div>
 
 <div class="dev-actions">
+  <form class="dev-action" hx-post="/dev/restart-daemon" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+        hx-confirm="Restart the tv-shell input daemon now?">
+    <h3>Restart daemon <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
+    <button class="warn-action" type="submit">Restart daemon</button>
+  </form>
+
+  <form class="dev-action" hx-post="/dev/restart-shell" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+        hx-confirm="Restart the Quickshell UI now?">
+    <h3>Restart shell <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
+    <button class="warn-action" type="submit">Restart shell</button>
+  </form>
+</div>
+
+{% if !allow_dangerous %}
+<p class="banner">
+  <strong>Dangerous actions are disabled.</strong>
+  Deploy, Build, Reboot and Suspend are not registered on this node — they change
+  what code runs or power the box down. Restarting a unit is recovery and stays
+  available above.
+  Set <code>allow_dangerous = true</code> in the <code>[panel]</code> section of
+  <code>~/.config/tv-shell/config.toml</code> and restart
+  <code>tv-shell-panel.service</code> to enable them.
+</p>
+{% else %}
+<div class="dev-actions">
   <form class="dev-action" hx-post="/dev/deploy" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Deploy the latest ref? This runs git fetch/checkout/reset on the daemon host.">
     <h3>Deploy <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
@@ -25,18 +50,6 @@
         hx-confirm="Rebuild the daemon binary now?">
     <h3>Build <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
     <button class="danger-severe" type="submit">Build</button>
-  </form>
-
-  <form class="dev-action" hx-post="/dev/restart-daemon" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
-        hx-confirm="Restart the tv-shell input daemon now?">
-    <h3>Restart daemon <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
-    <button class="warn-action" type="submit">Restart daemon</button>
-  </form>
-
-  <form class="dev-action" hx-post="/dev/restart-shell" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
-        hx-confirm="Restart the Quickshell UI now?">
-    <h3>Restart shell <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
-    <button class="warn-action" type="submit">Restart shell</button>
   </form>
 
   <form class="dev-action" hx-post="/dev/reboot" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
@@ -51,6 +64,7 @@
     <button class="danger-severe" type="submit">Suspend</button>
   </form>
 </div>
+{% endif %}
 
 <div class="dev-screenshot">
   <h3>Screenshot <span class="tier">Bridge</span></h3>

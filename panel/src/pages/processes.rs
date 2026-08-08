@@ -209,6 +209,10 @@ struct UpdatesCheckTemplate {
     reboot_unknown: bool,
     error: String,
     checked_ago: String,
+    /// `[panel].allow_dangerous` (S5) — gates the "Run full update" button.
+    /// `POST /processes/updates/apply` (which runs `sudo -n pacman -Syu
+    /// --noconfirm` under a NOPASSWD rule) is not registered when false.
+    allow_dangerous: bool,
 }
 
 async fn render_updates_check(state: &AppState, force: bool) -> String {
@@ -227,6 +231,7 @@ async fn render_updates_check(state: &AppState, force: bool) -> String {
         reboot_unknown: matches!(snap.reboot, crate::updates::RebootStatus::Unknown),
         error: snap.error.unwrap_or_default(),
         checked_ago: format!("{}s ago", snap.checked_at_secs_ago),
+        allow_dangerous: state.cfg.allow_dangerous,
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))

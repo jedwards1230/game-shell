@@ -114,6 +114,15 @@
 
 <section class="tools-section">
   <h2>Raw console</h2>
+  {% if !allow_dangerous %}
+  <p class="banner">
+    <strong>The raw IPC console is disabled.</strong>
+    It drives the entire IPC vocabulary, so it counts as a dangerous action.
+    Set <code>allow_dangerous = true</code> in the <code>[panel]</code> section of
+    <code>~/.config/tv-shell/config.toml</code> and restart
+    <code>tv-shell-panel.service</code> to enable it.
+  </p>
+  {% else %}
   <div class="raw-console-panel">
     <p class="muted">
       Escape hatch: sends any single IPC line and shows the raw reply.
@@ -128,7 +137,9 @@
       <button class="btn-mutate" type="submit">Send</button>
     </form>
   </div>
+  {% endif %}
 </section>
+{% if allow_dangerous %}
 <script>
 // Strengthen the confirm prompt when the raw command's leading verb belongs
 // to another page's guarded flow (set-config/set-binding/grab/release/
@@ -159,4 +170,5 @@
   });
 })();
 </script>
+{% endif %}
 {% endblock %}

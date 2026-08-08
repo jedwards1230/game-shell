@@ -80,8 +80,10 @@ untouched and the shell still boots fully.
 
 > **Startup safety check:** the daemon **refuses to start** if a control surface
 > is bound to a non-loopback address with dev tools on and auth effectively off
-> (an unauthenticated RCE surface). Set `[dev] allow_insecure_lan = true` to
-> override that on a box that genuinely wants the unauthenticated LAN dev loop.
+> (an unauthenticated RCE surface). The panel applies the identical refusal to
+> its own `[panel] bind` when `[panel] token_file` is unset, reusing the same
+> flag. Set `[dev] allow_insecure_lan = true` to override that on a box that
+> genuinely wants the unauthenticated LAN dev loop.
 
 #### Migrating an existing deploy (daemon.env → config.toml)
 
@@ -142,9 +144,14 @@ Setting `[http] bind` / `[mcp] bind` in `config.toml` exposes the daemon's contr
 surface (screenshots, intents, MCP tools) over the network. See
 [CONTROL_SURFACE.md](CONTROL_SURFACE.md). The web control panel (`tv-shell-panel`,
 [PANEL.md](PANEL.md)) is separate — it's installed and enabled by default,
-listening on `127.0.0.1:8091` (loopback-only, no auth in v1); widen `[panel]
-bind` in `config.toml` only on a trusted LAN. Firewall any of these ports you
-expose beyond loopback yourself.
+listening on `127.0.0.1:8091`. Widening `[panel] bind` beyond loopback now
+**requires authentication**: set `[panel] token_file` to a 0600 token file inside
+the config dir, or the panel refuses to start (the same refusal the daemon
+applies, reusing the same `[dev] allow_insecure_lan` opt-in). The panel's
+root-equivalent actions (deploy/build/reboot/suspend, `pacman -Syu`,
+`/tools/raw`) are additionally gated behind `[panel] allow_dangerous = true`,
+which is **off** by default. Firewall any of these ports you expose beyond
+loopback yourself.
 
 ## Verify
 

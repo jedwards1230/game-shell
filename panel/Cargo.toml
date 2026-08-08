@@ -23,6 +23,9 @@ tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 tv-shell-protocol = { workspace = true }
 askama = { workspace = true }
+# Constant-time credential comparison for the panel's own auth (same crate and
+# same `ConstantTimeEq` usage as the daemon's `bridge_core::ct_eq_str`).
+subtle = { workspace = true }
 # Typed config parsing (~/.config/tv-shell/config.toml), matching how the
 # daemon declares it directly rather than via a workspace dep.
 toml = "1.1"

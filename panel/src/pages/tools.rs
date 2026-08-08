@@ -59,17 +59,22 @@ struct ToolsTemplate {
     overlay_quick: &'static [&'static str],
     settings_slugs: &'static [&'static str],
     key_quick: &'static [&'static str],
+    /// `[panel].allow_dangerous` (S5) — gates the raw IPC console, which
+    /// drives the whole IPC vocabulary and is therefore an arbitrary-command
+    /// escape hatch. `POST /tools/raw` is not registered when this is false.
+    allow_dangerous: bool,
 }
 
 /// `GET /tools` — the console. No IPC calls on load; every command is fired
 /// by an htmx action.
-pub async fn page(State(_state): State<SharedState>) -> impl IntoResponse {
+pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(ToolsTemplate {
         active: "tools",
         intent_quick: INTENT_QUICK,
         overlay_quick: OVERLAY_QUICK,
         settings_slugs: SETTINGS_SLUGS,
         key_quick: KEY_VOCAB,
+        allow_dangerous: state.cfg.allow_dangerous,
     })
 }
 

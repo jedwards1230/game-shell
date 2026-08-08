@@ -17,7 +17,9 @@
 #
 # The daemon REFUSES to start if a control surface is bound to a non-loopback
 # address with dev tools on and auth effectively off — unless you explicitly set
-# [dev].allow_insecure_lan = true (see the very bottom).
+# [dev].allow_insecure_lan = true (see the very bottom). The web control panel
+# (`tv-shell-panel`, [panel] below) refuses the same combination, reading the
+# same [dev].allow_insecure_lan flag, so a node has ONE insecure-LAN opt-in.
 
 # --- LAN control surface (HTTP bridge) ---------------------------------------
 [http]
@@ -47,14 +49,46 @@
 #enabled = true
 
 # Bind address for the panel's own HTTP server (separate from [http] above).
-# Default 127.0.0.1:8091 (local-only). Use 0.0.0.0:8091 to expose it on the
-# LAN — the panel has NO auth in v1, so firewall it yourself if you widen the
-# bind.
+# Default 127.0.0.1:8091 (local-only). Use 0.0.0.0:8091 to expose it on the LAN
+# — and then you MUST set token_file below: the panel REFUSES to start on a
+# non-loopback bind with no token, unless [dev].allow_insecure_lan = true (the
+# same flag the daemon uses; see the very bottom).
 #bind = "127.0.0.1:8091"
 
-# Reserved for future panel auth (bearer token file, same convention as
-# [http].token_file). Unused in v1 — the panel is LAN-only/no-auth for now.
+# Path to the 0600 file holding the panel's own credential. Setting it turns
+# panel authentication ON: a browser signs in at /login (the token is exchanged
+# for an HttpOnly + SameSite=Strict session cookie) and scripts send
+# `Authorization: Bearer <token>`. Every route is gated except GET /login,
+# POST /login and the two static assets.
+#
+# Same rules as [http].token_file: mode 0600 AND under ~/.config/tv-shell/ —
+# the panel refuses to start on a world-readable file or a path escaping the
+# config dir, rather than silently degrading to "no auth". It also refuses an
+# EMPTY file (that would 401 every request and every /login submission, locking
+# you out of the recovery panel) and a token holding characters a cookie value
+# cannot carry — space, ";", ",", '"', "\" or non-ASCII — which would silently
+# break browser login forever. Generate one with:
+#   install -m600 /dev/null ~/.config/tv-shell/panel-token
+#   openssl rand -hex 32 > ~/.config/tv-shell/panel-token
+#
+# Leaving it unset means NO panel auth, which is only permitted on a loopback
+# bind. Use a token distinct from [http].token_file — that one is the daemon's.
 #token_file = "~/.config/tv-shell/panel-token"
+
+# Allow the panel's root-equivalent actions. Default FALSE: a fresh node gets
+# the read-only + recovery surface (status, logs, settings/widgets editors,
+# unit restarts, CEC recovery) without the actions that can overwrite the
+# running build or take the box down. The rule: restarting a unit is RECOVERY
+# (ungated); changing what code runs, powering the box, or running arbitrary
+# commands is ROOT-EQUIVALENT (gated). When false these routes are NOT
+# registered at all (404) and their buttons are not rendered:
+#   POST /dev/deploy, /dev/build, /dev/reboot, /dev/suspend,
+#   /processes/updates/apply (sudo pacman -Syu),
+#   /tools/raw (the arbitrary-IPC console)
+# Every unit-restart route stays available — /processes/restart/{key},
+# /dev/restart-daemon, /dev/restart-shell and /cec/recover/restart-daemon all
+# drive the same systemd units, and recovery is the reason the panel exists.
+#allow_dangerous = false
 
 # --- MCP server (optional, requires the daemon built with --features mcp) -----
 [mcp]
@@ -249,4 +283,8 @@
 # to a loud warning. Only enable on a trusted, firewalled, single-user dev box
 # (e.g. a dedicated gaming client) where you WANT the unauthenticated LAN dev
 # loop. Default false.
+#
+# READ BY BOTH BINARIES: the daemon (HTTP bridge + MCP server) and the web
+# control panel. Setting it opens both — there is deliberately no panel-only
+# variant, so there is one flag to audit per node rather than two.
 #allow_insecure_lan = false

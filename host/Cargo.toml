@@ -39,6 +39,11 @@ rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-
 # in the graph and still no `aws-lc-rs`. Installed once at startup by
 # `mqtt::install_crypto_provider`.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# CSPRNG for the loopback-dev generated bearer token (`SystemRandom`). Already
+# resolved in the graph at this version via rustls's `ring` feature above (and
+# reqwest's `rustls-tls` at the workspace level) — declaring it directly adds no
+# new crate, just makes `ring::rand` callable from this crate.
+ring = "0.17"
 tv-shell-protocol = { workspace = true }
 
 # POSIX kill(2) for the graceful-quit path (SIGTERM to the running game's process

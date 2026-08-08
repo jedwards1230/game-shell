@@ -11,8 +11,10 @@
 //!   deferred the shell-side add flow because the couch UI has no on-screen
 //!   keyboard (#20); the panel has a real keyboard, so it owns the add flow.
 //!
-//! **This page writes files.** The panel is LAN-only with no auth in v1, so the
-//! upload path is treated as an attack surface: extension allowlist, filename
+//! **This page writes files.** These routes are behind the panel's auth layer
+//! (`crate::auth`), but auth is opt-in via `[panel].token_file` and a loopback
+//! panel may legitimately run without it, so the upload path is still treated
+//! as an attack surface in its own right: extension allowlist, filename
 //! sanitization, a re-checked containment test against the wallpapers dir, a
 //! body-size cap, and magic-byte sniffing so a `.png` that isn't an image is
 //! rejected. Reads back out (`/media/wallpaper/file`) go through the exact same
