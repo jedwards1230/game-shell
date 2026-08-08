@@ -96,6 +96,12 @@ To cut a binary release: add the label to your PR before merging it. **No label 
 
 Version compute, tagging, and **AI-generated release notes** come from the shared [`ai-release.yml@v1`](https://github.com/jedwards1230/release-workflows) reusable, called once per stream with its own `tag_prefix` (`host-` / `input-`) so each next version is computed from that artifact's tag series alone. Do **not** hand-push a `host-v*` or `input-v*` tag — the reusable owns those tags now. Widget releases still get GitHub's auto-generated notes.
 
+### Crate versions
+
+Each binary workflow **stamps the computed tag version into its own crate's `Cargo.toml`** after checking out the tag and before `cargo build` (and fails the job if the stamp didn't land). So `CARGO_PKG_VERSION` — and with it `GET /status`, the MQTT state payloads, the HA `host_version` / `daemon_version` diagnostic entities, `build-info`, and the MCP server version — reports the **real release version**, not a manifest constant. A host release only touches `host/Cargo.toml`, a daemon release only `daemon/Cargo.toml`.
+
+The committed `version` in `host/Cargo.toml` / `daemon/Cargo.toml` tracks the **last released tag** as a floor for local and dev builds; editing it cuts no release. `protocol` and `panel` are `0.0.0` — neither has a tag series, and nothing reports their version.
+
 ### Widget release workflow
 
 Before pushing a `widget-<id>-v<X.Y.Z>` tag:

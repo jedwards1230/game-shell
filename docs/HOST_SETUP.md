@@ -33,6 +33,7 @@ It never touches Sunshine config, so other Moonlight clients are unaffected.
 | POST   | `/quit`       | Bearer      | Gracefully stop the running game for `{ appid }` (SIGTERM to its process group, like Steam's Stop). May report **nothing to quit** — see below |
 | POST   | `/sleep`      | Bearer      | Suspend the host to RAM. No body. May be **refused** — see below |
 | GET    | `/status`     | Bearer      | `{ version, running_appid, streaming }` — `running_appid` is **process-verified**, see below |
+| GET    | `/capabilities` | Bearer    | What this node declares it can do — see below |
 | GET    | `/art/{appid}`| **public**  | Local cover art (no bearer — QML `Image.source` can't send one; art isn't sensitive) |
 
 ### `POST /quit`
@@ -106,6 +107,39 @@ and **hibernates** whenever hibernation is enabled. See `host/src/power.rs`.
 > service against the gaming PC and anyone streaming from it. Nothing else about
 > the security model changed (still plaintext HTTP + a static shared secret on a
 > trusted LAN), but rotate the token accordingly if it leaks.
+
+### `GET /capabilities`
+
+What this node declares it can do, so a client builds its UI and registers its
+routes from the answer instead of probing. Same wire type
+(`tv_shell_protocol::Capabilities`) the daemon serves over its `capabilities` IPC
+command — see [IPC_PROTOCOL.md](IPC_PROTOCOL.md#capabilities) for the field table
+and the forward-compatibility rule for unknown feature names.
+
+```json
+{"node_id":"desktop-2","kind":"sidecar","agent_version":"0.6.0","platform":"windows","features":["steam_library","game_launch","sleep"]}
+```
+
+Bearer-authenticated like every route but `/art/{appid}`: the feature set is an
+inventory of what is reachable on this machine, and the daemon that consumes it
+already holds a token.
+
+**`node_id` resolution order:** `TV_SHELL_MQTT_DEVICE_ID` → the machine hostname
+(`COMPUTERNAME` on Windows, else `/proc/sys/kernel/hostname` on Linux, else an
+exported `HOSTNAME`) → `"tv-shell-host"`. Procfs outranks `HOSTNAME` because it
+is the kernel's answer: `HOSTNAME` is a bash-only variable a systemd service
+normally never sees, and an exported one (container, `docker exec`, inherited
+shell) can be stale. The MQTT device id leads because it is already the sidecar's
+explicit, never-derived identity — reusing it keeps one machine from answering to
+two names. Resolved once at startup and logged; a dual-boot machine must set the
+**same** id on both boots, exactly as [MQTT.md](MQTT.md) requires.
+
+**Features report what is wired, not what would succeed now** — a closed Steam
+does not drop `game_launch`. `steam_library` is unconditional; `game_launch` and
+`sleep` are gated on `target_os` linux/windows, matching the `cfg` on
+`steam::quit` and `power::suspend` (macOS is a CI target only: it can open a
+launch URL but can never see or stop a running game, so claiming `game_launch`
+there would make `/quit` a silent no-op).
 
 ## Environment
 
@@ -320,6 +354,9 @@ rotate it on both ends together if it leaks.
 ```bash
 # Authenticated — lists games
 curl -H "Authorization: Bearer <token>" http://<host-ip>:47995/library
+
+# Authenticated — node identity + declared feature set
+curl -H "Authorization: Bearer <token>" http://<host-ip>:47995/capabilities
 
 # Public — cover art for an appid (e.g. 1245620)
 curl -o /tmp/art.jpg http://<host-ip>:47995/art/1245620

@@ -1,6 +1,12 @@
 [package]
 name = "tv-shell-host"
-version = "0.1.0"
+# Tracks the last released `host-v*` tag — a floor for local/dev builds, NOT the
+# release source of truth. release-host.yml rewrites this key with the tag it is
+# building before `cargo build`, so a released binary's `CARGO_PKG_VERSION` (the
+# `GET /status` and `GET /capabilities` bodies, the MQTT `HostState` payload, the
+# HA `host_version` entity) is the real version. Editing it here cuts no release;
+# the `semver:host:*` label does.
+version = "0.6.0"
 edition.workspace = true
 # Not inherited from the workspace (1.75): the host's dep closure (axum/reqwest
 # transitives) pulls edition2024 crates that require Cargo >=1.85.

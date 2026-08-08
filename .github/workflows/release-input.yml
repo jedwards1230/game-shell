@@ -18,6 +18,10 @@
 # `tag_prefix: input-`, so it only ever reads and writes `input-v*` tags and the
 # next version is computed from the `input-v*` series alone.
 #
+# The release job STAMPS the computed tag version into `daemon/Cargo.toml` before
+# `cargo build`, so the released binary's `CARGO_PKG_VERSION` is the real release
+# version rather than the in-repo floor, and verifies the stamp landed.
+#
 # NOTE: releases are no longer cut by pushing an `input-v*` tag by hand. Merge a PR
 # labelled `semver:input:patch|minor|major`, or run this workflow manually.
 
@@ -151,6 +155,88 @@ jobs:
           workspaces: .
           key: release-input
 
+      # `CARGO_PKG_VERSION` is what the `build-info` IPC reply, `GET /dev/status`,
+      # the MQTT `ShellSnapshot`, the HA `daemon_version` diagnostic entity, and
+      # the MCP server version report. The in-repo manifest only tracks the last
+      # released tag, so write the tag being built into daemon/Cargo.toml BEFORE
+      # cargo reads it — otherwise every release reports the in-repo floor forever
+      # (it reported `0.1.0` through input-v0.2.2).
+      #
+      # Stamping the manifest (not a build-time env var) is deliberate: cargo's
+      # fingerprint includes the package version, so the rust-cache restore above
+      # cannot serve a stale artifact carrying the previous version. It also runs
+      # AFTER the cache step so the cache key is computed from the unstamped
+      # manifest and stays stable across releases.
+      - name: Stamp release version into daemon/Cargo.toml
+        id: stamp
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#input-}"; VERSION="${VERSION#v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Tag '$TAG' did not yield a semver version (got '$VERSION')"; exit 1 ;;
+          esac
+          # Rewrites ONLY the `version` key of the `[package]` table: awk tracks
+          # the current table header and edits the first matching key while inside
+          # `[package]`. A dependency's version (`foo = { version = "1" }`) lives
+          # in another table AND is not a line-leading `version` key, so neither
+          # gate can reach it. A manifest with no `[package] version` exits 3
+          # rather than silently no-op'ing. Records are compared with the trailing
+          # CR stripped (and re-emitted) so a CRLF checkout still matches the
+          # `[package]` header — kept identical to release-host.yml's step, where
+          # the Windows runner's `core.autocrlf=true` makes that case real.
+          awk -v ver="$VERSION" '
+            { line = $0; cr = sub(/\r$/, "", line) ? "\r" : "" }
+            /^\[/ { pkg = (line == "[package]") }
+            pkg && !stamped && line ~ /^version[ \t]*=/ {
+              print "version = \"" ver "\"" cr; stamped = 1; next
+            }
+            { print }
+            END { if (!stamped) exit 3 }
+          ' daemon/Cargo.toml > daemon/Cargo.toml.stamped
+          mv daemon/Cargo.toml.stamped daemon/Cargo.toml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Stamped daemon/Cargo.toml -> $VERSION"
+
+      # A stamp that silently no-ops is the bug this change exists to delete, so
+      # read the version back through cargo's own manifest parser (NOT `cargo
+      # pkgid`, which answers from the stale Cargo.lock) and fail the job on a
+      # mismatch. Also assert no OTHER crate's manifest moved — a daemon release
+      # must never restamp the host.
+      - name: Verify the stamp landed
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          ACTUAL=$(cargo read-manifest --manifest-path daemon/Cargo.toml | jq -r .version)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::daemon/Cargo.toml reports version '$ACTUAL', expected '$EXPECTED' — the stamp did not land"
+            exit 1
+          fi
+          # Assigned first (not piped inside `if`) so a git failure aborts under
+          # `set -e` instead of yielding empty output that passes the guard.
+          CHANGED=$(git diff --name-only -- '*Cargo.toml')
+          # SUBSET check, not equality: the read-back above already proved this
+          # crate's version is right, so all this guard owes us is "no OTHER
+          # manifest moved". Demanding exact equality also failed when the stamp
+          # was a legitimate no-op — a dispatch re-run of an already-released
+          # version, or a PR that hand-bumped the floor while carrying a
+          # `semver:*` label — leaving CHANGED empty and killing a correct job.
+          # `grep -v` exits 1 when nothing survives the filter, which is the
+          # SUCCESS case here, so `|| true` keeps `set -o pipefail` from aborting.
+          OTHERS=$(printf '%s\n' "$CHANGED" | grep -v -e '^daemon/Cargo\.toml$' -e '^$' || true)
+          if [ -n "$OTHERS" ]; then
+            echo "::error::A daemon release must not modify any other crate's manifest; also changed: $(echo "$OTHERS" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "OK: tv-shell-input $ACTUAL (no other crate's manifest changed)"
+
+      # No `--locked`: the stamped version makes Cargo.lock's entry for this
+      # package stale by design, and cargo refreshes it in place.
       - name: Build (--features cec,mcp)
         run: cargo build --release -p tv-shell-input --features cec,mcp
 
@@ -196,6 +282,7 @@ jobs:
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
           BUMP: ${{ needs.detect.outputs.bump_type }}
+          VERSION: ${{ steps.stamp.outputs.version }}
         run: |
           {
             echo "## Release Input"
@@ -204,6 +291,7 @@ jobs:
             echo "|---|---|"
             echo "| Tag | \`${TAG}\` |"
             echo "| Bump | ${BUMP} |"
+            echo "| CARGO_PKG_VERSION | \`${VERSION}\` (stamped into daemon/Cargo.toml) |"
             echo "| Artifacts | tv-shell-input (linux-gnu) + checksums.txt |"
             echo
             echo "[View release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG})"

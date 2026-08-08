@@ -14,7 +14,7 @@ The input/backend daemon (`tv-shell-input`, Rust source in `daemon/`) communicat
 
 The daemon removes any existing socket file on startup and creates a new one. Clients connect, send one command per line, and read the response. The `subscribe` command is the exception — it holds the connection open and streams events.
 
-Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, `webapp-list`, `webapp-add`, `get-notifications`, `record-notification`, `set-notifications`, the shell's `shell-state` push, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, `net-throughput`, `net-ping`, and `power-battery`, the Phase 4 query replies `hypr-active`, `hypr-clients`, `hypr-monitors`, and `sunshine-status`, and the CEC query replies `cec-scan`, `cec-health`, and `cec-test`. JSON only ever appears as such a body — never as the framing itself.
+Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, `webapp-list`, `webapp-add`, `get-notifications`, `record-notification`, `set-notifications`, the shell's `shell-state` push, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, `net-throughput`, `net-ping`, and `power-battery`, the Phase 4 query replies `hypr-active`, `hypr-clients`, `hypr-monitors`, and `sunshine-status`, the CEC query replies `cec-scan`, `cec-health`, and `cec-test`, and the `capabilities` handshake. JSON only ever appears as such a body — never as the framing itself.
 
 ## Client-to-Daemon Commands
 
@@ -683,6 +683,70 @@ Example:
 ```json
 {"cpuPct":12.5,"memUsed":8123456789,"memTotal":33554432000,"memPct":24,"load1":0.42,"temps":[{"label":"Package id 0","celsius":41.0}]}
 ```
+
+---
+
+## Node Capabilities
+
+### `capabilities`
+
+Return what this node declares it can do, so a client (the panel) can build its
+nav **and register its routes** from the answer instead of probing. Same shape
+the sidecar serves at `GET /capabilities` ([HOST_SETUP.md](HOST_SETUP.md)) —
+single-sourced as `tv_shell_protocol::Capabilities`.
+
+**Capability is declared, never inferred** — the same rule as
+[`shell-focus`](#shell-focus-onoff), for the same reason: a probe answers a
+question adjacent to the one you asked, and is confidently wrong.
+
+**Request:** `capabilities` (bare, no body).
+**Response:** Compact single-line JSON object.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `node_id` | string | Stable node identity (see below) |
+| `kind` | string | `shell` for this daemon (`sidecar` for `tv-shell-host`) |
+| `agent_version` | string | `CARGO_PKG_VERSION`, stamped from the release tag by `release-input.yml` |
+| `platform` | string | `linux` \| `windows` \| `macos`, resolved at compile time |
+| `features` | array | Sorted snake_case feature names (see below) |
+
+```json
+{"node_id":"htpc-1","kind":"shell","agent_version":"0.2.2","platform":"linux","features":["cec","controllers","widgets","web_apps","settings_store","shell_lifecycle","screenshot","sleep","dev_deploy","logs"]}
+```
+
+**`node_id` resolution order:** `[mqtt].device_id` from `config.toml` → the
+machine hostname (`/proc/sys/kernel/hostname`) → `"tv-shell"`. `device_id` leads
+because the repo already treats it as *the* explicit, never-derived node
+identity, so a box cannot answer to one name in Home Assistant and another in the
+panel; hostname second mirrors `[cec].osd_name`'s fallback.
+
+**Feature-set rule: report what this build can *do*, never what is momentarily
+*working*.** Every entry is derived from a compile-time or config gate — a wedged
+CEC adapter does not drop `cec`, because a page must not disappear when a cable
+is loose. Runtime health has its own commands (`cec-health`, `status`).
+
+| Feature | Gate |
+|---|---|
+| `settings_store`, `widgets`, `web_apps` | unconditional — the IPC handlers are compiled on every target |
+| `cec` | the `cec` cargo feature |
+| `controllers`, `shell_lifecycle`, `sleep` | `target_os = "linux"` (evdev/uinput, `shell-focus`, logind) |
+| `logs` | `[http].bind` **or** `[mcp].bind` set — `/dev/logs` / MCP `get_logs`, neither dev-gated |
+| `screenshot` | `target_os = "linux"` **and** `[http].bind` or `[mcp].bind` set — capture is only reachable via `GET /screenshot` / MCP `screenshot`; there is no socket command for it (`capture-next`/`capture-cancel` are gamepad-binding capture) |
+| `dev_deploy` | `[http].bind` set, **or** `[mcp].bind` with `[mcp].dev = true` |
+
+`shell_lifecycle` covers the **screen-ownership push** (`shell-focus on|off`)
+only — restarting the QML shell is `POST /dev/restart-shell` / MCP
+`restart_shell`, a bridge route, not IPC.
+
+Never claimed by this daemon: `wallpapers`, `processes`, `system_updates` (no
+daemon surface — they belong to QML and the panel's exec tier), and
+`steam_library` / `game_launch`, which the daemon only **proxies** to the sidecar
+over HTTP. A proxied capability stays the remote node's to declare; claiming it
+here would render a page whose actions execute on a different machine.
+
+An unrecognized feature name deserializes to a preserved-verbatim `Unknown`
+rather than failing the parse, so an older client reads a newer node's set
+without losing the features it *does* understand.
 
 ---
 

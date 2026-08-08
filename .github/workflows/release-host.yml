@@ -20,6 +20,10 @@
 # `tag_prefix: host-`, so it only ever reads and writes `host-v*` tags and the
 # next version is computed from the `host-v*` series alone.
 #
+# The build job STAMPS the computed tag version into `host/Cargo.toml` before
+# `cargo build`, so the released binary's `CARGO_PKG_VERSION` is the real release
+# version rather than the in-repo floor, and verifies the stamp landed.
+#
 # NOTE: releases are no longer cut by pushing a `host-v*` tag by hand. Merge a PR
 # labelled `semver:host:patch|minor|major`, or run this workflow manually.
 
@@ -171,6 +175,87 @@ jobs:
           workspaces: .
           key: release-host-${{ matrix.target }}
 
+      # `CARGO_PKG_VERSION` is what `GET /status`, the MQTT state payload, and the
+      # HA `host_version` diagnostic entity report. The in-repo manifest only
+      # tracks the last released tag, so write the tag being built into
+      # host/Cargo.toml BEFORE cargo reads it — otherwise every release reports the
+      # in-repo floor forever (it reported `0.1.0` through host-v0.6.0).
+      #
+      # Stamping the manifest (not a build-time env var) is deliberate: cargo's
+      # fingerprint includes the package version, so the rust-cache restore above
+      # cannot serve a stale artifact carrying the previous version. It also runs
+      # AFTER the cache step so the cache key is computed from the unstamped
+      # manifest and stays stable across releases.
+      - name: Stamp release version into host/Cargo.toml
+        id: stamp
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#host-}"; VERSION="${VERSION#v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Tag '$TAG' did not yield a semver version (got '$VERSION')"; exit 1 ;;
+          esac
+          # Rewrites ONLY the `version` key of the `[package]` table: awk tracks
+          # the current table header and edits the first matching key while inside
+          # `[package]`. A dependency's version (`foo = { version = "1" }`) lives
+          # in another table AND is not a line-leading `version` key, so neither
+          # gate can reach it. A manifest with no `[package] version` exits 3
+          # rather than silently no-op'ing. Records are compared with the trailing
+          # CR stripped (and re-emitted) so the Windows leg — where the runner's
+          # `core.autocrlf=true` checks the manifest out with CRLF — matches the
+          # `[package]` header instead of failing every host release.
+          awk -v ver="$VERSION" '
+            { line = $0; cr = sub(/\r$/, "", line) ? "\r" : "" }
+            /^\[/ { pkg = (line == "[package]") }
+            pkg && !stamped && line ~ /^version[ \t]*=/ {
+              print "version = \"" ver "\"" cr; stamped = 1; next
+            }
+            { print }
+            END { if (!stamped) exit 3 }
+          ' host/Cargo.toml > host/Cargo.toml.stamped
+          mv host/Cargo.toml.stamped host/Cargo.toml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Stamped host/Cargo.toml -> $VERSION"
+
+      # A stamp that silently no-ops is the bug this change exists to delete, so
+      # read the version back through cargo's own manifest parser (NOT `cargo
+      # pkgid`, which answers from the stale Cargo.lock) and fail the job on a
+      # mismatch. Also assert no OTHER crate's manifest moved — a host release
+      # must never restamp the daemon.
+      - name: Verify the stamp landed
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          ACTUAL=$(cargo read-manifest --manifest-path host/Cargo.toml | jq -r .version)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::host/Cargo.toml reports version '$ACTUAL', expected '$EXPECTED' — the stamp did not land"
+            exit 1
+          fi
+          # Assigned first (not piped inside `if`) so a git failure aborts under
+          # `set -e` instead of yielding empty output that passes the guard.
+          CHANGED=$(git diff --name-only -- '*Cargo.toml')
+          # SUBSET check, not equality: the read-back above already proved this
+          # crate's version is right, so all this guard owes us is "no OTHER
+          # manifest moved". Demanding exact equality also failed when the stamp
+          # was a legitimate no-op — a dispatch re-run of an already-released
+          # version, or a PR that hand-bumped the floor while carrying a
+          # `semver:*` label — leaving CHANGED empty and killing a correct job.
+          # `grep -v` exits 1 when nothing survives the filter, which is the
+          # SUCCESS case here, so `|| true` keeps `set -o pipefail` from aborting.
+          OTHERS=$(printf '%s\n' "$CHANGED" | grep -v -e '^host/Cargo\.toml$' -e '^$' || true)
+          if [ -n "$OTHERS" ]; then
+            echo "::error::A host release must not modify any other crate's manifest; also changed: $(echo "$OTHERS" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "OK: tv-shell-host $ACTUAL (no other crate's manifest changed)"
+
+      # No `--locked`: the stamped version makes Cargo.lock's entry for this
+      # package stale by design, and cargo refreshes it in place.
       - name: Build
         run: cargo build --release -p tv-shell-host --target ${{ matrix.target }}
 
@@ -231,6 +316,7 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
           BUMP: ${{ needs.detect.outputs.bump_type }}
         run: |
+          VERSION="${TAG#host-}"; VERSION="${VERSION#v}"
           {
             echo "## Release Host"
             echo
@@ -238,6 +324,7 @@ jobs:
             echo "|---|---|"
             echo "| Tag | \`${TAG}\` |"
             echo "| Bump | ${BUMP} |"
+            echo "| CARGO_PKG_VERSION | \`${VERSION}\` (stamped into host/Cargo.toml) |"
             echo "| Artifacts | 4 binaries + checksums.txt |"
             echo
             echo "[View release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG})"

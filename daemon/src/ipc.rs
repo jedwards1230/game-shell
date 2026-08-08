@@ -495,6 +495,10 @@ async fn dispatch_stateless(
         // Build identity: resolved live (async git), so served directly rather
         // than via the blocking pool.
         Command::BuildInfo => Some(bridge_core::build_info_json().await),
+        // Capability handshake: config + compile-time only, plus one small
+        // procfs read for the hostname fallback — off the reactor like
+        // `sys-status`.
+        Command::Capabilities => Some(spawn_blocking_string(capabilities_json).await),
 
         _ => None,
     }
@@ -520,6 +524,151 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .unwrap_or_else(|e| protocol::resp_error(&format!("internal task failed: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// `capabilities` — this node's declared capability handshake
+// ---------------------------------------------------------------------------
+
+/// Serialize this node's [`Capabilities`](tv_shell_protocol::Capabilities) as
+/// the compact single-line JSON reply for the `capabilities` command.
+fn capabilities_json() -> String {
+    serde_json::to_string(&capabilities())
+        .unwrap_or_else(|e| protocol::resp_error(&format!("capabilities serialize failed: {e}")))
+}
+
+/// Build the capability handshake for this daemon.
+///
+/// **Declared, never inferred, and never health-derived.** Every entry answers
+/// "was this compiled in / configured?", not "is it working right now?" — a CEC
+/// adapter that is currently wedged does not remove `cec` from the set, because
+/// the panel gates *routes* on this and a page must not vanish because a cable
+/// is loose. Runtime health has its own commands (`cec-health`, `status`).
+fn capabilities() -> tv_shell_protocol::Capabilities {
+    let cfg = crate::daemon_config::global();
+    tv_shell_protocol::Capabilities {
+        node_id: resolve_node_id(cfg.mqtt.device_id.as_deref(), hostname().as_deref()),
+        kind: tv_shell_protocol::NodeKind::Shell,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: tv_shell_protocol::Platform::current(),
+        features: features(cfg),
+    }
+}
+
+/// Resolve this node's stable identity: the explicitly-configured
+/// `[mqtt].device_id`, else the machine hostname, else `"tv-shell"`.
+///
+/// `device_id` leads because the repo already treats it as *the* explicit,
+/// never-derived node identity (see `tv_shell_protocol::mqtt::DeviceId`) — so a
+/// node that publishes to Home Assistant and a node that answers `capabilities`
+/// cannot disagree about what they are called. Hostname second mirrors
+/// [`crate::daemon_config::resolve_osd_name`]'s fallback (and takes the same
+/// pure `(configured, hostname)` shape for the same reason), so the panel, the
+/// AV chain, and SSH all show the same name on an unconfigured box.
+///
+/// Each candidate must parse as a [`tv_shell_protocol::mqtt::DeviceId`] to be
+/// accepted; one that doesn't falls through to the next. Without that check the
+/// "cannot disagree about what they are called" claim above is false — MQTT
+/// validates the id and this did not, so a `device_id` of `a/b` would publish
+/// nothing while `capabilities` reported `a/b`. It also bounds this field, which
+/// is otherwise the only unbounded input to a reply that rides a line protocol.
+fn resolve_node_id(configured: Option<&str>, hostname: Option<&str>) -> String {
+    [configured, hostname]
+        .into_iter()
+        .flatten()
+        .find_map(|s| {
+            tv_shell_protocol::mqtt::DeviceId::new(s.trim())
+                .ok()
+                .map(|d| d.as_str().to_string())
+        })
+        .unwrap_or_else(|| "tv-shell".to_string())
+}
+
+/// The machine hostname from `/proc/sys/kernel/hostname` (the same source
+/// `sys-status` reads), or `None` when absent/empty — e.g. on a non-Linux build.
+fn hostname() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    let name = raw.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The feature set this build + config can actually serve.
+///
+/// Each entry is derived from exactly one gate — never hardcoded:
+///
+/// | Gate | Features |
+/// |---|---|
+/// | always compiled in | `settings_store`, `widgets`, `web_apps` |
+/// | `--features cec` | `cec` |
+/// | `target_os = "linux"` | `controllers`, `shell_lifecycle`, `sleep` |
+/// | `target_os = "linux"` **and** a network bridge is configured | `screenshot` |
+/// | a network bridge is configured | `logs` |
+/// | dev tooling is reachable | `dev_deploy` |
+///
+/// Deliberately **absent**: `wallpapers`, `processes`, and `system_updates`
+/// (the daemon serves none of them — they belong to QML and the panel's own
+/// exec tier), and `steam_library` / `game_launch`, which this daemon only
+/// *proxies* to the sidecar over HTTP. A proxied capability stays the remote
+/// node's to declare; claiming it here would make the panel render a page whose
+/// actions execute on a different machine, which is exactly the peers-are-links-
+/// not-proxies rule.
+fn features(
+    cfg: &crate::daemon_config::DaemonConfig,
+) -> std::collections::BTreeSet<tv_shell_protocol::Feature> {
+    use tv_shell_protocol::Feature;
+    let mut f = std::collections::BTreeSet::new();
+
+    // Unconditional: these ride the Unix-socket IPC, which is compiled on every
+    // target with no feature or config gate (`get-config`/`set-config` for the
+    // settings store — the same store the per-widget subtree lives in — and the
+    // `webapp-*` registry commands).
+    f.insert(Feature::SettingsStore);
+    f.insert(Feature::Widgets);
+    f.insert(Feature::WebApps);
+
+    // Cargo feature, not adapter health (see the fn docs).
+    if cfg!(feature = "cec") {
+        f.insert(Feature::Cec);
+    }
+
+    // The evdev/uinput input runtime, the QML shell's screen-ownership push, and
+    // logind suspend are all Linux-only.
+    if cfg!(target_os = "linux") {
+        f.insert(Feature::Controllers);
+        f.insert(Feature::ShellLifecycle);
+        f.insert(Feature::Sleep);
+    }
+
+    // Log tailing is a network-surface route (`GET /dev/logs`, MCP `get_logs`);
+    // neither is dev-gated, so any configured bridge is enough. There is no
+    // Unix-socket equivalent, so with both surfaces off this genuinely cannot be
+    // served.
+    let http = cfg.http.bind.is_some();
+    // Cargo feature AND config, for the same reason `cec` is gated above: the MCP
+    // server is `#[cfg(feature = "mcp")]`, and `daemon_config::validate()` does
+    // not reject an `[mcp].bind` on a build that cannot serve it. A default
+    // `cargo build` with `[mcp].bind` set starts nothing, so trusting the config
+    // alone would advertise `logs`/`screenshot`/`dev_deploy` on a node serving
+    // none of them — the lying handshake this whole type exists to prevent.
+    let mcp = cfg!(feature = "mcp") && cfg.mcp.bind.is_some();
+    if http || mcp {
+        f.insert(Feature::Logs);
+    }
+    // Screenshot capture (`grim`) is Linux-only AND network-surface-only: it is
+    // reachable via `GET /screenshot` and the MCP `screenshot` tool, and there is
+    // no Unix-socket command for it (`capture-next`/`capture-cancel` are gamepad
+    // binding capture, unrelated). Same shape as `logs` — with both bridges off a
+    // Linux daemon genuinely cannot serve a frame, so it must not be claimed.
+    if cfg!(target_os = "linux") && (http || mcp) {
+        f.insert(Feature::Screenshot);
+    }
+    // Deploy/build are the HTTP bridge's `/dev/deploy` + `/dev/build`, or the
+    // MCP tools of the same name — which are additionally gated on `[mcp].dev`.
+    if http || (mcp && cfg.mcp.dev) {
+        f.insert(Feature::DevDeploy);
+    }
+
+    f
 }
 
 /// Resolve a non-subscribe command to its response line.
@@ -733,7 +882,10 @@ async fn dispatch(
         | Command::SysStatus
         | Command::StorageStatus
         | Command::SysMetrics
-        | Command::BuildInfo => return protocol::resp_unknown(),
+        | Command::BuildInfo
+        // The capability handshake is compile-time + config only — stateless,
+        // consumed by `dispatch_stateless` above.
+        | Command::Capabilities => return protocol::resp_unknown(),
         // Phase 3 D-Bus commands are consumed by `dispatch_dbus` above (which
         // returns early); they never reach this match. The MAC-usage variant is
         // a stateless error reply handled there too.
@@ -1240,6 +1392,36 @@ mod tests {
         assert!(bi.get("sha").map(|v| v.is_string()).unwrap_or(false));
         assert!(bi.get("branch").map(|v| v.is_string()).unwrap_or(false));
 
+        // capabilities dispatches statelessly and deserializes back through the
+        // SHARED wire type — the panel parses this exact contract, so a shape
+        // drift must fail here rather than at a remote node.
+        let caps_line = send_line(&mut s, "capabilities").await;
+        let caps: tv_shell_protocol::Capabilities = serde_json::from_str(&caps_line)
+            .unwrap_or_else(|e| panic!("capabilities should parse ({e}), got: {caps_line}"));
+        assert_eq!(caps.kind, tv_shell_protocol::NodeKind::Shell);
+        assert_eq!(caps.agent_version, env!("CARGO_PKG_VERSION"));
+        assert!(!caps.node_id.is_empty(), "node_id must never be empty");
+        // The unconditional trio is present on every build/target.
+        for want in [
+            tv_shell_protocol::Feature::SettingsStore,
+            tv_shell_protocol::Feature::Widgets,
+            tv_shell_protocol::Feature::WebApps,
+        ] {
+            assert!(caps.features.contains(&want), "missing {want:?}");
+        }
+        // A deliberate reply-size budget, NOT a codec limit: `handle_client`'s
+        // `LinesCodec::new_with_max_length(4096)` bounds the INBOUND command line
+        // only (`LinesCodec`'s `Encoder` ignores `max_length`), and the one
+        // in-tree reader — panel/src/ipc.rs — reads replies with an unbounded
+        // `BufReader::read_line`. Nothing truncates an oversized reply; this keeps
+        // the handshake small enough to stay well inside the inbound frame size as
+        // features accrue.
+        assert!(
+            caps_line.len() < 4096,
+            "capabilities reply is {} bytes",
+            caps_line.len()
+        );
+
         // Intent control surface: a closed-vocabulary name is accepted; an
         // unknown name is rejected; a bare command is a usage error.
         assert_eq!(send_line(&mut s, "intent home-tap").await, "ok");
@@ -1448,5 +1630,138 @@ mod tests {
         };
         let resp = dispatch_dbus(&dbus, &Command::CecScan).await;
         assert_eq!(resp, Some("error:unsupported on this platform".to_string()));
+    }
+
+    // --- capabilities ------------------------------------------------------
+
+    /// The explicit `[mqtt].device_id` wins; a blank/absent one falls through to
+    /// the hostname, then to the constant. Same precedence shape as
+    /// `resolve_osd_name`, so the two identities can't diverge.
+    #[test]
+    fn node_id_prefers_the_configured_device_id() {
+        assert_eq!(resolve_node_id(Some("htpc-1"), Some("box")), "htpc-1");
+        assert_eq!(resolve_node_id(None, Some("box")), "box");
+        assert_eq!(resolve_node_id(Some("  "), Some("box")), "box");
+        assert_eq!(resolve_node_id(Some(" htpc-1 "), None), "htpc-1");
+        assert_eq!(resolve_node_id(None, None), "tv-shell");
+        assert_eq!(resolve_node_id(Some(""), Some(" ")), "tv-shell");
+    }
+
+    /// `cec` tracks the CARGO FEATURE, not adapter health — the whole point of
+    /// declaring rather than probing. This test flips with the build leg, which
+    /// is why CI's `--features cec` leg is what actually pins the true branch.
+    #[test]
+    fn cec_feature_follows_the_cargo_feature() {
+        let f = features(&crate::daemon_config::DaemonConfig::default());
+        assert_eq!(
+            f.contains(&tv_shell_protocol::Feature::Cec),
+            cfg!(feature = "cec")
+        );
+    }
+
+    /// An all-default config (no `[http]`/`[mcp]` bind) serves no network
+    /// surface, so none of `logs`, `screenshot`, or `dev_deploy` may be claimed
+    /// — and the unconditional trio is always there.
+    #[test]
+    fn default_config_claims_no_network_surface() {
+        use tv_shell_protocol::Feature;
+        let f = features(&crate::daemon_config::DaemonConfig::default());
+        assert!(!f.contains(&Feature::Logs));
+        assert!(!f.contains(&Feature::Screenshot));
+        assert!(!f.contains(&Feature::DevDeploy));
+        for want in [Feature::SettingsStore, Feature::Widgets, Feature::WebApps] {
+            assert!(f.contains(&want), "missing {want:?}");
+        }
+    }
+
+    /// Build a config with only the network surfaces set — struct-update form so
+    /// no test hand-rolls a `DaemonConfig` literal that a new section breaks.
+    fn surface_cfg(
+        http: Option<&str>,
+        mcp: Option<&str>,
+        dev: bool,
+    ) -> crate::daemon_config::DaemonConfig {
+        use crate::daemon_config::{DaemonConfig, HttpConfig, McpConfig};
+        DaemonConfig {
+            http: HttpConfig {
+                bind: http.map(str::to_string),
+                ..Default::default()
+            },
+            mcp: McpConfig {
+                bind: mcp.map(str::to_string),
+                dev,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// `logs` and `screenshot` ride any configured bridge (`screenshot`
+    /// additionally needs Linux); `dev_deploy` additionally needs `[mcp].dev`
+    /// when MCP is the only surface. An MCP-only node with dev tooling off must
+    /// NOT advertise deploy — the panel would register a route the daemon
+    /// refuses. Likewise a bridge-less Linux daemon must not advertise
+    /// `screenshot`: capture is only reachable over `GET /screenshot` / the MCP
+    /// `screenshot` tool, never over the Unix socket.
+    ///
+    /// Like `cec_feature_follows_the_cargo_feature`, the `screenshot` half flips
+    /// with the build leg — on a non-Linux dev host it is vacuously false either
+    /// way, so CI's Linux daemon job is what actually pins it.
+    #[test]
+    fn logs_and_dev_deploy_follow_the_configured_surfaces() {
+        use tv_shell_protocol::Feature;
+        // `screenshot` is Linux-only on top of the surface gate, so on a non-Linux
+        // build the "configured" legs must still not claim it.
+        let linux = cfg!(target_os = "linux");
+        // An `[mcp].bind` only yields a real surface when the `mcp` cargo feature
+        // is compiled in — a default build parses the key and serves nothing, so
+        // the MCP-only legs below are conditional on the feature, not absolute.
+        let mcp = cfg!(feature = "mcp");
+
+        let f = features(&surface_cfg(None, Some("127.0.0.1:8090"), false));
+        assert_eq!(f.contains(&Feature::Logs), mcp);
+        assert_eq!(f.contains(&Feature::Screenshot), linux && mcp);
+        assert!(!f.contains(&Feature::DevDeploy));
+
+        let f = features(&surface_cfg(None, Some("127.0.0.1:8090"), true));
+        assert_eq!(f.contains(&Feature::DevDeploy), mcp);
+
+        let f = features(&surface_cfg(Some("127.0.0.1:8089"), None, false));
+        assert!(f.contains(&Feature::Logs));
+        assert_eq!(f.contains(&Feature::Screenshot), linux);
+        assert!(f.contains(&Feature::DevDeploy));
+
+        // No bridge at all — the default posture. None of the three may be
+        // claimed, on ANY target: a Linux daemon with no `[http]`/`[mcp]` bind
+        // has no route that can serve a frame or a log line.
+        let f = features(&surface_cfg(None, None, true));
+        assert!(!f.contains(&Feature::Logs));
+        assert!(!f.contains(&Feature::Screenshot));
+        assert!(!f.contains(&Feature::DevDeploy));
+    }
+
+    /// Capabilities the daemon does NOT serve must never appear — in particular
+    /// `steam_library`/`game_launch`, which it only proxies to the sidecar over
+    /// HTTP. Claiming a proxied capability would have the panel render a page
+    /// whose actions run on another machine.
+    #[test]
+    fn proxied_and_absent_features_are_never_claimed() {
+        use tv_shell_protocol::Feature;
+        // Everything the daemon CAN be configured with, so nothing is missing by
+        // accident rather than by rule.
+        let f = features(&surface_cfg(
+            Some("127.0.0.1:8089"),
+            Some("127.0.0.1:8090"),
+            true,
+        ));
+        for never in [
+            Feature::SteamLibrary,
+            Feature::GameLaunch,
+            Feature::Wallpapers,
+            Feature::Processes,
+            Feature::SystemUpdates,
+        ] {
+            assert!(!f.contains(&never), "must not claim {never:?}");
+        }
     }
 }
