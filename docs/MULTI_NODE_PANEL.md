@@ -14,7 +14,7 @@ The panel is structurally single-node today, in four separate ways:
 |---|---|---|
 | ~~Transport is concrete~~ — **fixed**, see §2 | `AppState` now holds `Arc<dyn NodeTransport>` + `Arc<dyn DevBridge>`; pages call `state.node.*` | — |
 | Unix socket is unconditional | `panel/` dials `AF_UNIX` with no `cfg` | The crate **does not build on Windows** (`CONTRIBUTING.md` says so explicitly) |
-| Routes are flat and ungated | 88 routes registered unconditionally in `main.rs`, 68 of them `post` | Every page assumes CEC, controllers, widgets, a QML shell — none of which a sidecar node has |
+| ~~Routes are flat and ungated~~ — **fixed**, see §1 | `build_router` registers each route in one of four tiers (recovery / node / capability / danger); only 22 stay unconditional, 7 of them `post` | — |
 | Platform ops are Linux-only | `exec.rs` (systemd), `updates.rs` (pacman) | A Windows node has no systemctl and no `checkupdates` |
 
 `protocol/` already exists as the shared daemon↔host wire-type crate, which is
@@ -58,6 +58,40 @@ asked, and is confidently wrong.
 **Gating is on the route, not just the nav.** A hidden nav link with a live route
 behind it is not a gate. Registering an ungated mutating route should be a test
 failure, not a review comment.
+
+**Landed** in `panel/src/capabilities.rs`. Four tiers, one `Gate` value each,
+resolved from a snapshot taken **once at startup**:
+
+| Tier | Registered when | Routes |
+|---|---|---|
+| Recovery | always | dashboard, processes + updates, media page + wallpaper files, logs, dev page, unit restarts, nav dot, login, assets |
+| Node | the handshake succeeded | the Tools console (`/tools/*` minus `raw` and the controller-DB pair) |
+| Capability | the named `Feature` is declared | `cec` → `/cec/*`; `controllers` → `/controllers/*` + `/tools/sys/controllerdb-*`; `widgets` → `/widgets/*`; `settings_store` → `/settings/*` + `/media/wallpaper/select`; `web_apps` → `/media/webapp/*`; `screenshot` → `/dev/screenshot*` |
+| Danger | `[panel].allow_dangerous`, **intersected** with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy`; `/dev/reboot`, `/dev/suspend`, `/processes/updates/apply`, `/tools/raw` are the panel's own exec tier and carry no capability gate |
+
+**The gate must be checked against what the node actually emits.**
+`daemon/src/ipc.rs::features()` deliberately never emits `wallpapers`,
+`processes`, `system_updates`, `steam_library` or `game_launch` — so gating
+`/media/wallpaper/*`, `/processes` or `/processes/updates/*` on the matching
+`Feature` would have deleted those working pages from htpc-1. They are recovery
+tier because the panel serves them itself, out of its own filesystem and exec
+tier. `Feature::Logs` describes the *daemon's* `GET /dev/logs`, so the panel's
+`/logs` page — `journalctl` via direct exec — is recovery tier too.
+
+**A failed handshake falls back to the EMPTY set**, i.e. recovery tier only —
+fail-closed, and identical to the daemon-independent set, so the panel keeps
+precisely what still works and gains nothing that would lie. Never fail-open.
+The degraded state is rendered as a banner, not left silent.
+
+**Registration is static, so a capability change needs a panel restart.** Sound
+because the node's set is itself static: compile-time cfgs plus startup config,
+with health explicitly excluded (a wedged CEC adapter does not drop `cec`).
+
+Enforced by test, not convention: `panel/src/tests.rs` parses `build_router`
+and attributes every route to its registration block, then asserts that against
+the hand-maintained `route_table()`; every unconditional `post` must appear in
+`RECOVERY_TIER_MUTATING` **with a written reason**; and a live-router test pins
+that htpc-1's declared set still registers exactly today's 90 routes.
 
 ### 2. A transport trait replaces the concrete clients — **landed**
 
@@ -172,8 +206,12 @@ Implement the reserved token: a form login setting an `HttpOnly` +
 access, both validated against the same token file with a **constant-time**
 comparison.
 
-Scale of the exposure: **88 routes are registered, 68 of them `post`.** Every one
-is reachable unauthenticated on the LAN today.
+Scale of the exposure at the time this was written: **88 routes registered, 68 of
+them `post`**, every one reachable unauthenticated on the LAN. **Fixed** — the
+token, the login form and the `route_layer` gate landed; only the four documented
+exemptions serve anonymously (`docs/PANEL.md` § Authentication). Capability
+gating (§1) narrowed it further: 22 routes are now unconditional, 7 of them
+`post`.
 
 **S2 — The panel is a confused deputy for the daemon's token.**
 The panel reads `[http].token_file` and attaches it to every bridge call. An
@@ -256,6 +294,7 @@ re-implementing the checks.
 3. **`NodeTransport` trait**, `IpcTransport` behind `cfg(unix)`, pages migrated
    off `state.ipc`. No behavior change on htpc-1 — this step should be invisible.
 4. **Capability-gated routes + nav**, with the ungated-mutating-route test.
+   **Landed** — `panel/src/capabilities.rs`; see §1.
 5. **`PlatformOps` trait**; Windows implementations; panel added to the Windows
    CI leg.
 6. **Deploy to desktop-2**, peer switcher, per-node Ansible vars and token.
