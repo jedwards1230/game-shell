@@ -126,6 +126,22 @@ pub trait NodeTransport: Send + Sync {
     /// wait can exceed it (e.g. `capture-next`, which blocks up to 10s
     /// server-side waiting for a gamepad button press; see
     /// `pages::controllers`).
+    ///
+    /// # Contract
+    ///
+    /// An implementation **MUST** return within roughly `timeout`, whatever its
+    /// own default is. This is a liveness guarantee, not a hint: `pages::nav`
+    /// probes the daemon on an 800ms budget from a ~10s htmx poll precisely so
+    /// that a hung daemon cannot make those polls pile up. A transport that
+    /// forwards this to a client-level default (a `reqwest` timeout, say) and
+    /// ignores the argument silently reinstates that pile-up — on the wedged-
+    /// daemon path the panel exists to survive.
+    ///
+    /// Note the bound cannot be enforced generically by wrapping `command` in
+    /// `tokio::time::timeout`: that would yield `min(timeout, default)` and
+    /// break `capture-next`, whose 12s budget must *exceed* the default. So it
+    /// is each implementation's obligation. `IpcTransport` is held to it by
+    /// `command_timeout_bounds_a_hung_peer`.
     async fn command_timeout(
         &self,
         line: &str,

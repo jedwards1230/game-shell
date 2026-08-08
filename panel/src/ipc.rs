@@ -12,8 +12,10 @@
 //! The module is `cfg(unix)`-gated because `AF_UNIX` is the whole premise. A
 //! Windows panel would need `HttpTransport` (and a remote-node config surface)
 //! instead — see `docs/MULTI_NODE_PANEL.md`; nothing else here is portable
-//! today anyway (`config.rs` calls `libc::getuid`, `exec.rs` shells to
-//! `systemctl`).
+//! today anyway (`config.rs` calls `libc::getuid`, `pages/cec.rs` calls
+//! `libc::gethostname`, `exec.rs` shells to `systemctl`/`journalctl`, and
+//! `libc` itself is a `cfg(unix)` dependency — so those two call sites fail at
+//! name resolution off unix, not merely at link time).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -155,6 +157,65 @@ mod tests {
             }
         });
         sock
+    }
+
+    /// Spawn a daemon that accepts a connection, reads the request, and then
+    /// **never replies** — the wedged-daemon case. The listener is moved into
+    /// the task and held, so the connection stays open rather than closing
+    /// (a close would surface as a clean EOF, not the hang we want to test).
+    fn spawn_hung_daemon(name: &str) -> PathBuf {
+        let sock = PathBuf::from(format!(
+            "/tmp/tvshp-{name}-{}-{}.sock",
+            std::process::id(),
+            uniquifier()
+        ));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind hung daemon socket");
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (read_half, _write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line).await;
+                // Deliberately never write. Hold both halves forever.
+                std::future::pending::<()>().await;
+            }
+        });
+        sock
+    }
+
+    /// The `command_timeout` contract (see `transport.rs`): an implementation
+    /// MUST return within roughly the caller's timeout, independent of its own
+    /// default. `pages::nav` polls on an 800ms budget from a ~10s htmx loop so a
+    /// hung daemon cannot pile requests up; before `NodeTransport` this was
+    /// guaranteed structurally by one inherent method, and is now a per-impl
+    /// obligation. This holds `IpcTransport` to it.
+    ///
+    /// The assertions are deliberately two-sided: `Timeout` alone would also
+    /// pass if the transport ignored the argument and used its 3s default, so
+    /// the elapsed-time bound is what actually discriminates.
+    #[tokio::test]
+    async fn command_timeout_bounds_a_hung_peer() {
+        let sock = spawn_hung_daemon("hung");
+        let t = IpcTransport::new(sock);
+
+        let started = std::time::Instant::now();
+        let err = t
+            .command_timeout("sys-status", Duration::from_millis(200))
+            .await
+            .expect_err("a peer that never replies must not resolve");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(err, TransportError::Timeout),
+            "expected Timeout, got {err:?}"
+        );
+        // Well under DEFAULT_TIMEOUT (3s): proves the caller's budget was used
+        // and not silently widened to the transport's own default.
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "took {elapsed:?} — the caller's 200ms budget was not honored"
+        );
     }
 
     /// Like [`spawn_fake_daemon`], but also captures the exact request line
