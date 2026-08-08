@@ -327,14 +327,18 @@ pub fn spawn_canned_daemon(
 }
 
 fn state_for_socket(sock: std::path::PathBuf) -> Arc<AppState> {
+    state_for_socket_with_caps(sock, CapabilitySnapshot::fully_capable())
+}
+
+/// A state wired to a real (canned) daemon socket AND a chosen startup
+/// snapshot — the two are independent, which is the whole point: "the daemon
+/// answers right now" and "the node declared this at startup" are different
+/// facts, and a page that conflates them renders links to routes that were
+/// never registered.
+fn state_for_socket_with_caps(sock: std::path::PathBuf, caps: CapabilitySnapshot) -> Arc<AppState> {
     Arc::new(AppState {
         cfg: AppConfig::default(),
-        // Capabilities are resolved at STARTUP, so "the daemon is unreachable
-        // right now" and "the node declared nothing" are different states. The
-        // page-render tests below are about the former; a fully-capable
-        // snapshot keeps every section rendered so an assertion can't pass by
-        // the section being gated away.
-        caps: CapabilitySnapshot::fully_capable(),
+        caps,
         node: Arc::new(IpcTransport::new(sock)),
         bridge: Arc::new(BridgeClient::new(None, None)),
         recovery: Recovery::new(),
@@ -2665,6 +2669,266 @@ fn htpc_1_set_omits_every_feature_the_daemon_never_emits() {
             gate.ident()
         );
     }
+}
+
+/// **The reachable-but-ungated dashboard.** The one state the page-level
+/// affordance gate above cannot reach on its own, because it needs the daemon
+/// ANSWERING while the startup snapshot is empty:
+///
+/// handshake fails at startup → `Gate::Controllers` off → the daemon comes back
+/// → the ~5s tile poll sees `reachable == true` → the Dashboard (recovery tier,
+/// always registered) renders its tiles.
+///
+/// `reachable` is *this poll's* live probe; the gate is the *startup* snapshot.
+/// Conflating them put two `/controllers` links on a router with no such route.
+#[tokio::test]
+async fn dashboard_tiles_never_link_to_a_page_the_snapshot_gated_away() {
+    let replies = std::collections::HashMap::from([
+        ("status", "connected:grabbed"),
+        (
+            "build-info",
+            r#"{"version":"0.2.2","sha":"abc1234","branch":"main"}"#,
+        ),
+        (
+            "sys-status",
+            r#"{"os":"Arch","kernel":"6.12","hostname":"htpc-1","uptime":"1h"}"#,
+        ),
+        ("sys-metrics", "{}"),
+        ("storage-status", "[]"),
+        (
+            "get-pads",
+            r#"[{"id":"a","index":0,"name":"Pad","grabbed":true}]"#,
+        ),
+    ]);
+    let sock = spawn_canned_daemon("tiles-ungated", replies);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The daemon is up and answering, but the handshake failed at startup.
+    let state = state_for_socket_with_caps(sock, CapabilitySnapshot::unreachable());
+    let html = pages::dashboard::render_tiles(&state).await;
+
+    assert!(
+        html.contains("Input daemon"),
+        "the tiles must still render — this is the recovery tier: {html}"
+    );
+    assert!(
+        !html.contains("href=\"/controllers\""),
+        "the tiles linked to /controllers while Gate::Controllers is closed — that \
+         route is not registered, so the link 404s: {html}"
+    );
+
+    // Control: with the gate open the links come back, so the assertion above
+    // is the gate's doing and not a tile that never renders a link at all.
+    let sock2 = spawn_canned_daemon("tiles-gated", replies_for_tiles());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let open = state_for_socket_with_caps(sock2, CapabilitySnapshot::fully_capable());
+    let html = pages::dashboard::render_tiles(&open).await;
+    assert!(
+        html.contains("href=\"/controllers\""),
+        "with Gate::Controllers open the tiles must link to it: {html}"
+    );
+}
+
+/// The canned replies a fully-populated tile render needs.
+fn replies_for_tiles() -> std::collections::HashMap<&'static str, &'static str> {
+    std::collections::HashMap::from([
+        ("status", "connected:grabbed"),
+        (
+            "build-info",
+            r#"{"version":"0.2.2","sha":"abc1234","branch":"main"}"#,
+        ),
+        (
+            "sys-status",
+            r#"{"os":"Arch","kernel":"6.12","hostname":"htpc-1","uptime":"1h"}"#,
+        ),
+        ("sys-metrics", "{}"),
+        ("storage-status", "[]"),
+        (
+            "get-pads",
+            r#"[{"id":"a","index":0,"name":"Pad","grabbed":true}]"#,
+        ),
+    ])
+}
+
+/// **The nav/route drift gate** (the half `allows()` alone does not give).
+///
+/// Route registration and the nav share the *predicate* — both ask
+/// [`CapabilitySnapshot::allows`] — but not the *assignment*: `NavItem.gate` is
+/// hand-typed in `capabilities.rs` while a page's real gate is the
+/// `build_router` block it sits in, which `route_table()` mirrors. Nothing
+/// stops those two diverging, and the dangerous direction is silent: move a
+/// page to a stricter gate, leave the nav on the looser one, and the topnav
+/// renders a link to a route that was never registered.
+#[test]
+fn nav_items_agree_with_the_route_table_they_link_to() {
+    let table = route_table();
+    for item in crate::capabilities::NAV {
+        let row = table
+            .iter()
+            .find(|r| r.declared == item.href && r.method == Get)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the topnav links to {} ({}), which `route_table()` declares no \
+                     GET route for — the link would 404",
+                    item.href, item.label
+                )
+            });
+        assert_eq!(
+            row.gate.ident(),
+            item.gate.ident(),
+            "topnav item {} is gated on Gate::{} but its page is registered under \
+             Gate::{} — the nav would render a link to an unregistered route (or \
+             hide a page that exists)",
+            item.href,
+            item.gate.ident(),
+            row.gate.ident()
+        );
+        assert!(
+            !row.dangerous,
+            "topnav item {} points at a route in the dangerous set; the nav has no \
+             `allow_dangerous` input, so it cannot honor that gate",
+            item.href
+        );
+    }
+}
+
+/// Pull every literal link/form target out of a rendered page.
+///
+/// Rendered HTML, so no `{{ }}` survives — path parameters arrive already
+/// substituted (`/processes/restart/tv-shell-input`), which is why matching
+/// back to a declaration is segment-wise below.
+fn link_targets(html: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for attr in ["hx-post=\"", "hx-get=\"", "href=\""] {
+        let mut rest = html;
+        while let Some(i) = rest.find(attr) {
+            rest = &rest[i + attr.len()..];
+            let Some(end) = rest.find('"') else { break };
+            let raw = &rest[..end];
+            rest = &rest[end..];
+            if !raw.starts_with('/') {
+                continue;
+            }
+            // Query strings and fragments address the same route.
+            let path = raw.split(['?', '#']).next().unwrap_or(raw);
+            out.insert(path.to_string());
+        }
+    }
+    out
+}
+
+/// Resolve a concrete request path back to the `route_table()` row that
+/// declares it, treating a `{placeholder}` segment as a wildcard.
+fn declaring_row<'a>(table: &'a [RouteSpec], path: &str) -> Option<&'a RouteSpec> {
+    table.iter().find(|r| {
+        let declared: Vec<&str> = r.declared.split('/').collect();
+        let actual: Vec<&str> = path.split('/').collect();
+        declared.len() == actual.len()
+            && declared
+                .iter()
+                .zip(&actual)
+                .all(|(d, a)| (d.starts_with('{') && d.ends_with('}')) || d == a)
+    })
+}
+
+/// **The rendered-affordance gate.** Fetch every page a capability set
+/// registers, and assert that every link and form target in the returned HTML
+/// is itself a route registered under that same set.
+///
+/// This is the invariant `build_router`'s doc comment states — *"the panel
+/// never renders a button that 404s"* — enforced instead of asserted. The nav
+/// gate above only covers the topnav; this covers in-page affordances, which
+/// is where the interesting version of the bug lives: a page in one tier
+/// (`/tools`, node) carrying a button for a route in another
+/// (`/tools/sys/controllerdb-*`, `Gate::Controllers`).
+async fn assert_no_page_renders_an_unregistered_target(caps: CapabilitySnapshot, label: &str) {
+    let allow_dangerous = true;
+    let table = route_table();
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(allow_dangerous),
+        caps.clone(),
+    ))
+    .await;
+    let c = client();
+
+    let registered = |row: &RouteSpec| caps.allows(row.gate) && (!row.dangerous || allow_dangerous);
+
+    for page in table
+        .iter()
+        .filter(|r| r.method == Get && r.access == Authenticated && !r.exec_backed && registered(r))
+    {
+        let resp = c
+            .get(format!("{base}{}", page.request))
+            .bearer_auth(TEST_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        if resp.status() != 200 {
+            continue;
+        }
+        let body = resp.text().await.unwrap();
+        if !body.contains('<') {
+            continue;
+        }
+        for target in link_targets(&body) {
+            // Static assets and off-router anchors are not routes under test.
+            if target.starts_with("/assets/") {
+                continue;
+            }
+            let Some(row) = declaring_row(&table, &target) else {
+                panic!(
+                    "[{label}] {} renders a link to {target}, which is not a route \
+                     `route_table()` declares at all",
+                    page.request
+                )
+            };
+            assert!(
+                registered(row),
+                "[{label}] {} renders an affordance targeting {target}, which is \
+                 behind Gate::{} and is NOT registered under this capability set — \
+                 the panel would render a button that 404s",
+                page.request,
+                row.gate.ident()
+            );
+        }
+    }
+}
+
+/// The full set: every page, every affordance, all registered.
+#[tokio::test]
+async fn no_page_renders_an_unregistered_target_with_the_full_set() {
+    assert_no_page_renders_an_unregistered_target(
+        caps_with(every_gated_feature()),
+        "full capability set",
+    )
+    .await;
+}
+
+/// The failed handshake: only the recovery pages exist, and none of them may
+/// link into a tier that was gated away. This is the state the Dashboard tiles
+/// regressed in — the tile poll's live `reachable` flag is not the startup
+/// snapshot, so a daemon that came back after a failed handshake made the
+/// tiles render `/controllers` links against a router that has no such route.
+#[tokio::test]
+async fn no_page_renders_an_unregistered_target_in_recovery_mode() {
+    assert_no_page_renders_an_unregistered_target(
+        CapabilitySnapshot::unreachable(),
+        "failed handshake",
+    )
+    .await;
+}
+
+/// A node that answers but declares nothing the panel gates on — the shape a
+/// non-Linux sidecar takes. `/tools` exists (node tier) while `controllers`
+/// does not, which is exactly the pairing that put two 404 buttons on the
+/// Tools page.
+#[tokio::test]
+async fn no_page_renders_an_unregistered_target_for_a_bare_node() {
+    assert_no_page_renders_an_unregistered_target(
+        caps_with(BTreeSet::new()),
+        "handshake ok, no features",
+    )
+    .await;
 }
 
 /// The bearer path works, and a wrong token does not.

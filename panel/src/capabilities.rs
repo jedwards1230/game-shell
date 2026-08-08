@@ -289,7 +289,14 @@ pub struct NavItem {
 
 /// Every topnav link, with the gate of the page it points at. Order is the
 /// rendered order.
-const NAV: &[NavItem] = &[
+///
+/// `gate` is hand-assigned here while a page's *real* gate is the
+/// `build_router` block it sits in — two statements that could drift, and the
+/// dangerous direction (a route moves to a stricter gate, the nav keeps the
+/// looser one) is a rendered link to an unregistered route. Crate-visible so
+/// `crate::tests::nav_items_agree_with_the_route_table_they_link_to` can pin
+/// the two together.
+pub const NAV: &[NavItem] = &[
     NavItem {
         href: "/",
         label: "Dashboard",

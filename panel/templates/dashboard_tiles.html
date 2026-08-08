@@ -1,10 +1,22 @@
 {% if reachable %}
 <div class="tile-grid">
+  {# Links follow ROUTE REGISTRATION (the startup snapshot), not `reachable`
+     (this poll's live probe). With `controllers` undeclared the tile still
+     carries useful state, so it degrades to a plain div rather than vanishing
+     — unlike the Controllers tile below, which has nothing else to say. #}
+  {% if controllers_enabled %}
   <a class="tile" href="/controllers">
     <h3>Input daemon</h3>
     <p class="big"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
     <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
   </a>
+  {% else %}
+  <div class="tile">
+    <h3>Input daemon</h3>
+    <p class="big"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
+    <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
+  </div>
+  {% endif %}
   <a class="tile" href="/dev">
     <h3>Build</h3>
     <p>{{ version }}</p>
@@ -44,6 +56,7 @@
     </table>
     {% endif %}
   </a>
+  {% if controllers_enabled %}
   <a class="tile" href="/controllers">
     <h3>Controllers</h3>
     {% if pads.is_empty() %}
@@ -54,6 +67,7 @@
     {% endfor %}
     {% endif %}
   </a>
+  {% endif %}
   <a class="tile" href="/processes">
     <h3>Units</h3>
     <p><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }} <span class="muted">({{ daemon_unit.raw }})</span></p>
