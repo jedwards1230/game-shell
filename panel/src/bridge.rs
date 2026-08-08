@@ -17,6 +17,8 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
+
 /// Client timeout. 190s to comfortably exceed the daemon's own `/dev/build`
 /// timeout budget (180s, `DEV_TIMEOUT_SECS` in `daemon/src/http.rs`).
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(190);
@@ -63,6 +65,44 @@ pub struct ScreenshotResponse {
     pub captured_at: String,
 }
 
+/// The daemon's dev-ops surface, as the panel's pages depend on it.
+///
+/// Deliberately **separate from [`NodeTransport`](crate::transport::NodeTransport)**:
+/// this is a different tier. `NodeTransport` is one shape —
+/// `command(line) -> reply` — over the control surface; the bridge is a fixed
+/// set of named HTTP operations (deploy, build, restart, screenshot, logs)
+/// that has no line protocol to hide behind. Folding the two together would
+/// mean inventing a command vocabulary for operations that never had one.
+///
+/// Object-safe under `async_trait`, so `AppState` can hold
+/// `Arc<dyn DevBridge>` for the same reason it holds `Arc<dyn NodeTransport>`:
+/// the pages depend on *what* the tier does, not on `reqwest`.
+#[async_trait]
+pub trait DevBridge: Send + Sync {
+    /// `GET /dev/status` — JSON status blob (returned as raw text; callers
+    /// that need structure can `serde_json::from_str` it).
+    async fn dev_status(&self) -> Result<String, BridgeError>;
+
+    /// `GET /dev/logs?lines=N&filter=<str>` — text log body.
+    async fn dev_logs(&self, lines: usize, filter: Option<&str>) -> Result<String, BridgeError>;
+
+    /// `POST /dev/deploy?ref=<ref>`.
+    async fn deploy(&self, git_ref: Option<&str>) -> Result<String, BridgeError>;
+
+    /// `POST /dev/build`.
+    async fn build(&self) -> Result<String, BridgeError>;
+
+    /// `POST /dev/restart-shell`.
+    async fn restart_shell(&self) -> Result<String, BridgeError>;
+
+    /// `POST /dev/restart-daemon`.
+    async fn restart_daemon(&self) -> Result<String, BridgeError>;
+
+    /// `GET /screenshot` — the current display frame as PNG bytes, with
+    /// capture provenance from the response headers.
+    async fn screenshot(&self) -> Result<ScreenshotResponse, BridgeError>;
+}
+
 /// A client for the daemon's opt-in LAN HTTP dev-ops bridge.
 pub struct BridgeClient {
     base: Option<String>,
@@ -91,90 +131,6 @@ impl BridgeClient {
                 reqwest::Client::new()
             });
         Self { base, token, http }
-    }
-
-    /// `GET /dev/status` — JSON status blob (returned as raw text; callers
-    /// that need structure can `serde_json::from_str` it).
-    pub async fn dev_status(&self) -> Result<String, BridgeError> {
-        self.get("/dev/status", &[]).await
-    }
-
-    /// `GET /dev/logs?lines=N&filter=<str>` — text log body.
-    pub async fn dev_logs(
-        &self,
-        lines: usize,
-        filter: Option<&str>,
-    ) -> Result<String, BridgeError> {
-        let lines_str = lines.to_string();
-        let mut query: Vec<(&str, &str)> = vec![("lines", &lines_str)];
-        if let Some(f) = filter {
-            query.push(("filter", f));
-        }
-        self.get("/dev/logs", &query).await
-    }
-
-    /// `POST /dev/deploy?ref=<ref>`.
-    pub async fn deploy(&self, git_ref: Option<&str>) -> Result<String, BridgeError> {
-        let query: Vec<(&str, &str)> = match git_ref {
-            Some(r) => vec![("ref", r)],
-            None => vec![],
-        };
-        self.post("/dev/deploy", &query).await
-    }
-
-    /// `POST /dev/build`.
-    pub async fn build(&self) -> Result<String, BridgeError> {
-        self.post("/dev/build", &[]).await
-    }
-
-    /// `POST /dev/restart-shell`.
-    pub async fn restart_shell(&self) -> Result<String, BridgeError> {
-        self.post("/dev/restart-shell", &[]).await
-    }
-
-    /// `POST /dev/restart-daemon`.
-    pub async fn restart_daemon(&self) -> Result<String, BridgeError> {
-        self.post("/dev/restart-daemon", &[]).await
-    }
-
-    /// `GET /screenshot` — the current display frame as PNG bytes, with
-    /// capture provenance read from the `X-TvShell-{Sha,Branch,Version,
-    /// Captured-At}` response headers (`docs/CONTROL_SURFACE.md`). Also
-    /// accepts the legacy `X-GameShell-*` header names via a prefix check,
-    /// so this keeps working against a daemon mid-rename that hasn't picked
-    /// up the `X-TvShell-*` names yet.
-    pub async fn screenshot(&self) -> Result<ScreenshotResponse, BridgeError> {
-        let base = self.base.as_ref().ok_or(BridgeError::NotConfigured)?;
-        let url = format!("{base}/screenshot");
-        let mut req = self.http.get(&url);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| BridgeError::Unreachable(e.to_string()))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(BridgeError::Status(status.as_u16(), body));
-        }
-        let sha = provenance_header(&resp, "Sha");
-        let branch = provenance_header(&resp, "Branch");
-        let version = provenance_header(&resp, "Version");
-        let captured_at = provenance_header(&resp, "Captured-At");
-        let png = resp
-            .bytes()
-            .await
-            .map_err(|e| BridgeError::Unreachable(e.to_string()))?
-            .to_vec();
-        Ok(ScreenshotResponse {
-            png,
-            sha,
-            branch,
-            version,
-            captured_at,
-        })
     }
 
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<String, BridgeError> {
@@ -212,6 +168,81 @@ impl BridgeClient {
         } else {
             Err(BridgeError::Status(status.as_u16(), body))
         }
+    }
+}
+
+#[async_trait]
+impl DevBridge for BridgeClient {
+    async fn dev_status(&self) -> Result<String, BridgeError> {
+        self.get("/dev/status", &[]).await
+    }
+
+    async fn dev_logs(&self, lines: usize, filter: Option<&str>) -> Result<String, BridgeError> {
+        let lines_str = lines.to_string();
+        let mut query: Vec<(&str, &str)> = vec![("lines", &lines_str)];
+        if let Some(f) = filter {
+            query.push(("filter", f));
+        }
+        self.get("/dev/logs", &query).await
+    }
+
+    async fn deploy(&self, git_ref: Option<&str>) -> Result<String, BridgeError> {
+        let query: Vec<(&str, &str)> = match git_ref {
+            Some(r) => vec![("ref", r)],
+            None => vec![],
+        };
+        self.post("/dev/deploy", &query).await
+    }
+
+    async fn build(&self) -> Result<String, BridgeError> {
+        self.post("/dev/build", &[]).await
+    }
+
+    async fn restart_shell(&self) -> Result<String, BridgeError> {
+        self.post("/dev/restart-shell", &[]).await
+    }
+
+    async fn restart_daemon(&self) -> Result<String, BridgeError> {
+        self.post("/dev/restart-daemon", &[]).await
+    }
+
+    /// Reads capture provenance from the `X-TvShell-{Sha,Branch,Version,
+    /// Captured-At}` response headers (`docs/CONTROL_SURFACE.md`). Also
+    /// accepts the legacy `X-GameShell-*` header names via a prefix check,
+    /// so this keeps working against a daemon mid-rename that hasn't picked
+    /// up the `X-TvShell-*` names yet.
+    async fn screenshot(&self) -> Result<ScreenshotResponse, BridgeError> {
+        let base = self.base.as_ref().ok_or(BridgeError::NotConfigured)?;
+        let url = format!("{base}/screenshot");
+        let mut req = self.http.get(&url);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BridgeError::Unreachable(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BridgeError::Status(status.as_u16(), body));
+        }
+        let sha = provenance_header(&resp, "Sha");
+        let branch = provenance_header(&resp, "Branch");
+        let version = provenance_header(&resp, "Version");
+        let captured_at = provenance_header(&resp, "Captured-At");
+        let png = resp
+            .bytes()
+            .await
+            .map_err(|e| BridgeError::Unreachable(e.to_string()))?
+            .to_vec();
+        Ok(ScreenshotResponse {
+            png,
+            sha,
+            branch,
+            version,
+            captured_at,
+        })
     }
 }
 

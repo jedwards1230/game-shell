@@ -71,7 +71,10 @@ async fn main() -> anyhow::Result<()> {
     );
     let sock = config::socket_path();
     let node: Arc<dyn transport::NodeTransport> = Arc::new(ipc::IpcTransport::new(sock));
-    let bridge = bridge::BridgeClient::new(cfg.http_bridge_base.clone(), cfg.http_token.clone());
+    let bridge: Arc<dyn bridge::DevBridge> = Arc::new(bridge::BridgeClient::new(
+        cfg.http_bridge_base.clone(),
+        cfg.http_token.clone(),
+    ));
     let recovery = exec::Recovery::new();
     let updates = updates::UpdatesState::default();
 

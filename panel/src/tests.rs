@@ -31,7 +31,7 @@ fn hermetic_state() -> Arc<AppState> {
     Arc::new(AppState {
         cfg: AppConfig::default(),
         node: Arc::new(IpcTransport::new(sock)),
-        bridge: BridgeClient::new(None, None),
+        bridge: Arc::new(BridgeClient::new(None, None)),
         recovery: Recovery::new(),
         updates: crate::updates::UpdatesState::default(),
     })
@@ -323,7 +323,7 @@ fn state_for_socket(sock: std::path::PathBuf) -> Arc<AppState> {
     Arc::new(AppState {
         cfg: AppConfig::default(),
         node: Arc::new(IpcTransport::new(sock)),
-        bridge: BridgeClient::new(None, None),
+        bridge: Arc::new(BridgeClient::new(None, None)),
         recovery: Recovery::new(),
         updates: crate::updates::UpdatesState::default(),
     })
@@ -1892,7 +1892,10 @@ fn state_with(cfg: AppConfig) -> SharedState {
         std::process::id(),
         std::thread::current().id()
     ));
-    let bridge = BridgeClient::new(cfg.http_bridge_base.clone(), cfg.http_token.clone());
+    let bridge = Arc::new(BridgeClient::new(
+        cfg.http_bridge_base.clone(),
+        cfg.http_token.clone(),
+    ));
     Arc::new(AppState {
         cfg,
         node: Arc::new(IpcTransport::new(sock)),

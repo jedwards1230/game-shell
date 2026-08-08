@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::bridge::BridgeClient;
+use crate::bridge::DevBridge;
 use crate::config::AppConfig;
 use crate::exec::Recovery;
 use crate::transport::NodeTransport;
@@ -18,7 +18,9 @@ pub struct AppState {
     /// depend on *what* a node can do, not on the Unix socket that happens to
     /// serve the local one — see [`crate::transport`].
     pub node: Arc<dyn NodeTransport>,
-    pub bridge: BridgeClient,
+    /// The daemon's opt-in HTTP dev-ops tier, held as a trait object for the
+    /// same reason — see [`crate::bridge::DevBridge`].
+    pub bridge: Arc<dyn DevBridge>,
     pub recovery: Recovery,
     pub updates: UpdatesState,
 }

@@ -352,7 +352,7 @@ mod tests {
         Arc::new(AppState {
             cfg: AppConfig::default(),
             node: Arc::new(IpcTransport::new(sock)),
-            bridge: BridgeClient::new(None, None),
+            bridge: Arc::new(BridgeClient::new(None, None)),
             recovery: Recovery::new(),
             updates: crate::updates::UpdatesState::default(),
         })
