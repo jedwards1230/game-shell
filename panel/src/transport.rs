@@ -188,3 +188,234 @@ pub trait NodeTransportExt: NodeTransport {
 
 #[async_trait]
 impl<T: NodeTransport + ?Sized> NodeTransportExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// One scripted outcome for a command line. A separate enum rather than a
+    /// stored `Result<_, TransportError>` because `TransportError` is
+    /// deliberately not `Clone` (it carries the daemon's own message and is
+    /// meant to be consumed once), so each call mints a fresh error.
+    enum Scripted {
+        Reply(&'static str),
+        Command(&'static str),
+        Unreachable,
+        Timeout,
+    }
+
+    /// A second [`NodeTransport`] implementation, entirely in memory.
+    ///
+    /// This is what stops the trait being single-impl indirection: it proves
+    /// the panel's transport seam is really dynamic — something with no
+    /// socket, no daemon, and no I/O at all satisfies it and is reachable
+    /// through `Arc<dyn NodeTransport>`.
+    struct FakeTransport {
+        /// Command line → scripted outcome. A line with no entry answers
+        /// `Unreachable`, matching how the real transport reports "nothing
+        /// was listening".
+        script: HashMap<&'static str, Scripted>,
+        /// Every line this transport was asked to send, in order.
+        seen: Mutex<Vec<String>>,
+        reachability: Reachability,
+    }
+
+    impl FakeTransport {
+        fn new(script: Vec<(&'static str, Scripted)>) -> Self {
+            Self {
+                script: script.into_iter().collect(),
+                seen: Mutex::new(Vec::new()),
+                reachability: Reachability::LocalSocket(PathBuf::from("/tmp/fake-transport.sock")),
+            }
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().expect("fake transport log").clone()
+        }
+
+        fn respond(&self, line: &str) -> Result<String, TransportError> {
+            self.seen
+                .lock()
+                .expect("fake transport log")
+                .push(line.to_string());
+            match self.script.get(line) {
+                Some(Scripted::Reply(r)) => Ok((*r).to_string()),
+                Some(Scripted::Command(msg)) => Err(TransportError::Command((*msg).to_string())),
+                Some(Scripted::Timeout) => Err(TransportError::Timeout),
+                Some(Scripted::Unreachable) | None => Err(TransportError::Unreachable),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NodeTransport for FakeTransport {
+        async fn capabilities(&self) -> Result<Capabilities, TransportError> {
+            self.command_json::<Capabilities>("capabilities").await
+        }
+
+        async fn command(&self, line: &str) -> Result<String, TransportError> {
+            self.respond(line)
+        }
+
+        async fn command_timeout(
+            &self,
+            line: &str,
+            _timeout: Duration,
+        ) -> Result<String, TransportError> {
+            self.respond(line)
+        }
+
+        fn reachability(&self) -> Reachability {
+            self.reachability.clone()
+        }
+    }
+
+    /// The four `Display` strings pages render, and the two variants that mean
+    /// "the node is not there". Pinned because the degraded views assert on
+    /// this text — see `crate::tests`'s hermetic suite.
+    #[test]
+    fn transport_error_display_and_unreachable_are_stable() {
+        assert_eq!(
+            TransportError::Unreachable.to_string(),
+            "daemon unreachable"
+        );
+        assert_eq!(
+            TransportError::Timeout.to_string(),
+            "daemon request timed out"
+        );
+        assert_eq!(TransportError::Command("boom".into()).to_string(), "boom");
+        assert_eq!(
+            TransportError::Parse("bad json".into()).to_string(),
+            "failed to parse daemon reply: bad json"
+        );
+
+        assert!(TransportError::Unreachable.is_unreachable());
+        assert!(TransportError::Timeout.is_unreachable());
+        assert!(!TransportError::Command("boom".into()).is_unreachable());
+        assert!(!TransportError::Parse("bad json".into()).is_unreachable());
+    }
+
+    /// The seam is dynamic: every base-trait and extension-trait method is
+    /// reached through `Arc<dyn NodeTransport>`, never through a concrete type.
+    #[tokio::test]
+    async fn ext_helpers_work_through_dyn_dispatch() {
+        let fake = Arc::new(FakeTransport::new(vec![
+            ("status", Scripted::Reply("connected:grabbed")),
+            ("get-pads", Scripted::Reply(r#"[{"name":"Pad"}]"#)),
+            ("get-config", Scripted::Reply(r#"{"themeMode":"dark"}"#)),
+            (
+                r#"set-config {"themeMode":"light"}"#,
+                Scripted::Reply(r#"{"themeMode":"light"}"#),
+            ),
+        ]));
+        let node: Arc<dyn NodeTransport> = fake.clone();
+
+        assert_eq!(node.command("status").await.unwrap(), "connected:grabbed");
+        assert_eq!(
+            node.command_timeout("status", Duration::from_secs(9))
+                .await
+                .unwrap(),
+            "connected:grabbed"
+        );
+
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Pad {
+            name: String,
+        }
+        let pads: Vec<Pad> = node.command_json("get-pads").await.unwrap();
+        assert_eq!(pads, vec![Pad { name: "Pad".into() }]);
+
+        assert_eq!(node.get_config().await.unwrap()["themeMode"], "dark");
+        node.set_config(&serde_json::json!({"themeMode": "light"}))
+            .await
+            .unwrap();
+
+        // `set_config` must serialize the patch into a single `set-config
+        // <json>` line — the same wire form `IpcTransport`'s own test pins.
+        assert_eq!(
+            fake.seen(),
+            vec![
+                "status",
+                "status",
+                "get-pads",
+                "get-config",
+                r#"set-config {"themeMode":"light"}"#,
+            ]
+        );
+    }
+
+    /// The failure paths matter as much as the happy ones — the panel exists
+    /// to work when the node is wedged.
+    #[tokio::test]
+    async fn error_variants_propagate_unchanged_through_the_trait() {
+        let node: Arc<dyn NodeTransport> = Arc::new(FakeTransport::new(vec![
+            ("wedged", Scripted::Timeout),
+            ("refused", Scripted::Unreachable),
+            ("bad-cmd", Scripted::Command("input-runtime-down")),
+            ("not-json", Scripted::Reply("plain text")),
+        ]));
+
+        assert!(matches!(
+            node.command("wedged").await.unwrap_err(),
+            TransportError::Timeout
+        ));
+        assert!(matches!(
+            node.command("refused").await.unwrap_err(),
+            TransportError::Unreachable
+        ));
+        // Unscripted lines behave like a node that is simply not there.
+        assert!(node
+            .command("never-scripted")
+            .await
+            .unwrap_err()
+            .is_unreachable());
+        match node.command("bad-cmd").await.unwrap_err() {
+            TransportError::Command(msg) => assert_eq!(msg, "input-runtime-down"),
+            other => panic!("expected Command error, got {other:?}"),
+        }
+        // A non-JSON reply is a Parse error raised by the ext helper, not by
+        // the implementation — proving the derived helpers really are defined
+        // in terms of `command` alone.
+        let parsed: Result<serde_json::Value, _> = node.command_json("not-json").await;
+        assert!(matches!(parsed.unwrap_err(), TransportError::Parse(_)));
+    }
+
+    #[tokio::test]
+    async fn capabilities_rides_the_command_path() {
+        let node: Arc<dyn NodeTransport> = Arc::new(FakeTransport::new(vec![(
+            "capabilities",
+            Scripted::Reply(
+                r#"{"node_id":"htpc-1","kind":"shell","agent_version":"0.2.2",
+                    "platform":"linux","features":["shell.intent"]}"#,
+            ),
+        )]));
+
+        let caps = node.capabilities().await.unwrap();
+        assert_eq!(caps.node_id, "htpc-1");
+        assert_eq!(caps.kind, tv_shell_protocol::NodeKind::Shell);
+        assert_eq!(caps.platform, tv_shell_protocol::Platform::Linux);
+        assert!(!caps.features.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capabilities_surfaces_a_down_node_rather_than_panicking() {
+        let node: Arc<dyn NodeTransport> = Arc::new(FakeTransport::new(vec![]));
+        assert!(node.capabilities().await.unwrap_err().is_unreachable());
+    }
+
+    /// `reachability()` is a static descriptor: it answers without any I/O, so
+    /// it is identical before and after a call that fails.
+    #[tokio::test]
+    async fn reachability_is_static_and_does_no_probing() {
+        let node: Arc<dyn NodeTransport> = Arc::new(FakeTransport::new(vec![]));
+        let before = node.reachability();
+        assert_eq!(
+            before,
+            Reachability::LocalSocket(PathBuf::from("/tmp/fake-transport.sock"))
+        );
+        assert!(node.command("anything").await.is_err());
+        assert_eq!(node.reachability(), before);
+    }
+}

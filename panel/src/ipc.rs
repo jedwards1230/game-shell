@@ -311,4 +311,51 @@ mod tests {
         let err = client.command("status").await.unwrap_err();
         assert!(err.is_unreachable(), "expected unreachable, got {err:?}");
     }
+
+    /// The `capabilities` handshake over the real wire protocol — same
+    /// one-shot fake-daemon harness as every other command here, because it
+    /// *is* just another single-line JSON reply.
+    #[tokio::test]
+    async fn capabilities_parses_the_daemon_handshake() {
+        let sock = spawn_fake_daemon(
+            "caps",
+            r#"{"node_id":"htpc-1","kind":"shell","agent_version":"0.2.2","platform":"linux","features":["shell.intent","shell.screenshot"]}"#,
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let client = IpcTransport::new(sock);
+        let caps = client.capabilities().await.unwrap();
+        assert_eq!(caps.node_id, "htpc-1");
+        assert_eq!(caps.kind, tv_shell_protocol::NodeKind::Shell);
+        assert_eq!(caps.platform, tv_shell_protocol::Platform::Linux);
+        assert_eq!(caps.features.len(), 2);
+    }
+
+    /// A down daemon degrades the handshake to `Unreachable` — it must not
+    /// panic, and it must not be mistaken for "a node with no features".
+    #[tokio::test]
+    async fn capabilities_on_a_down_daemon_is_unreachable() {
+        let sock = PathBuf::from(format!(
+            "/tmp/tvshp-caps-down-{}-{}.sock",
+            std::process::id(),
+            uniquifier()
+        ));
+        let client = IpcTransport::new(sock);
+        let err = client.capabilities().await.unwrap_err();
+        assert!(err.is_unreachable(), "expected unreachable, got {err:?}");
+    }
+
+    /// `reachability()` is a static descriptor: it reports the configured
+    /// socket path and performs no I/O, so it answers the same for a socket
+    /// nothing is listening on.
+    #[tokio::test]
+    async fn reachability_reports_the_configured_socket_without_probing() {
+        let sock = PathBuf::from("/tmp/tvshp-never-bound.sock");
+        let client = IpcTransport::new(sock.clone());
+        assert_eq!(client.reachability(), Reachability::LocalSocket(sock));
+        assert!(client.command("status").await.is_err());
+        assert_eq!(
+            client.reachability(),
+            Reachability::LocalSocket(PathBuf::from("/tmp/tvshp-never-bound.sock"))
+        );
+    }
 }
