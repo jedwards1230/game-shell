@@ -89,11 +89,14 @@ impl std::error::Error for TransportError {}
 /// implementation; the remote/HTTP form arrives with `HttpTransport` and the
 /// multi-node work (`docs/MULTI_NODE_PANEL.md` §3).
 ///
-/// No page reads this yet — the multi-node nav that will is PR 4 — so it is
-/// exercised by the transport unit tests only. Same `#[allow(dead_code)]`
-/// treatment (and the same reason) as
-/// [`crate::config::shell_journal_tag`]: a landed surface whose consumer is a
-/// later milestone, kept honest by a test rather than deleted and re-derived.
+/// No page reads this yet, and the capability gating deliberately did not give
+/// it one: "which node is this?" is answered by the handshake's `node_id`, and
+/// asking a second, adjacent question would be exactly the probe-vs-declare
+/// mistake. Its real consumer is the multi-node switcher
+/// (`docs/MULTI_NODE_PANEL.md` §4). Same `#[allow(dead_code)]` treatment (and
+/// the same reason) as [`crate::config::shell_journal_tag`]: a landed surface
+/// whose consumer is a later milestone, kept honest by a test rather than
+/// deleted and re-derived.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reachability {
@@ -110,10 +113,9 @@ pub enum Reachability {
 #[async_trait]
 pub trait NodeTransport: Send + Sync {
     /// The node's capability handshake (`docs/IPC_PROTOCOL.md` §
-    /// `capabilities`). PR 4 builds the nav and route registration from this;
-    /// nothing gates on it yet, so no handler calls it and the transport unit
-    /// tests are its only caller (hence `dead_code`, as on [`Reachability`]).
-    #[allow(dead_code)]
+    /// `capabilities`). Called ONCE at startup by
+    /// [`crate::capabilities::handshake`], before the router is built: the
+    /// panel registers its routes and renders its nav from the returned set.
     async fn capabilities(&self) -> Result<Capabilities, TransportError>;
 
     /// Send `line` (without a trailing newline — the transport appends its own

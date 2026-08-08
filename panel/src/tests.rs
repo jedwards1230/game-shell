@@ -18,6 +18,7 @@ use crate::exec::Recovery;
 use crate::ipc::IpcTransport;
 use crate::pages;
 use crate::state::AppState;
+use tv_shell_protocol::Feature;
 
 fn hermetic_state() -> Arc<AppState> {
     // `/tmp` directly (short and stable): the socket is never bound here —
@@ -30,6 +31,12 @@ fn hermetic_state() -> Arc<AppState> {
     ));
     Arc::new(AppState {
         cfg: AppConfig::default(),
+        // Capabilities are resolved at STARTUP, so "the daemon is unreachable
+        // right now" and "the node declared nothing" are different states. The
+        // page-render tests below are about the former; a fully-capable
+        // snapshot keeps every section rendered so an assertion can't pass by
+        // the section being gated away.
+        caps: CapabilitySnapshot::fully_capable(),
         node: Arc::new(IpcTransport::new(sock)),
         bridge: Arc::new(BridgeClient::new(None, None)),
         recovery: Recovery::new(),
@@ -322,6 +329,12 @@ pub fn spawn_canned_daemon(
 fn state_for_socket(sock: std::path::PathBuf) -> Arc<AppState> {
     Arc::new(AppState {
         cfg: AppConfig::default(),
+        // Capabilities are resolved at STARTUP, so "the daemon is unreachable
+        // right now" and "the node declared nothing" are different states. The
+        // page-render tests below are about the former; a fully-capable
+        // snapshot keeps every section rendered so an assertion can't pass by
+        // the section being gated away.
+        caps: CapabilitySnapshot::fully_capable(),
         node: Arc::new(IpcTransport::new(sock)),
         bridge: Arc::new(BridgeClient::new(None, None)),
         recovery: Recovery::new(),
@@ -1214,6 +1227,7 @@ async fn cec_recover_restart_daemon_falls_back_to_exec_and_reports_health() {
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::capabilities::{CapabilitySnapshot, Gate};
 use crate::state::SharedState;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -1241,8 +1255,13 @@ struct RouteSpec {
     request: &'static str,
     method: Method,
     access: Access,
+    /// The registration block this route sits in — [`Gate::Recovery`] for the
+    /// unconditional chain. Asserted against what the `main.rs` parser
+    /// attributes, so the table and the router cannot drift.
+    gate: Gate,
     /// Part of the S5 root-equivalent set — registered only under
-    /// `[panel].allow_dangerous = true`.
+    /// `[panel].allow_dangerous = true`. Orthogonal to `gate`: `/dev/deploy`
+    /// and `/dev/build` are both dangerous AND behind [`Gate::DevDeploy`].
     dangerous: bool,
     /// This handler shells out (`systemctl`, `pacman`, the daemon bridge's
     /// deploy/build) rather than just rendering. Probing such a route with its
@@ -1265,6 +1284,7 @@ const fn r(
         request,
         method,
         access,
+        gate: Gate::Recovery,
         dangerous: false,
         exec_backed: false,
     }
@@ -1277,6 +1297,7 @@ const fn recovery(declared: &'static str, request: &'static str, method: Method)
         request,
         method,
         access: Authenticated,
+        gate: Gate::Recovery,
         dangerous: false,
         exec_backed: true,
     }
@@ -1288,9 +1309,16 @@ const fn danger(declared: &'static str, method: Method) -> RouteSpec {
         request: declared,
         method,
         access: Authenticated,
+        gate: Gate::Recovery,
         dangerous: true,
         exec_backed: true,
     }
+}
+
+/// Move a batch of rows onto `gate` — the table's mirror of one `let app = if
+/// caps.allows(Gate::..)` block in `main.rs`.
+fn on(gate: Gate, rows: Vec<RouteSpec>) -> Vec<RouteSpec> {
+    rows.into_iter().map(|s| RouteSpec { gate, ..s }).collect()
 }
 
 /// The method to probe a row with — see [`RouteSpec::exec_backed`].
@@ -1303,10 +1331,12 @@ fn probe_method(spec: &RouteSpec) -> Method {
 }
 
 /// THE table. `route_table_matches_main_rs_declarations` asserts this is
-/// exactly the set of routes `main.rs` declares — so adding an ungated route
-/// without adding it here fails the suite.
+/// exactly the set of routes `main.rs` declares — path, method, gate AND
+/// dangerous-ness — so adding a route without adding it here, or moving one
+/// between registration blocks, fails the suite.
 fn route_table() -> Vec<RouteSpec> {
-    vec![
+    // ── Recovery tier: registered unconditionally ──
+    let mut table = vec![
         r("/", "/", Get, Authenticated),
         r("/dashboard", "/dashboard", Get, Authenticated),
         r("/dashboard/tiles", "/dashboard/tiles", Get, Authenticated),
@@ -1336,250 +1366,10 @@ fn route_table() -> Vec<RouteSpec> {
             Get,
             Authenticated,
         ),
-        r("/settings", "/settings", Get, Authenticated),
-        r("/settings/save", "/settings/save", Post, Authenticated),
-        r("/settings/raw", "/settings/raw", Post, Authenticated),
-        r("/widgets", "/widgets", Get, Authenticated),
-        r("/widgets/save", "/widgets/save", Post, Authenticated),
-        r(
-            "/widgets/reorder/{id}/up",
-            "/widgets/reorder/plex/up",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/widgets/reorder/{id}/down",
-            "/widgets/reorder/plex/down",
-            Post,
-            Authenticated,
-        ),
-        r("/tools", "/tools", Get, Authenticated),
-        r("/tools/intent", "/tools/intent", Post, Authenticated),
-        r("/tools/key", "/tools/key", Post, Authenticated),
-        r("/tools/apps/list", "/tools/apps/list", Post, Authenticated),
-        r(
-            "/tools/apps/launch",
-            "/tools/apps/launch",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/apps/recents",
-            "/tools/apps/recents",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/bt/power-status",
-            "/tools/bt/power-status",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/bt/power-on",
-            "/tools/bt/power-on",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/bt/power-off",
-            "/tools/bt/power-off",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/bt/scan-on",
-            "/tools/bt/scan-on",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/bt/scan-off",
-            "/tools/bt/scan-off",
-            Post,
-            Authenticated,
-        ),
-        r("/tools/bt/list", "/tools/bt/list", Post, Authenticated),
-        r("/tools/bt/action", "/tools/bt/action", Post, Authenticated),
-        r(
-            "/tools/net/status",
-            "/tools/net/status",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/net/wifi-list",
-            "/tools/net/wifi-list",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/net/wifi-rescan",
-            "/tools/net/wifi-rescan",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/net/throughput",
-            "/tools/net/throughput",
-            Post,
-            Authenticated,
-        ),
-        r("/tools/net/ping", "/tools/net/ping", Post, Authenticated),
-        r(
-            "/tools/power/can-suspend",
-            "/tools/power/can-suspend",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/power/battery",
-            "/tools/power/battery",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/sys/status",
-            "/tools/sys/status",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/sys/metrics",
-            "/tools/sys/metrics",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/sys/storage",
-            "/tools/sys/storage",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/sys/build-info",
-            "/tools/sys/build-info",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/sys/controllerdb-status",
-            "/tools/sys/controllerdb-status",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/tools/sys/controllerdb-refresh",
-            "/tools/sys/controllerdb-refresh",
-            Post,
-            Authenticated,
-        ),
-        r("/controllers", "/controllers", Get, Authenticated),
-        r(
-            "/controllers/grab",
-            "/controllers/grab",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/release",
-            "/controllers/release",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/handoff",
-            "/controllers/handoff",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/pad/battery",
-            "/controllers/pad/battery",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/pad/rumble-status",
-            "/controllers/pad/rumble-status",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/pad/rumble",
-            "/controllers/pad/rumble",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/input-devices",
-            "/controllers/input-devices",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/bindings/set",
-            "/controllers/bindings/set",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/bindings/capture",
-            "/controllers/bindings/capture",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/bindings/capture-cancel",
-            "/controllers/bindings/capture-cancel",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/active-game/set",
-            "/controllers/active-game/set",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/active-game/clear",
-            "/controllers/active-game/clear",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/controllerdb/status",
-            "/controllers/controllerdb/status",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/controllers/controllerdb/refresh",
-            "/controllers/controllerdb/refresh",
-            Post,
-            Authenticated,
-        ),
-        r("/cec", "/cec", Get, Authenticated),
-        r("/cec/scan", "/cec/scan", Post, Authenticated),
-        r("/cec/device", "/cec/device", Post, Authenticated),
-        r(
-            "/cec/active-source",
-            "/cec/active-source",
-            Post,
-            Authenticated,
-        ),
-        r("/cec/power-on", "/cec/power-on", Post, Authenticated),
-        r("/cec/power-off", "/cec/power-off", Post, Authenticated),
         r("/media", "/media", Get, Authenticated),
         r(
             "/media/wallpaper/upload",
             "/media/wallpaper/upload",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/media/wallpaper/select",
-            "/media/wallpaper/select",
             Post,
             Authenticated,
         ),
@@ -1595,27 +1385,6 @@ fn route_table() -> Vec<RouteSpec> {
             Get,
             Authenticated,
         ),
-        r(
-            "/media/webapp/add",
-            "/media/webapp/add",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/media/webapp/remove",
-            "/media/webapp/remove",
-            Post,
-            Authenticated,
-        ),
-        r("/cec/test", "/cec/test", Post, Authenticated),
-        r("/cec/osd-name", "/cec/osd-name", Post, Authenticated),
-        // Recovery, deliberately NOT part of the dangerous set: restarting a
-        // wedged daemon is the reason the panel exists.
-        recovery(
-            "/cec/recover/restart-daemon",
-            "/cec/recover/restart-daemon",
-            Post,
-        ),
         r("/logs", "/logs", Get, Authenticated),
         r("/logs/view", "/logs/view", Get, Authenticated),
         r("/dev", "/dev", Get, Authenticated),
@@ -1623,13 +1392,6 @@ fn route_table() -> Vec<RouteSpec> {
         // the very same units `POST /processes/restart/{key}` restarts.
         recovery("/dev/restart-daemon", "/dev/restart-daemon", Post),
         recovery("/dev/restart-shell", "/dev/restart-shell", Post),
-        r("/dev/screenshot", "/dev/screenshot", Get, Authenticated),
-        r(
-            "/dev/screenshot/capture",
-            "/dev/screenshot/capture",
-            Post,
-            Authenticated,
-        ),
         r(
             "/nav/daemon-status",
             "/nav/daemon-status",
@@ -1641,17 +1403,552 @@ fn route_table() -> Vec<RouteSpec> {
         r("/login", "/login", Post, Public),
         r("/assets/htmx.min.js", "/assets/htmx.min.js", Get, Public),
         r("/assets/style.css", "/assets/style.css", Get, Public),
-        // ── the S5 root-equivalent set ──
-        danger("/dev/deploy", Post),
-        danger("/dev/build", Post),
+    ];
+
+    // ── Node tier: the IPC console, registered iff a node answered ──
+    table.extend(on(
+        Gate::Node,
+        vec![
+            r("/tools", "/tools", Get, Authenticated),
+            r("/tools/intent", "/tools/intent", Post, Authenticated),
+            r("/tools/key", "/tools/key", Post, Authenticated),
+            r("/tools/apps/list", "/tools/apps/list", Post, Authenticated),
+            r(
+                "/tools/apps/launch",
+                "/tools/apps/launch",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/apps/recents",
+                "/tools/apps/recents",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/bt/power-status",
+                "/tools/bt/power-status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/bt/power-on",
+                "/tools/bt/power-on",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/bt/power-off",
+                "/tools/bt/power-off",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/bt/scan-on",
+                "/tools/bt/scan-on",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/bt/scan-off",
+                "/tools/bt/scan-off",
+                Post,
+                Authenticated,
+            ),
+            r("/tools/bt/list", "/tools/bt/list", Post, Authenticated),
+            r("/tools/bt/action", "/tools/bt/action", Post, Authenticated),
+            r(
+                "/tools/net/status",
+                "/tools/net/status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/net/wifi-list",
+                "/tools/net/wifi-list",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/net/wifi-rescan",
+                "/tools/net/wifi-rescan",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/net/throughput",
+                "/tools/net/throughput",
+                Post,
+                Authenticated,
+            ),
+            r("/tools/net/ping", "/tools/net/ping", Post, Authenticated),
+            r(
+                "/tools/power/can-suspend",
+                "/tools/power/can-suspend",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/power/battery",
+                "/tools/power/battery",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/sys/status",
+                "/tools/sys/status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/sys/metrics",
+                "/tools/sys/metrics",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/sys/storage",
+                "/tools/sys/storage",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/sys/build-info",
+                "/tools/sys/build-info",
+                Post,
+                Authenticated,
+            ),
+        ],
+    ));
+
+    // ── Capability tier: `Feature::Controllers` ──
+    table.extend(on(
+        Gate::Controllers,
+        vec![
+            r(
+                "/tools/sys/controllerdb-status",
+                "/tools/sys/controllerdb-status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/tools/sys/controllerdb-refresh",
+                "/tools/sys/controllerdb-refresh",
+                Post,
+                Authenticated,
+            ),
+            r("/controllers", "/controllers", Get, Authenticated),
+            r(
+                "/controllers/grab",
+                "/controllers/grab",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/release",
+                "/controllers/release",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/handoff",
+                "/controllers/handoff",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/pad/battery",
+                "/controllers/pad/battery",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/pad/rumble-status",
+                "/controllers/pad/rumble-status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/pad/rumble",
+                "/controllers/pad/rumble",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/input-devices",
+                "/controllers/input-devices",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/bindings/set",
+                "/controllers/bindings/set",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/bindings/capture",
+                "/controllers/bindings/capture",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/bindings/capture-cancel",
+                "/controllers/bindings/capture-cancel",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/active-game/set",
+                "/controllers/active-game/set",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/active-game/clear",
+                "/controllers/active-game/clear",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/controllerdb/status",
+                "/controllers/controllerdb/status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/controllers/controllerdb/refresh",
+                "/controllers/controllerdb/refresh",
+                Post,
+                Authenticated,
+            ),
+        ],
+    ));
+
+    // ── Capability tier: `Feature::Cec` ──
+    table.extend(on(
+        Gate::Cec,
+        vec![
+            r("/cec", "/cec", Get, Authenticated),
+            r("/cec/scan", "/cec/scan", Post, Authenticated),
+            r("/cec/device", "/cec/device", Post, Authenticated),
+            r(
+                "/cec/active-source",
+                "/cec/active-source",
+                Post,
+                Authenticated,
+            ),
+            r("/cec/power-on", "/cec/power-on", Post, Authenticated),
+            r("/cec/power-off", "/cec/power-off", Post, Authenticated),
+            r("/cec/test", "/cec/test", Post, Authenticated),
+            r("/cec/osd-name", "/cec/osd-name", Post, Authenticated),
+            // A unit restart under a gated prefix, on purpose: it is the CEC
+            // page's own recovery ladder rung, and the two ALWAYS-registered
+            // paths to that same unit are untouched.
+            recovery(
+                "/cec/recover/restart-daemon",
+                "/cec/recover/restart-daemon",
+                Post,
+            ),
+        ],
+    ));
+
+    // ── Capability tier: `Feature::Widgets` ──
+    table.extend(on(
+        Gate::Widgets,
+        vec![
+            r("/widgets", "/widgets", Get, Authenticated),
+            r("/widgets/save", "/widgets/save", Post, Authenticated),
+            r(
+                "/widgets/reorder/{id}/up",
+                "/widgets/reorder/plex/up",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/widgets/reorder/{id}/down",
+                "/widgets/reorder/plex/down",
+                Post,
+                Authenticated,
+            ),
+        ],
+    ));
+
+    // ── Capability tier: `Feature::SettingsStore` ──
+    table.extend(on(
+        Gate::SettingsStore,
+        vec![
+            r("/settings", "/settings", Get, Authenticated),
+            r("/settings/save", "/settings/save", Post, Authenticated),
+            r("/settings/raw", "/settings/raw", Post, Authenticated),
+            // Selecting a wallpaper WRITES `wallpaperPath` via `set-config`;
+            // upload/delete/file are the panel's own filesystem and stay in
+            // the recovery tier above.
+            r(
+                "/media/wallpaper/select",
+                "/media/wallpaper/select",
+                Post,
+                Authenticated,
+            ),
+        ],
+    ));
+
+    // ── Capability tier: `Feature::WebApps` ──
+    table.extend(on(
+        Gate::WebApps,
+        vec![
+            r(
+                "/media/webapp/add",
+                "/media/webapp/add",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/media/webapp/remove",
+                "/media/webapp/remove",
+                Post,
+                Authenticated,
+            ),
+        ],
+    ));
+
+    // ── Capability tier: `Feature::Screenshot` ──
+    table.extend(on(
+        Gate::Screenshot,
+        vec![
+            r("/dev/screenshot", "/dev/screenshot", Get, Authenticated),
+            r(
+                "/dev/screenshot/capture",
+                "/dev/screenshot/capture",
+                Post,
+                Authenticated,
+            ),
+        ],
+    ));
+
+    // ── Danger ∩ capability: `allow_dangerous` AND `Feature::DevDeploy` ──
+    table.extend(on(
+        Gate::DevDeploy,
+        vec![danger("/dev/deploy", Post), danger("/dev/build", Post)],
+    ));
+
+    // ── the rest of the S5 root-equivalent set (danger only) ──
+    table.extend([
         danger("/dev/reboot", Post),
         danger("/dev/suspend", Post),
         danger("/processes/updates/apply", Post),
         danger("/tools/raw", Post),
-    ]
+    ]);
+
+    table
 }
 
-/// Parse every `.route("<path>", get|post` declaration out of `main.rs`.
+/// Every route registered UNCONDITIONALLY (the recovery tier) whose method
+/// mutates, each with the reason it is allowed to be ungated.
+///
+/// **This list is the gate.** `unconditional_mutating_routes_are_an_explicit_allowlist`
+/// fails the suite on any unconditional `post` that is not here, so a new
+/// ungated mutating route is a test failure rather than a review comment
+/// (`docs/MULTI_NODE_PANEL.md` §1).
+const RECOVERY_TIER_MUTATING: [(&str, &str); 7] = [
+    (
+        "/processes/restart/{key}",
+        "restarting a wedged systemd unit is the reason the panel exists; \
+         panel-local exec, no node involved",
+    ),
+    (
+        "/processes/updates/refresh",
+        "runs the panel's own unprivileged `checkupdates`; the daemon declares \
+         no `system_updates` capability because it does not serve one",
+    ),
+    (
+        "/media/wallpaper/upload",
+        "writes into the panel host's own wallpapers dir through the hardened \
+         resolver; needs no node, and `wallpapers` is a feature the daemon \
+         never emits",
+    ),
+    (
+        "/media/wallpaper/delete",
+        "removes a file from that same dir through that same resolver",
+    ),
+    (
+        "/dev/restart-daemon",
+        "same systemd unit as `/processes/restart/{key}` — recovery",
+    ),
+    (
+        "/dev/restart-shell",
+        "same reasoning, for the Quickshell unit",
+    ),
+    (
+        "/login",
+        "an auth exemption by definition: it mints the session cookie, so it \
+         cannot itself require one — and it touches nothing but that cookie",
+    ),
+];
+
+// ── the `main.rs` parser ───────────────────────────────────────────────────
+
+/// One route declaration read out of `main.rs`, with the registration block it
+/// sits in.
+#[derive(Debug, PartialEq, Eq)]
+struct Declared {
+    path: String,
+    method: Method,
+    gate: Gate,
+    dangerous: bool,
+}
+
+/// One `let app = if <condition> { .. } else { app };` block in `build_router`.
+struct Block {
+    /// Byte offset of the block body's opening brace.
+    start: usize,
+    /// Byte offset one past the block's last route declaration.
+    end: usize,
+    gate: Gate,
+    dangerous: bool,
+}
+
+/// The literal form every conditional registration block opens with. The
+/// parser understands exactly this; anything else panics.
+const BLOCK_OPEN: &str = "let app = if ";
+
+/// Replace every whole-line `//` comment with spaces, **preserving byte
+/// offsets**, so prose can mention `if` or a path without confusing the
+/// structural scan below. Block comments are rejected outright rather than
+/// half-handled.
+fn blank_comment_lines(src: &str) -> String {
+    assert!(
+        !src.contains("/*"),
+        "main.rs uses a /* block comment */; the registration-block parser only \
+         knows how to blank whole-line `//` comments. Use `//` or teach it."
+    );
+    src.lines()
+        .map(|l| {
+            if l.trim_start().starts_with("//") {
+                " ".repeat(l.len())
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Resolve a block condition to the tier it registers.
+///
+/// **Strict on purpose.** An unrecognized condition means the parser cannot say
+/// which tier a route landed in, and an unattributed route is an unchecked
+/// route — so this panics rather than guessing or skipping.
+fn tier_for_condition(cond: &str) -> (Gate, bool) {
+    let teach = || -> ! {
+        panic!(
+            "main.rs: registration block gated on `{cond}`, a condition this parser \
+             does not recognize. It understands exactly `allow_dangerous`, \
+             `caps.allows(Gate::<Variant>)`, and the two ANDed. Teach \
+             `tier_for_condition` the new form AND give the routes a tier in \
+             `route_table()` — an unattributed route is an UNCHECKED route."
+        )
+    };
+    if cond == "allow_dangerous" {
+        return (Gate::Recovery, true);
+    }
+    let (dangerous, rest) = match cond.strip_prefix("allow_dangerous && ") {
+        Some(rest) => (true, rest),
+        None => (false, cond),
+    };
+    let Some(ident) = rest
+        .strip_prefix("caps.allows(Gate::")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        teach()
+    };
+    let Some(gate) = Gate::ALL.iter().copied().find(|g| g.ident() == ident) else {
+        teach()
+    };
+    assert_ne!(
+        gate,
+        Gate::Recovery,
+        "main.rs: a block gated on `Gate::Recovery` is a no-op — that gate is \
+         always true. Register those routes in the unconditional chain."
+    );
+    (gate, dangerous)
+}
+
+/// The body of `build_router`, comment-blanked — the only region routes may be
+/// declared in.
+///
+/// Scoping to one function matters: `main` also binds `let app =
+/// build_router(state)`, and the block scan below counts `app` bindings to
+/// prove no route escaped into an unmodelled form. It also asserts every
+/// `.route(` in the file really is inside this function.
+fn router_body(src: &str) -> String {
+    let code = blank_comment_lines(src);
+    let start = code
+        .find("fn build_router(")
+        .expect("main.rs must define build_router");
+    let body = code[start..].to_string();
+    assert_eq!(
+        body.matches(".route(").count(),
+        src.matches(".route(").count(),
+        "main.rs declares a route OUTSIDE `build_router` — routes must all live in \
+         the one function the tier parser reads"
+    );
+    body
+}
+
+/// Find every conditional registration block, and refuse to proceed if
+/// `build_router` shapes its router any other way.
+fn parse_blocks(code: &str) -> Vec<Block> {
+    let opens: Vec<usize> = code.match_indices(BLOCK_OPEN).map(|(i, _)| i).collect();
+
+    // `app` is bound exactly once for the unconditional chain plus once per
+    // block. Any other binding form — `let app: Router = ..`, a rebind inside
+    // a block, a helper that returns a Router — would move routes somewhere
+    // the offset attribution below cannot see them.
+    assert_eq!(
+        code.matches("let app").count(),
+        opens.len() + 1,
+        "main.rs binds `app` in a form this parser does not model (expected one \
+         `let app = Router::new()` plus one `{BLOCK_OPEN}..` per block). Teach \
+         `parse_blocks` — an unattributed route is an UNCHECKED route."
+    );
+
+    let layer = code
+        .find("app.route_layer(")
+        .expect("main.rs must attach the auth layer with route_layer");
+
+    let mut blocks = Vec::new();
+    for (n, &open) in opens.iter().enumerate() {
+        let after = open + BLOCK_OPEN.len();
+        let brace = code[after..].find(" {").unwrap_or_else(|| {
+            panic!("main.rs: `{BLOCK_OPEN}` at byte {open} has no opening brace")
+        });
+        let cond = code[after..after + brace].trim();
+        let (gate, dangerous) = tier_for_condition(cond);
+        let start = after + brace;
+        let end = opens.get(n + 1).copied().unwrap_or(layer);
+
+        // No nested conditional inside a block: routes registered under one
+        // would inherit this block's tier while actually being gated on
+        // something else entirely.
+        assert!(
+            !code[start..end].contains(" if "),
+            "main.rs: the `{cond}` block contains a nested conditional. Every \
+             route must sit in exactly one flat registration block — split it \
+             into its own `{BLOCK_OPEN}..` block, or teach the parser."
+        );
+        blocks.push(Block {
+            start,
+            end,
+            gate,
+            dangerous,
+        });
+    }
+    blocks
+}
+
+/// Parse every `.route("<path>", get|post` declaration out of `main.rs`, and
+/// attribute each to the registration block it sits in.
 ///
 /// Multi-line tolerant: rustfmt wraps a number of these across three lines, so
 /// whitespace (including newlines) is skipped between every token rather than
@@ -1664,16 +1961,30 @@ fn route_table() -> Vec<RouteSpec> {
 /// route was live. Anything unrecognized now panics with the offending snippet:
 /// a new method form must be taught to this parser (and added to
 /// `route_table()`), never skipped.
-fn parse_declared_routes(src: &str) -> Vec<(String, Method)> {
+fn parse_declared_routes(src: &str) -> Vec<Declared> {
     /// The offending declaration, clipped, for the panic message.
     fn snippet(s: &str) -> String {
         s.chars().take(80).collect::<String>().replace('\n', " ")
     }
 
+    assert_eq!(
+        blank_comment_lines(src).matches(".route(").count(),
+        src.matches(".route(").count(),
+        "main.rs mentions `.route(` inside a comment — the structural scan blanks \
+         comment lines, so the two counts must agree or a real declaration could \
+         be hiding behind a `//`"
+    );
+    let code = router_body(src);
+    let code = code.as_str();
+    let blocks = parse_blocks(code);
+
     let mut out = Vec::new();
-    let mut rest = src;
-    while let Some(idx) = rest.find(".route(") {
-        rest = &rest[idx + ".route(".len()..];
+    let mut pos = 0usize;
+    while let Some(rel) = code[pos..].find(".route(") {
+        let at = pos + rel;
+        pos = at + ".route(".len();
+        let rest = &code[pos..];
+
         let after_open = rest.trim_start();
         let quoted = after_open.strip_prefix('"').unwrap_or_else(|| {
             panic!(
@@ -1710,7 +2021,21 @@ fn parse_declared_routes(src: &str) -> Vec<(String, Method)> {
                 snippet(after_comma)
             )
         };
-        out.push((path.to_string(), method));
+
+        // Attribution: the block whose body contains this declaration, else
+        // the unconditional recovery chain.
+        let (gate, dangerous) = blocks
+            .iter()
+            .find(|b| at >= b.start && at < b.end)
+            .map(|b| (b.gate, b.dangerous))
+            .unwrap_or((Gate::Recovery, false));
+
+        out.push(Declared {
+            path: path.to_string(),
+            method,
+            gate,
+            dangerous,
+        });
     }
     out
 }
@@ -1772,12 +2097,16 @@ fn every_route_is_visible_to_the_parser_and_declared_before_the_auth_layer() {
 /// The gate that stops the auth layer regressing silently: the table above
 /// must be EXACTLY the set of routes `main.rs` declares. axum's `Router` has
 /// no introspection API, so the source is the source of truth.
+///
+/// Since the capability tiers landed this also pins the TIER of every route:
+/// moving a `/cec/` route out of its block and into the unconditional chain is
+/// a drift the table catches, not something a reviewer has to notice.
 #[test]
 fn route_table_matches_main_rs_declarations() {
     let declared = parse_declared_routes(include_str!("main.rs"));
     let table = route_table();
 
-    let declared_paths: BTreeSet<&str> = declared.iter().map(|(p, _)| p.as_str()).collect();
+    let declared_paths: BTreeSet<&str> = declared.iter().map(|d| d.path.as_str()).collect();
     let table_paths: BTreeSet<&str> = table.iter().map(|r| r.declared).collect();
     assert_eq!(
         declared_paths, table_paths,
@@ -1785,20 +2114,78 @@ fn route_table_matches_main_rs_declarations() {
          add it to `route_table()` with its access class"
     );
 
-    // Stronger than the path-set check: also pin the (path, method) pairs, so
-    // adding a second method to an existing path can't slip through.
-    let mut declared_pairs: Vec<(&str, Method)> =
-        declared.iter().map(|(p, m)| (p.as_str(), *m)).collect();
-    let mut table_pairs: Vec<(&str, Method)> =
-        table.iter().map(|r| (r.declared, r.method)).collect();
-    declared_pairs.sort_unstable();
-    table_pairs.sort_unstable();
-    assert_eq!(declared_pairs, table_pairs);
+    // Stronger than the path-set check: also pin the (path, method, gate,
+    // dangerous) tuples, so adding a second method to an existing path — or
+    // registering an existing one behind a different gate — can't slip through.
+    let mut declared_rows: Vec<(&str, Method, &'static str, bool)> = declared
+        .iter()
+        .map(|d| (d.path.as_str(), d.method, d.gate.ident(), d.dangerous))
+        .collect();
+    let mut table_rows: Vec<(&str, Method, &'static str, bool)> = table
+        .iter()
+        .map(|r| (r.declared, r.method, r.gate.ident(), r.dangerous))
+        .collect();
+    declared_rows.sort_unstable();
+    table_rows.sort_unstable();
+    assert_eq!(
+        declared_rows, table_rows,
+        "a route's registration TIER in main.rs disagrees with `route_table()` — \
+         one of the two moved"
+    );
 
     assert_eq!(
         declared.len(),
         90,
         "expected 88 pre-existing routes + GET/POST /login"
+    );
+}
+
+/// **The ungated-mutating-route gate.** Every `post` registered in the
+/// unconditional (recovery) chain must be justified in
+/// [`RECOVERY_TIER_MUTATING`]; anything else has to sit behind a capability,
+/// the node, or `allow_dangerous`.
+///
+/// `docs/MULTI_NODE_PANEL.md`: *"Registering an ungated mutating route should
+/// be a test failure, not a review comment."* This is that failure.
+#[test]
+fn unconditional_mutating_routes_are_an_explicit_allowlist() {
+    let declared = parse_declared_routes(include_str!("main.rs"));
+
+    let allowed: BTreeSet<&str> = RECOVERY_TIER_MUTATING.iter().map(|(p, _)| *p).collect();
+    assert_eq!(
+        allowed.len(),
+        RECOVERY_TIER_MUTATING.len(),
+        "duplicate entry in RECOVERY_TIER_MUTATING"
+    );
+    for (path, reason) in RECOVERY_TIER_MUTATING {
+        assert!(
+            !reason.trim().is_empty(),
+            "{path} is allowlisted with no written reason"
+        );
+    }
+
+    let ungated: BTreeSet<&str> = declared
+        .iter()
+        .filter(|d| d.method == Post && d.gate == Gate::Recovery && !d.dangerous)
+        .map(|d| d.path.as_str())
+        .collect();
+
+    let unjustified: Vec<&str> = ungated.difference(&allowed).copied().collect();
+    assert!(
+        unjustified.is_empty(),
+        "main.rs registers mutating route(s) {unjustified:?} unconditionally — no \
+         capability gate, no node gate, no `allow_dangerous`, and not in \
+         RECOVERY_TIER_MUTATING. Either move it behind the gate the node actually \
+         declares for it, or add it to RECOVERY_TIER_MUTATING **with the reason it \
+         must work when the daemon is down**."
+    );
+
+    let stale: Vec<&str> = allowed.difference(&ungated).copied().collect();
+    assert!(
+        stale.is_empty(),
+        "RECOVERY_TIER_MUTATING lists {stale:?}, which main.rs no longer registers \
+         unconditionally — drop the entry so the allowlist stays a statement about \
+         the real router"
     );
 }
 
@@ -1886,7 +2273,59 @@ fn cfg_authenticated(allow_dangerous: bool) -> AppConfig {
     }
 }
 
+/// The capability set **htpc-1's real daemon build declares**, derived line by
+/// line from `daemon/src/ipc.rs::features()` for that build — Linux,
+/// `--features cec,mcp` (`scripts/build-daemon.sh`), `[http].bind` set:
+///
+/// | Gate in `features()` | Emits |
+/// |---|---|
+/// | always compiled in | `settings_store`, `widgets`, `web_apps` |
+/// | `cfg!(feature = "cec")` | `cec` |
+/// | `cfg!(target_os = "linux")` | `controllers`, `shell_lifecycle`, `sleep` |
+/// | `http \|\| mcp` | `logs`, `dev_deploy` |
+/// | linux **and** (`http \|\| mcp`) | `screenshot` |
+///
+/// **`wallpapers`, `processes`, `system_updates`, `steam_library` and
+/// `game_launch` are deliberately absent** — the daemon serves none of them.
+/// Gating a route on one would delete a working page from this node, which is
+/// exactly what `htpc_1_declared_set_registers_todays_entire_route_set` exists
+/// to catch.
+fn htpc_1_features() -> BTreeSet<Feature> {
+    [
+        Feature::SettingsStore,
+        Feature::Widgets,
+        Feature::WebApps,
+        Feature::Cec,
+        Feature::Controllers,
+        Feature::ShellLifecycle,
+        Feature::Sleep,
+        Feature::Logs,
+        Feature::Screenshot,
+        Feature::DevDeploy,
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// A successful handshake declaring `features`.
+fn caps_with(features: BTreeSet<Feature>) -> CapabilitySnapshot {
+    CapabilitySnapshot {
+        handshake_ok: true,
+        node_id: "htpc-1".to_string(),
+        features,
+    }
+}
+
+/// Every feature any [`Gate`] gates on — the maximal registered surface.
+fn every_gated_feature() -> BTreeSet<Feature> {
+    Gate::ALL.iter().filter_map(|g| g.feature()).collect()
+}
+
 fn state_with(cfg: AppConfig) -> SharedState {
+    state_with_caps(cfg, caps_with(every_gated_feature()))
+}
+
+fn state_with_caps(cfg: AppConfig, caps: CapabilitySnapshot) -> SharedState {
     let sock = std::path::PathBuf::from(format!(
         "/tmp/tvshp-router-{}-{:?}.sock",
         std::process::id(),
@@ -1898,6 +2337,7 @@ fn state_with(cfg: AppConfig) -> SharedState {
     ));
     Arc::new(AppState {
         cfg,
+        caps,
         node: Arc::new(IpcTransport::new(sock)),
         bridge,
         recovery: Recovery::new(),
@@ -2033,6 +2473,196 @@ async fn dangerous_routes_are_registered_when_allow_dangerous_is_true() {
             status, 401,
             "{} must be registered (and gated) with allow_dangerous = true",
             spec.request
+        );
+    }
+}
+
+/// **The capability gate, proven against the real router.** With an EMPTY
+/// capability snapshot — the fail-closed state a failed handshake produces —
+/// every node-tier and capability-tier route answers **404 (it does not
+/// exist)**, not 403 from a handler, while every recovery-tier route stays
+/// registered and answers 401.
+///
+/// `allow_dangerous = true` throughout, so the danger flag is never what makes
+/// a route disappear here. Exec-backed rows are probed with GET (see
+/// [`RouteSpec::exec_backed`]) so no handler can run either way.
+#[tokio::test]
+async fn gated_routes_are_unregistered_with_an_empty_capability_set() {
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        CapabilitySnapshot::unreachable(),
+    ))
+    .await;
+    let c = client();
+
+    let mut gone = 0usize;
+    let mut kept = 0usize;
+    for spec in route_table() {
+        let method = probe_method(&spec);
+        let status = request(&c, &base, method, spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        if spec.gate == Gate::Recovery {
+            kept += 1;
+            match spec.access {
+                Authenticated => assert_eq!(
+                    status, 401,
+                    "{} is recovery tier — a failed handshake must not remove it \
+                     (got {status})",
+                    spec.request
+                ),
+                Public => assert_ne!(status, 404, "{} must stay served", spec.request),
+            }
+        } else {
+            gone += 1;
+            assert_eq!(
+                status,
+                404,
+                "{} is behind Gate::{} and must NOT be registered with an empty \
+                 capability set — a gated-off route does not exist (404), it is \
+                 not a 403 from a handler",
+                spec.request,
+                spec.gate.ident()
+            );
+        }
+    }
+    assert!(gone > 0 && kept > 0, "the split must be non-trivial");
+}
+
+/// The other half: with the full declared set the same routes are registered
+/// again — 401 (gated), never 404. Without this, a gate that removed
+/// *everything* would pass the test above.
+#[tokio::test]
+async fn gated_routes_are_registered_with_the_full_capability_set() {
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        caps_with(every_gated_feature()),
+    ))
+    .await;
+    let c = client();
+    for spec in route_table().iter().filter(|s| s.gate != Gate::Recovery) {
+        let status = request(&c, &base, probe_method(spec), spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(
+            status,
+            401,
+            "{} must be registered (and gated) once Gate::{} is satisfied",
+            spec.request,
+            spec.gate.ident()
+        );
+    }
+}
+
+/// One feature opens exactly its own block and nothing else — the gate is
+/// per-capability, not one global on/off switch.
+#[tokio::test]
+async fn a_single_feature_opens_only_its_own_block() {
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        caps_with([Feature::Cec].into_iter().collect()),
+    ))
+    .await;
+    let c = client();
+    for spec in route_table() {
+        if spec.access == Public {
+            continue;
+        }
+        // `allow_dangerous` is on, so the danger flag alone never removes a
+        // route here — `/dev/deploy` and `/dev/build` still vanish because
+        // their block ALSO needs `Gate::DevDeploy`.
+        let expected = if matches!(spec.gate, Gate::Recovery | Gate::Node | Gate::Cec) {
+            401
+        } else {
+            404
+        };
+        let status = request(&c, &base, probe_method(&spec), spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(
+            status,
+            expected,
+            "{} (Gate::{}, dangerous={}) with only `cec` declared",
+            spec.request,
+            spec.gate.ident(),
+            spec.dangerous
+        );
+    }
+}
+
+/// **The no-regression test for the one deployed node.** Given the feature set
+/// htpc-1's real daemon build declares ([`htpc_1_features`]), the registered
+/// route set is exactly today's — every row of `route_table()` is live. This
+/// PR therefore changes nothing on htpc-1.
+///
+/// This is the test that catches the trap: gating `/media/wallpaper/*` on
+/// `Feature::Wallpapers`, `/processes` on `Feature::Processes`, or
+/// `/processes/updates/*` on `Feature::SystemUpdates` would fail here, because
+/// `daemon/src/ipc.rs::features()` never emits any of those three.
+#[tokio::test]
+async fn htpc_1_declared_set_registers_todays_entire_route_set() {
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        caps_with(htpc_1_features()),
+    ))
+    .await;
+    let c = client();
+    for spec in route_table() {
+        let status = request(&c, &base, probe_method(&spec), spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        match spec.access {
+            Authenticated => assert_eq!(
+                status, 401,
+                "{} vanished from htpc-1's panel — it is gated on a capability that \
+                 daemon/src/ipc.rs::features() does not emit for that build",
+                spec.request
+            ),
+            Public => assert_ne!(status, 404, "{} must stay served", spec.request),
+        }
+    }
+}
+
+/// The five features `daemon/src/ipc.rs::features()` deliberately never emits
+/// must not appear in htpc-1's set — if one crept in, the test above would go
+/// green on a fiction.
+#[test]
+fn htpc_1_set_omits_every_feature_the_daemon_never_emits() {
+    let set = htpc_1_features();
+    for absent in [
+        Feature::Wallpapers,
+        Feature::Processes,
+        Feature::SystemUpdates,
+        Feature::SteamLibrary,
+        Feature::GameLaunch,
+    ] {
+        assert!(
+            !set.contains(&absent),
+            "{absent:?} is not emitted by daemon/src/ipc.rs::features() — a test \
+             fixture that claims it would prove nothing about the live node"
+        );
+    }
+    // And htpc-1 must satisfy every gate the panel has, or a page really would
+    // disappear from the deployed node.
+    let caps = caps_with(set);
+    for gate in Gate::ALL {
+        assert!(
+            caps.allows(*gate),
+            "htpc-1 does not satisfy Gate::{} — the pages behind it would 404 on \
+             the one node this panel is deployed to",
+            gate.ident()
         );
     }
 }

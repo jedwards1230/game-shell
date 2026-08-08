@@ -108,10 +108,15 @@ pub enum Gate {
 impl Gate {
     /// Every gate, in declaration order.
     ///
-    /// Exhaustive by construction (`gates_are_exhaustive` fails if a variant is
-    /// added without landing here), which is what lets `tests`'s `main.rs`
-    /// parser resolve a `Gate::<Ident>` in a registration condition without a
-    /// second, drift-prone table.
+    /// Exhaustive by construction (`gates_are_exhaustive_and_idents_are_unique`
+    /// fails if a variant is added without landing here), which is what lets
+    /// `crate::tests`'s `main.rs` parser resolve a `Gate::<Ident>` out of a
+    /// registration condition without a second, drift-prone table.
+    ///
+    /// Test-only, and `#[cfg(test)]` rather than `#[allow(dead_code)]` because
+    /// that consumer exists NOW — there is no later milestone to keep it alive
+    /// for.
+    #[cfg(test)]
     pub const ALL: &'static [Gate] = &[
         Gate::Recovery,
         Gate::Node,
@@ -126,6 +131,7 @@ impl Gate {
 
     /// The Rust identifier of this variant — the literal text that appears in
     /// `main.rs` as `Gate::<ident>`.
+    #[cfg(test)]
     pub fn ident(self) -> &'static str {
         match self {
             Gate::Recovery => "Recovery",
@@ -185,6 +191,20 @@ impl CapabilitySnapshot {
             handshake_ok: false,
             node_id: String::new(),
             features: BTreeSet::new(),
+        }
+    }
+
+    /// A snapshot satisfying EVERY [`Gate`] — the maximal registered surface.
+    ///
+    /// Test-only; the hermetic page-render tests use it so a render assertion
+    /// is never silently answering "that section wasn't rendered" when it means
+    /// "that section rendered wrongly".
+    #[cfg(test)]
+    pub fn fully_capable() -> Self {
+        Self {
+            handshake_ok: true,
+            node_id: "test-node".to_string(),
+            features: Gate::ALL.iter().filter_map(|g| g.feature()).collect(),
         }
     }
 

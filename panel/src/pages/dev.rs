@@ -361,6 +361,7 @@ mod tests {
         ));
         Arc::new(AppState {
             cfg: AppConfig::default(),
+            caps: crate::capabilities::CapabilitySnapshot::fully_capable(),
             node: Arc::new(IpcTransport::new(sock)),
             bridge: Arc::new(BridgeClient::new(None, None)),
             recovery: Recovery::new(),
