@@ -280,19 +280,24 @@ fn pick_node_id(
     procfs_hostname: Option<&str>,
     env_hostname: Option<&str>,
 ) -> String {
-    first_non_blank(&[mqtt_device_id, computername, procfs_hostname, env_hostname])
+    first_valid_id(&[mqtt_device_id, computername, procfs_hostname, env_hostname])
         .unwrap_or_else(|| DEFAULT_NODE_ID.to_string())
 }
 
-/// First trimmed non-empty candidate, if any. Pure, so the precedence is
-/// testable on every platform.
-fn first_non_blank(candidates: &[Option<&str>]) -> Option<String> {
-    candidates
-        .iter()
-        .flatten()
-        .map(|s| s.trim())
-        .find(|s| !s.is_empty())
-        .map(str::to_string)
+/// First candidate that trims to a valid [`tv_shell_protocol::mqtt::DeviceId`],
+/// if any. Pure, so the precedence is testable on every platform.
+///
+/// Validation — not merely a non-blank check — is what makes claim 1 above true.
+/// `mqtt.rs` runs `TV_SHELL_MQTT_DEVICE_ID` through `DeviceId::new` before
+/// publishing, so accepting an id here that MQTT would reject is exactly the
+/// "two different names for one machine" split the precedence exists to prevent.
+/// It also caps the field's length and alphabet, keeping `/capabilities` bounded.
+fn first_valid_id(candidates: &[Option<&str>]) -> Option<String> {
+    candidates.iter().flatten().find_map(|s| {
+        tv_shell_protocol::mqtt::DeviceId::new(s.trim())
+            .ok()
+            .map(|d| d.as_str().to_string())
+    })
 }
 
 /// `/proc/sys/kernel/hostname`, or `None` off Linux / on any read error.
@@ -784,11 +789,30 @@ mod tests {
     #[test]
     fn node_id_precedence_skips_blank_candidates() {
         assert_eq!(
-            first_non_blank(&[None, Some("  "), Some(" pc-1 ")]),
+            first_valid_id(&[None, Some("  "), Some(" pc-1 ")]),
             Some("pc-1".to_string())
         );
-        assert_eq!(first_non_blank(&[]), None);
-        assert_eq!(first_non_blank(&[None, Some("")]), None);
+        assert_eq!(first_valid_id(&[]), None);
+        assert_eq!(first_valid_id(&[None, Some("")]), None);
+    }
+
+    #[test]
+    fn node_id_skips_candidates_mqtt_would_reject() {
+        // An id MQTT refuses must not become the node's name here either —
+        // otherwise HA and /capabilities disagree about one machine. `a/b`
+        // contains a topic separator; the long one blows DeviceId's length cap.
+        assert_eq!(
+            first_valid_id(&[Some("a/b"), Some("good-1")]),
+            Some("good-1".to_string())
+        );
+        assert_eq!(first_valid_id(&[Some("has space"), None]), None);
+        assert_eq!(first_valid_id(&[Some(&"x".repeat(200))]), None);
+        // A dotted hostname is not a valid DeviceId, so it falls through rather
+        // than being reported — DEFAULT_NODE_ID is the documented degradation.
+        assert_eq!(
+            pick_node_id(None, None, Some("box.local"), None),
+            DEFAULT_NODE_ID
+        );
     }
 
     #[test]

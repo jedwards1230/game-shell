@@ -565,14 +565,23 @@ fn capabilities() -> tv_shell_protocol::Capabilities {
 /// [`crate::daemon_config::resolve_osd_name`]'s fallback (and takes the same
 /// pure `(configured, hostname)` shape for the same reason), so the panel, the
 /// AV chain, and SSH all show the same name on an unconfigured box.
+///
+/// Each candidate must parse as a [`tv_shell_protocol::mqtt::DeviceId`] to be
+/// accepted; one that doesn't falls through to the next. Without that check the
+/// "cannot disagree about what they are called" claim above is false — MQTT
+/// validates the id and this did not, so a `device_id` of `a/b` would publish
+/// nothing while `capabilities` reported `a/b`. It also bounds this field, which
+/// is otherwise the only unbounded input to a reply that rides a line protocol.
 fn resolve_node_id(configured: Option<&str>, hostname: Option<&str>) -> String {
     [configured, hostname]
         .into_iter()
         .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or("tv-shell")
-        .to_string()
+        .find_map(|s| {
+            tv_shell_protocol::mqtt::DeviceId::new(s.trim())
+                .ok()
+                .map(|d| d.as_str().to_string())
+        })
+        .unwrap_or_else(|| "tv-shell".to_string())
 }
 
 /// The machine hostname from `/proc/sys/kernel/hostname` (the same source
@@ -635,7 +644,13 @@ fn features(
     // Unix-socket equivalent, so with both surfaces off this genuinely cannot be
     // served.
     let http = cfg.http.bind.is_some();
-    let mcp = cfg.mcp.bind.is_some();
+    // Cargo feature AND config, for the same reason `cec` is gated above: the MCP
+    // server is `#[cfg(feature = "mcp")]`, and `daemon_config::validate()` does
+    // not reject an `[mcp].bind` on a build that cannot serve it. A default
+    // `cargo build` with `[mcp].bind` set starts nothing, so trusting the config
+    // alone would advertise `logs`/`screenshot`/`dev_deploy` on a node serving
+    // none of them — the lying handshake this whole type exists to prevent.
+    let mcp = cfg!(feature = "mcp") && cfg.mcp.bind.is_some();
     if http || mcp {
         f.insert(Feature::Logs);
     }
@@ -1698,14 +1713,18 @@ mod tests {
         // `screenshot` is Linux-only on top of the surface gate, so on a non-Linux
         // build the "configured" legs must still not claim it.
         let linux = cfg!(target_os = "linux");
+        // An `[mcp].bind` only yields a real surface when the `mcp` cargo feature
+        // is compiled in — a default build parses the key and serves nothing, so
+        // the MCP-only legs below are conditional on the feature, not absolute.
+        let mcp = cfg!(feature = "mcp");
 
         let f = features(&surface_cfg(None, Some("127.0.0.1:8090"), false));
-        assert!(f.contains(&Feature::Logs));
-        assert_eq!(f.contains(&Feature::Screenshot), linux);
+        assert_eq!(f.contains(&Feature::Logs), mcp);
+        assert_eq!(f.contains(&Feature::Screenshot), linux && mcp);
         assert!(!f.contains(&Feature::DevDeploy));
 
         let f = features(&surface_cfg(None, Some("127.0.0.1:8090"), true));
-        assert!(f.contains(&Feature::DevDeploy));
+        assert_eq!(f.contains(&Feature::DevDeploy), mcp);
 
         let f = features(&surface_cfg(Some("127.0.0.1:8089"), None, false));
         assert!(f.contains(&Feature::Logs));

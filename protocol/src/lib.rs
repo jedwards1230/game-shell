@@ -36,6 +36,19 @@ use std::collections::BTreeSet;
 /// Informational: route gating is done on [`Capabilities::features`], never on
 /// the kind. A node with no shell surface simply doesn't declare the shell
 /// features, which is a finer-grained (and non-lying) statement than its kind.
+///
+/// ## Forward compatibility
+///
+/// An unrecognized kind deserializes to [`NodeKind::Unknown`] rather than
+/// failing the whole [`Capabilities`] parse. Without that, the day a third node
+/// kind ships, every older panel would lose those nodes **entirely** — not just
+/// the one field it couldn't read.
+///
+/// Unlike [`Feature`], the unknown variant carries no payload and does not
+/// round-trip the original string. That is deliberate and safe here: nothing
+/// gates on the kind and no consumer re-publishes a `Capabilities` it received,
+/// so collapsing every unknown kind into one value loses nothing a caller may
+/// act on — and it keeps the type `Copy`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {
@@ -43,6 +56,9 @@ pub enum NodeKind {
     Shell,
     /// Runs `tv-shell-host` only (e.g. the gaming PC).
     Sidecar,
+    /// A kind this build does not know — a node newer than this reader.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The OS a node runs on, resolved at **compile time** by [`Platform::current`].
@@ -51,6 +67,11 @@ pub enum NodeKind {
 /// a separate type: `DeviceOs` is a Home Assistant device attribute with an
 /// `Unknown` escape hatch, while this one enumerates exactly the three targets
 /// the workspace builds for.
+///
+/// It carries the same `Unknown` fallback as [`NodeKind`], for the same reason:
+/// no *in-tree* producer can emit anything else ([`Platform::current`] folds
+/// every other target to `Linux`), but a reader must not fail a whole
+/// [`Capabilities`] parse over one field a future node widened.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
@@ -60,6 +81,9 @@ pub enum Platform {
     Windows,
     /// macOS — CI and developer machines.
     MacOS,
+    /// A platform this build does not know — a node newer than this reader.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Platform {
@@ -709,6 +733,22 @@ mod tests {
         assert!(serde_json::from_str::<Capabilities>(r#"{"platform":"linux"}"#).is_err());
         assert!(serde_json::from_str::<Capabilities>(r#"{"kind":"shell"}"#).is_err());
         assert!(serde_json::from_str::<Capabilities>("{}").is_err());
+    }
+
+    #[test]
+    fn unknown_kind_or_platform_degrades_instead_of_failing_the_parse() {
+        // The day a third node kind (or a new target) ships, an older reader must
+        // still get the node's node_id and FEATURES — which are what routing
+        // actually gates on. Losing the whole node over one widened field would
+        // be strictly worse than not knowing its kind.
+        let c: Capabilities = serde_json::from_str(
+            r#"{"node_id":"n","kind":"gateway","platform":"freebsd","features":["cec"]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.kind, NodeKind::Unknown);
+        assert_eq!(c.platform, Platform::Unknown);
+        assert_eq!(c.node_id, "n");
+        assert!(c.features.contains(&Feature::Cec));
     }
 
     #[test]
