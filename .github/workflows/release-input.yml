@@ -187,6 +187,17 @@ jobs:
             [0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::Tag '$TAG' did not yield a semver version (got '$VERSION')"; exit 1 ;;
           esac
+          # Fingerprint every manifest BEFORE the stamp so the verify step can
+          # prove which ones moved without asking git. This job runs in the
+          # `rust:1-trixie` container, which ships no git — so actions/checkout
+          # falls back to a REST-API tarball and there is no `.git` at all. The
+          # previous `git diff --name-only` guard therefore ran outside a work
+          # tree, where git implies `--no-index`, demands two paths, and exits
+          # 129. Hashing is not a workaround for that: it measures the property
+          # the guard actually claims ("no other manifest changed") directly,
+          # instead of inferring it from VCS state that happens to be present.
+          find . -name Cargo.toml -not -path './target/*' -print0 \
+            | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/manifests.before"
           # Rewrites ONLY the `version` key of the `[package]` table: awk tracks
           # the current table header and edits the first matching key while inside
           # `[package]`. A dependency's version (`foo = { version = "1" }`) lives
@@ -225,18 +236,28 @@ jobs:
             echo "::error::daemon/Cargo.toml reports version '$ACTUAL', expected '$EXPECTED' — the stamp did not land"
             exit 1
           fi
-          # Assigned first (not piped inside `if`) so a git failure aborts under
-          # `set -e` instead of yielding empty output that passes the guard.
-          CHANGED=$(git diff --name-only -- '*Cargo.toml')
+          # Re-fingerprint and compare against the pre-stamp snapshot. Assigned
+          # first (not piped inside `if`) so a failure aborts under `set -e`
+          # instead of yielding empty output that passes the guard.
+          #
+          # The `.before` file must exist — if the stamp step did not run, an
+          # absent snapshot would otherwise make `diff` fail in a way that could
+          # read as "nothing changed".
+          test -f "$RUNNER_TEMP/manifests.before" \
+            || { echo "::error::pre-stamp manifest snapshot missing — the stamp step did not run"; exit 1; }
+          find . -name Cargo.toml -not -path './target/*' -print0 \
+            | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/manifests.after"
           # SUBSET check, not equality: the read-back above already proved this
           # crate's version is right, so all this guard owes us is "no OTHER
           # manifest moved". Demanding exact equality also failed when the stamp
           # was a legitimate no-op — a dispatch re-run of an already-released
           # version, or a PR that hand-bumped the floor while carrying a
-          # `semver:*` label — leaving CHANGED empty and killing a correct job.
-          # `grep -v` exits 1 when nothing survives the filter, which is the
+          # `semver:*` label — leaving the change set empty and killing a correct
+          # job. `grep -v` exits 1 when nothing survives the filter, which is the
           # SUCCESS case here, so `|| true` keeps `set -o pipefail` from aborting.
-          OTHERS=$(printf '%s\n' "$CHANGED" | grep -v -e '^daemon/Cargo\.toml$' -e '^$' || true)
+          CHANGED=$(diff "$RUNNER_TEMP/manifests.before" "$RUNNER_TEMP/manifests.after" \
+            | sed -n 's/^[<>] [0-9a-f]\{64\}  //p' | sort -u || true)
+          OTHERS=$(printf '%s\n' "$CHANGED" | grep -v -e '^\./daemon/Cargo\.toml$' -e '^$' || true)
           if [ -n "$OTHERS" ]; then
             echo "::error::A daemon release must not modify any other crate's manifest; also changed: $(echo "$OTHERS" | tr '\n' ' ')"
             exit 1
