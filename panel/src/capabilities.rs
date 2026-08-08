@@ -382,6 +382,145 @@ impl Chrome {
 mod tests {
     use super::*;
 
+    use crate::transport::{Reachability, TransportError};
+    use async_trait::async_trait;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A transport whose `capabilities()` fails `fail_first` times before
+    /// answering — the cold-boot race, on demand.
+    struct FlakyNode {
+        fail_first: usize,
+        /// How the failing attempts fail.
+        error: fn() -> TransportError,
+        calls: AtomicUsize,
+    }
+
+    impl FlakyNode {
+        fn unreachable_for(n: usize) -> Self {
+            Self {
+                fail_first: n,
+                error: || TransportError::Unreachable,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn refusing() -> Self {
+            Self {
+                fail_first: usize::MAX,
+                error: || TransportError::Command("unknown command".to_string()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl NodeTransport for FlakyNode {
+        async fn capabilities(&self) -> Result<Capabilities, TransportError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err((self.error)());
+            }
+            Ok(Capabilities {
+                node_id: "htpc-1".to_string(),
+                kind: tv_shell_protocol::NodeKind::Shell,
+                agent_version: "0.2.2".to_string(),
+                platform: tv_shell_protocol::Platform::Linux,
+                features: [Feature::Cec].into_iter().collect(),
+            })
+        }
+
+        async fn command(&self, _line: &str) -> Result<String, TransportError> {
+            Err(TransportError::Unreachable)
+        }
+
+        async fn command_timeout(
+            &self,
+            _line: &str,
+            _timeout: Duration,
+        ) -> Result<String, TransportError> {
+            Err(TransportError::Unreachable)
+        }
+
+        fn reachability(&self) -> Reachability {
+            Reachability::LocalSocket(PathBuf::from("/tmp/flaky.sock"))
+        }
+    }
+
+    /// A node that never answers at all — the wedged-daemon case the panel
+    /// exists for.
+    struct DeadNode;
+
+    #[async_trait]
+    impl NodeTransport for DeadNode {
+        async fn capabilities(&self) -> Result<Capabilities, TransportError> {
+            // Longer than ATTEMPT_TIMEOUT: the handshake's own bound, not the
+            // transport's, has to be what ends each attempt.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Err(TransportError::Unreachable)
+        }
+
+        async fn command(&self, _line: &str) -> Result<String, TransportError> {
+            Err(TransportError::Unreachable)
+        }
+
+        async fn command_timeout(
+            &self,
+            _line: &str,
+            _timeout: Duration,
+        ) -> Result<String, TransportError> {
+            Err(TransportError::Unreachable)
+        }
+
+        fn reachability(&self) -> Reachability {
+            Reachability::LocalSocket(PathBuf::from("/tmp/dead.sock"))
+        }
+    }
+
+    /// The cold-boot race: the socket isn't there yet, then it is.
+    #[tokio::test(start_paused = true)]
+    async fn handshake_retries_an_unreachable_node_within_its_window() {
+        let node = FlakyNode::unreachable_for(2);
+        let snap = handshake(&node).await;
+        assert!(snap.handshake_ok, "the third attempt answered");
+        assert!(snap.allows(Gate::Cec));
+        assert_eq!(node.calls(), 3);
+    }
+
+    /// The window is BOUNDED — a node that never answers does not hang startup,
+    /// and the fallback is the empty (recovery-only) set, never fail-open.
+    #[tokio::test(start_paused = true)]
+    async fn handshake_gives_up_and_falls_back_to_recovery_only() {
+        let started = tokio::time::Instant::now();
+        let snap = handshake(&DeadNode).await;
+        assert!(!snap.handshake_ok);
+        assert!(snap.features.is_empty(), "must not fail open");
+        assert!(snap.allows(Gate::Recovery));
+        assert!(!snap.allows(Gate::Node));
+
+        let elapsed = started.elapsed();
+        let ceiling = ATTEMPT_TIMEOUT * ATTEMPTS as u32 + RETRY_DELAY * (ATTEMPTS as u32 - 1);
+        assert!(
+            elapsed <= ceiling,
+            "handshake ran {elapsed:?}, past its own {ceiling:?} bound"
+        );
+    }
+
+    /// A node that ANSWERS with a refusal has answered: it is older than the
+    /// `capabilities` command or broken, and asking again cannot change either.
+    /// Retrying it would just add ~9s to every startup against such a node.
+    #[tokio::test(start_paused = true)]
+    async fn handshake_does_not_retry_a_node_that_refused() {
+        let node = FlakyNode::refusing();
+        let snap = handshake(&node).await;
+        assert!(!snap.handshake_ok);
+        assert_eq!(node.calls(), 1, "a refusal is an answer — do not retry it");
+    }
+
     fn snapshot(features: &[Feature]) -> CapabilitySnapshot {
         CapabilitySnapshot {
             handshake_ok: true,
