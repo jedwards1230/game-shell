@@ -14,13 +14,14 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::bridge::BridgeError;
+use crate::capabilities::{Chrome, Gate};
 use crate::config;
 use crate::state::{AppState, SharedState};
 
 #[derive(Template)]
 #[template(path = "dev.html")]
 struct DevTemplate {
-    active: &'static str,
+    chrome: Chrome,
     daemon_up: bool,
     bridge_configured: bool,
     daemon_chip_html: String,
@@ -30,6 +31,13 @@ struct DevTemplate {
     /// either, so rendering them would produce buttons that 404. The two
     /// restart forms are NOT gated by this: restarting a unit is recovery.
     allow_dangerous: bool,
+    /// `allow_dangerous` AND the node's `dev_deploy` capability — the exact
+    /// pair `build_router` registers `/dev/deploy` + `/dev/build` on. Rendering
+    /// those two forms on either half alone would produce buttons that 404.
+    deploy_enabled: bool,
+    /// The node's `screenshot` capability — same reasoning for the screenshot
+    /// panel, whose two routes proxy the daemon bridge's `/screenshot`.
+    screenshot_enabled: bool,
 }
 
 /// `GET /dev` — probes daemon reachability (bridge `dev_status`, else IPC
@@ -43,12 +51,14 @@ pub async fn render_page(state: &AppState) -> String {
     let daemon_chip_html = render_unit_chip(state, "daemon", config::daemon_unit(), false).await;
     let shell_chip_html = render_unit_chip(state, "shell", config::shell_unit(), false).await;
     let tmpl = DevTemplate {
-        active: "dev",
+        chrome: Chrome::new(&state.caps, "dev"),
         daemon_up,
         bridge_configured: state.cfg.http_bridge_base.is_some(),
         daemon_chip_html,
         shell_chip_html,
         allow_dangerous: state.cfg.allow_dangerous,
+        deploy_enabled: state.cfg.allow_dangerous && state.caps.allows(Gate::DevDeploy),
+        screenshot_enabled: state.caps.allows(Gate::Screenshot),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
@@ -351,6 +361,7 @@ mod tests {
         ));
         Arc::new(AppState {
             cfg: AppConfig::default(),
+            caps: crate::capabilities::CapabilitySnapshot::fully_capable(),
             node: Arc::new(IpcTransport::new(sock)),
             bridge: Arc::new(BridgeClient::new(None, None)),
             recovery: Recovery::new(),

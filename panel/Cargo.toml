@@ -39,6 +39,15 @@ toml = "1.1"
 # operator's file (comments, ordering, unknown sections) must survive intact.
 toml_edit = "0.25"
 
+[dev-dependencies]
+# `#[tokio::test(start_paused = true)]` for the capability handshake's bounded
+# retry window: its worst case is ~9s of real sleeping, which a test must not
+# actually spend. Dev-dependencies ARE resolved (they are in the graph and the
+# lockfile); what keeps `test-util` out of the release binary is the workspace's
+# `resolver = "2"`, which stops dev-only features being unified into a normal
+# `cargo build`. Pure Rust, no C.
+tokio = { workspace = true, features = ["test-util"] }
+
 # uid lookup for the $XDG_RUNTIME_DIR-unset socket-path fallback (matches how
 # the host crate uses libc on Linux for its own OS-level needs).
 [target.'cfg(unix)'.dependencies]

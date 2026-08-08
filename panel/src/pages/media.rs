@@ -33,6 +33,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+use crate::capabilities::{Chrome, Gate};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -176,7 +177,7 @@ struct WebAppView {
 #[derive(Template)]
 #[template(path = "media.html")]
 struct MediaTemplate {
-    active: &'static str,
+    chrome: Chrome,
     daemon_up: bool,
     wallpapers: Vec<WallpaperView>,
     wallpapers_dir: String,
@@ -184,6 +185,14 @@ struct MediaTemplate {
     webapps: Vec<WebAppView>,
     webapps_error: String,
     max_upload_mb: usize,
+    /// The node's `settings_store` capability — `POST /media/wallpaper/select`
+    /// persists `wallpaperPath` through `set-config`, so it is registered only
+    /// behind that. The upload/delete/file routes are NOT: the panel serves
+    /// those out of its own filesystem, and `Feature::Wallpapers` is one the
+    /// daemon deliberately never emits.
+    select_enabled: bool,
+    /// The node's `web_apps` capability — the add/remove routes.
+    webapps_enabled: bool,
 }
 
 #[derive(Template)]
@@ -244,7 +253,7 @@ pub async fn render_page(state: &AppState) -> String {
     };
 
     let tmpl = MediaTemplate {
-        active: "media",
+        chrome: Chrome::new(&state.caps, "media"),
         daemon_up,
         wallpapers,
         wallpapers_dir: dir.display().to_string(),
@@ -252,6 +261,8 @@ pub async fn render_page(state: &AppState) -> String {
         webapps,
         webapps_error,
         max_upload_mb: MAX_UPLOAD_BYTES / (1024 * 1024),
+        select_enabled: state.caps.allows(Gate::SettingsStore),
+        webapps_enabled: state.caps.allows(Gate::WebApps),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))

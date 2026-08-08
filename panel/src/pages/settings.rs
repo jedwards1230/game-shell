@@ -17,6 +17,7 @@ use axum::Form;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::capabilities::{CapabilitySnapshot, Chrome};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -296,7 +297,7 @@ struct GroupView {
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
-    active: &'static str,
+    chrome: Chrome,
     daemon_up: bool,
     groups: Vec<GroupView>,
     complex_notes_html: String,
@@ -335,15 +336,16 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 
 pub async fn render_page(state: &AppState) -> String {
     match state.node.get_config().await {
-        Ok(cfg) => render_ok(&cfg),
-        Err(_e) => render_degraded(),
+        Ok(cfg) => render_ok(&state.caps, &cfg),
+        Err(_e) => render_degraded(&state.caps),
     }
 }
 
-fn render_ok(cfg: &Value) -> String {
+fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
+    let chrome = Chrome::new(caps, "settings");
     let (config_toml, config_toml_path) = read_config_toml();
     let tmpl = SettingsTemplate {
-        active: "settings",
+        chrome,
         daemon_up: true,
         groups: build_groups(cfg),
         complex_notes_html: complex_notes_html(),
@@ -360,10 +362,11 @@ fn render_ok(cfg: &Value) -> String {
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
 }
 
-fn render_degraded() -> String {
+fn render_degraded(caps: &CapabilitySnapshot) -> String {
+    let chrome = Chrome::new(caps, "settings");
     let (config_toml, config_toml_path) = read_config_toml();
     let tmpl = SettingsTemplate {
-        active: "settings",
+        chrome,
         daemon_up: false,
         groups: Vec::new(),
         complex_notes_html: String::new(),

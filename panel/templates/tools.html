@@ -106,9 +106,14 @@
     <form hx-post="/tools/sys/metrics" hx-disabled-elt="find button" hx-target="#tools-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">sys-metrics</button></form>
     <form hx-post="/tools/sys/storage" hx-disabled-elt="find button" hx-target="#tools-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">storage-status</button></form>
     <form hx-post="/tools/sys/build-info" hx-disabled-elt="find button" hx-target="#tools-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">build-info</button></form>
+    {# The controller-DB pair is registered in the `Gate::Controllers` block,
+       not with the rest of this page — render it only when that gate is open,
+       or these two buttons 404. #}
+    {% if controllers_enabled %}
     <form hx-post="/tools/sys/controllerdb-status" hx-disabled-elt="find button" hx-target="#tools-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">controllerdb status</button></form>
     <form hx-post="/tools/sys/controllerdb-refresh" hx-disabled-elt="find button" hx-target="#tools-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Fetch the upstream GameControllerDB now?"><button class="warn-action" type="submit">controllerdb refresh</button></form>
+    {% endif %}
   </div>
 </section>
 

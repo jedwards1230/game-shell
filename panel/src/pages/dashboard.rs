@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 
+use crate::capabilities::{Chrome, Gate};
 use crate::config;
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
@@ -14,14 +15,14 @@ use crate::transport::NodeTransportExt;
 #[derive(Template)]
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
-    active: &'static str,
+    chrome: Chrome,
 }
 
 /// `GET /` and `GET /dashboard` — the page shell. The tile region is filled
 /// in by an htmx poll against `/dashboard/tiles`.
-pub async fn page(State(_state): State<SharedState>) -> impl IntoResponse {
+pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(DashboardTemplate {
-        active: "dashboard",
+        chrome: Chrome::new(&state.caps, "dashboard"),
     })
 }
 
@@ -157,6 +158,12 @@ fn unit_state_view(raw: String) -> UnitStateView {
 #[template(path = "dashboard_tiles.html")]
 struct DashboardTilesTemplate {
     reachable: bool,
+    /// The node's `controllers` capability, from the STARTUP snapshot — not
+    /// `reachable`, which is this poll's live probe. The two tiles that link
+    /// to `/controllers` must follow registration, not reachability: a panel
+    /// that started while the daemon was down has no `/controllers` route even
+    /// after the daemon comes back and this probe starts succeeding.
+    controllers_enabled: bool,
     status_text: String,
     status_label: String,
     status_dot_class: &'static str,
@@ -206,6 +213,7 @@ pub async fn render_tiles(state: &AppState) -> String {
     let tmpl = if !reachable {
         DashboardTilesTemplate {
             reachable: false,
+            controllers_enabled: state.caps.allows(Gate::Controllers),
             status_text,
             status_label: String::new(),
             status_dot_class: "dot-neutral",
@@ -313,6 +321,7 @@ pub async fn render_tiles(state: &AppState) -> String {
 
         DashboardTilesTemplate {
             reachable: true,
+            controllers_enabled: state.caps.allows(Gate::Controllers),
             status_text,
             status_label,
             status_dot_class,

@@ -12,8 +12,9 @@ config management.
 >
 > **Single-node today.** The panel dials the daemon's Unix-socket IPC
 > unconditionally, so it serves exactly one node and does not build on Windows.
-> Extending it to every node with an agent — capability-gated pages, a transport
-> trait, and the security work that must land *first* — is designed in
+> Its pages are now capability-gated (below), and the transport is behind a
+> trait; what remains before a second node ships — an `HttpTransport`, platform
+> ops, the peer switcher — is designed in
 > [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md).
 
 ## Architecture
@@ -60,13 +61,18 @@ a node reached over HTTP instead of a Unix socket plugs into — see
 | Tools | IPC console grouped by domain — Navigation (intent/key), Apps (list/launch/recents), Bluetooth (power/scan/list/connect-disconnect-pair-trust), Network (status/wifi/throughput/ping), Power (can-suspend/battery), System (sys-status/sys-metrics/storage-status/build-info/controllerdb); plus a raw-line escape hatch with a warning on commands owned by another page's guarded flow. CEC and controller/pads/bindings commands live on their own Controllers/CEC pages (below) instead. |
 | Controllers | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Settings raw JSON hatch); controller-DB status/refresh |
 | CEC | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides from Settings); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname) — **the panel's one config.toml write**, done format-preservingly via `toml_edit`, applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
-| Dev | restart daemon/restart shell (always available — unit restart is recovery) plus deploy/build/reboot/suspend behind `allow_dangerous`, all with tier labels + confirms; screenshot viewer (provenance sha/branch/version/captured-at, proxied via `/dev/screenshot`) |
+| Dev | restart daemon/restart shell (always available — unit restart is recovery) plus reboot/suspend behind `allow_dangerous` and deploy/build behind `allow_dangerous` **and** the node's `dev_deploy` capability, all with tier labels + confirms; screenshot viewer (provenance sha/branch/version/captured-at, proxied via `/dev/screenshot`, gated on the node's `screenshot` capability) |
 | Logs | shell + daemon log tails (ANSI-stripped — including "bare" ESC-dropped residue like `[33m`/`[0m` — and wrapped rather than clipped), free-text filter plus one-click "Errors only"/"Hide icon noise" presets, and a Focus Shell/Focus Daemon toggle to expand one pane to full width (state lives on `#log-panels` itself, so it survives every htmx refresh of the panes inside it) |
+
+The topnav itself is rendered from the startup capability snapshot
+(`Chrome` in `panel/src/capabilities.rs`), so it never links to a page whose
+routes were not registered — see [Capability gating](#capability-gating).
 
 A small daemon-reachability dot lives in the topnav on every page (`base.html`
 + `pages::nav`), polling a cheap, short-timeout `status` probe every ~10s —
 green when the daemon answers, red when it doesn't, neutral until the first
-poll lands.
+poll lands. That dot is live reachability; the nav's *shape* is the startup
+snapshot. They answer different questions on purpose.
 
 ## System updates (pacman)
 
@@ -213,12 +219,79 @@ existing test passes. So it is enforced by **test rather than convention** — s
 cannot parse. Adding a route with any other method form fails the suite loudly
 instead of slipping through.
 
+The same parser now also attributes every route to the **registration block** it
+sits in, so the tier `main.rs` implements and the tier `route_table()` declares
+cannot drift, and it panics on any block-opening construct it cannot attribute
+(an unrecognized condition, a nested conditional, an unmodelled `app` binding) —
+an unattributed route is an unchecked route. On top of that,
+**every `post` registered unconditionally must appear in
+`RECOVERY_TIER_MUTATING` with a written reason**; a new ungated mutating route
+fails the suite rather than earning a review comment.
+
 > This was a live defect, not a hypothetical. The first version of the gating
 > test recognized only `get(`/`post(` and silently skipped anything else, so an
 > ungated `PUT` served 200 unauthenticated with the whole suite green. A check
 > that silently does nothing is indistinguishable from a check that passed —
 > which is why the parser now panics on an unrecognized form rather than
 > ignoring it.
+
+### Capability gating
+
+The panel asks the node `capabilities` (`docs/IPC_PROTOCOL.md`) **once at
+startup**, before the router is built, and registers each route in one of four
+tiers — `panel/src/capabilities.rs`:
+
+| Tier | Registered when | Pages |
+|---|---|---|
+| **Recovery** | always | Dashboard, Processes (+ system updates), Media page and its wallpaper *files*, Logs, Dev (+ unit restarts), login, assets |
+| **Node** | the handshake succeeded | Tools console |
+| **Capability** | the node declared that `Feature` | Settings (`settings_store`, also `/media/wallpaper/select`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the Dev screenshot pair (`screenshot`) |
+| **Danger** | `[panel].allow_dangerous`, intersected with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy` |
+
+**A gated-off route 404s — it does not exist.** Non-registration, not a 403 from
+a handler: honest, and it leaks nothing about what the node can do. The topnav is
+built from the same `Gate` values, so a hidden page has no link either.
+
+**Gate on what the node actually emits.** `daemon/src/ipc.rs::features()`
+deliberately never emits `wallpapers`, `processes`, `system_updates`,
+`steam_library` or `game_launch` — the daemon serves none of them. So the
+wallpaper file routes, Processes and System Updates are **recovery** tier (the
+panel's own filesystem and exec tier), not capability tier. Same for `/logs`:
+`Feature::Logs` describes the *daemon's* `GET /dev/logs`, while this page reads
+`journalctl` directly.
+
+**Failed handshake ⇒ recovery mode, loudly.** The fallback is the EMPTY feature
+set — recovery tier only. That is both fail-closed and exactly the
+daemon-independent surface, so the panel keeps what still works and gains
+nothing that would lie; it never fails open. Every page then renders a banner
+saying so, and the resolved set is logged at `info!` beside the
+`bind`/`auth`/`allow_dangerous` line:
+
+```
+tv-shell-panel: capabilities — handshake=ok, node_id="htpc-1", features=[cec,controllers,widgets,web_apps,settings_store,shell_lifecycle,screenshot,sleep,dev_deploy,logs]
+```
+
+(The order is `Feature`'s derived `Ord`, i.e. **declaration** order — not
+alphabetical. `BTreeSet<Feature>` therefore serializes byte-stably but not
+sorted by name.)
+
+**A capability change needs a panel restart.** Registration is fixed at startup.
+That is sound because the node's set is static too — `features()` derives it from
+compile-time cfgs (cargo features, `target_os`) plus startup config
+(`[http]`/`[mcp]` binds), and health is deliberately *not* in it, so a wedged CEC
+adapter does not drop `cec` and nothing transient can flip a gate. The one-click
+recovery is the Processes page's own panel-restart button.
+
+**Deployment dependency.** The panel now requires the deployed daemon to be at
+or past the commit that added the `capabilities` IPC command. An older daemon
+answers, but not with a capability set — the panel fails closed to five pages and
+says so, naming version skew rather than telling the operator to wait for a
+daemon that is already running. Deploy the daemon first, or deploy both together.
+
+The handshake itself is bounded: 4 attempts on a 1.2s budget each, 1.5s apart
+(~9.3s worst case), retried **only** while the node is unreachable — the
+documented htpc-1 cold-boot race where the panel unit starts before the daemon's
+socket exists. A node that *answers* with a refusal has answered; that fails fast.
 
 ### Startup refusal
 
@@ -250,13 +323,23 @@ are not rendered:
 `POST /dev/deploy` · `/dev/build` · `/dev/reboot` · `/dev/suspend` ·
 `/processes/updates/apply` · `/tools/raw`
 
-`GET /dev` and `GET /dev/screenshot` stay available (observability), as do every
+`GET /dev` stays available (observability), as does every
 unit-restart route: `POST /processes/restart/{key}`, `/cec/recover/restart-daemon`,
 `/dev/restart-daemon` and `/dev/restart-shell`. The last two used to be gated,
 which bought nothing — they drive the *same* two systemd units that the ungated
 `/processes/restart/{key}` does, so the gate only hid one door to the same room.
 `POST /tools/raw` is in the dangerous set because it drives the entire IPC
-vocabulary, making it an arbitrary-command escape hatch.
+vocabulary, making it an arbitrary-command escape hatch. It carries **no**
+capability gate on top — `allow_dangerous` is already an explicit opt-in to an
+arbitrary-command surface, and gating it further would not remove a capability
+lie (it reports the node's own error when the node is down). Note the scope
+honestly: with the handshake failed, `/tools` is gone too, so what survives is
+reachable by `curl`, not from the UI.
+
+`/dev/deploy` and `/dev/build` are the one intersection — they need
+`allow_dangerous` **and** the node's `dev_deploy` capability, since they proxy
+the daemon bridge. `GET /dev/screenshot` moved out of this list entirely: it is
+now gated on `screenshot` (see [Capability gating](#capability-gating)).
 
 ## Danger tiers
 

@@ -39,11 +39,13 @@
       <div class="wallpaper-tile {% if !any_selected %}wallpaper-selected{% endif %}">
         <div class="wallpaper-none">None<br><span class="muted">(solid colour)</span></div>
         <div class="wallpaper-actions">
+          {% if select_enabled %}
           <form hx-post="/media/wallpaper/select" hx-disabled-elt="find button"
                 hx-target="#media-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="name" value="">
             <button type="submit">{% if !any_selected %}Active{% else %}Use{% endif %}</button>
           </form>
+          {% endif %}
         </div>
       </div>
       {% for w in wallpapers %}
@@ -51,11 +53,13 @@
         <img src="/media/wallpaper/file?name={{ w.name|urlencode }}" alt="{{ w.name }}" loading="lazy">
         <div class="wallpaper-name" title="{{ w.name }}">{{ w.name }}</div>
         <div class="wallpaper-actions">
+          {% if select_enabled %}
           <form hx-post="/media/wallpaper/select" hx-disabled-elt="find button"
                 hx-target="#media-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="name" value="{{ w.name }}">
             <button type="submit">{% if w.selected %}Active{% else %}Use{% endif %}</button>
           </form>
+          {% endif %}
           <form hx-post="/media/wallpaper/delete" hx-disabled-elt="find button"
                 hx-target="#media-result" hx-swap="innerHTML" class="inline-form"
                 hx-confirm="Delete {{ w.name }} from the box? This removes the file.">
@@ -84,6 +88,7 @@
   <p class="banner banner-warn">{{ webapps_error }}</p>
   {% endif %}
 
+  {% if webapps_enabled %}
   <form hx-post="/media/webapp/add" hx-disabled-elt="find button"
         hx-target="#media-result" hx-swap="innerHTML" class="inline-form">
     <input type="text" name="name" placeholder="Name (e.g. YouTube)" maxlength="64" required
@@ -91,6 +96,10 @@
     <input type="url" name="url" placeholder="https://youtube.com/tv" required style="width:22rem;">
     <button type="submit">Add web app</button>
   </form>
+  {% else %}
+  <p class="banner">This node did not declare the <code>web_apps</code> capability, so the
+  registry is read-only here.</p>
+  {% endif %}
 
   <div id="webapp-list">
     <!--webapp-list-start-->
@@ -108,12 +117,14 @@
           <td class="muted">{{ a.url }}</td>
           <td><code>{{ a.wm_class }}</code></td>
           <td>
+            {% if webapps_enabled %}
             <form hx-post="/media/webapp/remove" hx-disabled-elt="find button"
                   hx-target="#media-result" hx-swap="innerHTML" class="inline-form"
                   hx-confirm="Remove {{ a.name }}? This deletes its launcher (the browser profile is kept).">
               <input type="hidden" name="id" value="{{ a.id }}">
               <button class="danger" type="submit">Remove</button>
             </form>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

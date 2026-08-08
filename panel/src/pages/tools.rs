@@ -18,6 +18,7 @@ use axum::response::{Html, IntoResponse};
 use axum::Form;
 use serde::Deserialize;
 
+use crate::capabilities::{Chrome, Gate};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -55,7 +56,7 @@ const WARN_COMMANDS: &[&str] = &["set-config", "set-binding", "grab", "release",
 #[derive(Template)]
 #[template(path = "tools.html")]
 struct ToolsTemplate {
-    active: &'static str,
+    chrome: Chrome,
     intent_quick: &'static [&'static str],
     overlay_quick: &'static [&'static str],
     settings_slugs: &'static [&'static str],
@@ -64,18 +65,25 @@ struct ToolsTemplate {
     /// drives the whole IPC vocabulary and is therefore an arbitrary-command
     /// escape hatch. `POST /tools/raw` is not registered when this is false.
     allow_dangerous: bool,
+    /// The node's `controllers` capability. The two `/tools/sys/controllerdb-*`
+    /// routes live in the `Gate::Controllers` block, not the node block that
+    /// registers the rest of this page — so a node that answers a handshake
+    /// without declaring `controllers` (any non-Linux one) would otherwise be
+    /// rendered two buttons POSTing to unregistered routes.
+    controllers_enabled: bool,
 }
 
 /// `GET /tools` — the console. No IPC calls on load; every command is fired
 /// by an htmx action.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(ToolsTemplate {
-        active: "tools",
+        chrome: Chrome::new(&state.caps, "tools"),
         intent_quick: INTENT_QUICK,
         overlay_quick: OVERLAY_QUICK,
         settings_slugs: SETTINGS_SLUGS,
         key_quick: KEY_VOCAB,
         allow_dangerous: state.cfg.allow_dangerous,
+        controllers_enabled: state.caps.allows(Gate::Controllers),
     })
 }
 

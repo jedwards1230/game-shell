@@ -28,6 +28,7 @@ use axum::response::{Html, IntoResponse};
 use axum::Form;
 use serde_json::Value;
 
+use crate::capabilities::{CapabilitySnapshot, Chrome};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
 
@@ -212,7 +213,7 @@ struct WidgetCardView {
 #[derive(Template)]
 #[template(path = "widgets.html")]
 struct WidgetsTemplate {
-    active: &'static str,
+    chrome: Chrome,
     daemon_up: bool,
     cards: Vec<WidgetCardView>,
 }
@@ -249,8 +250,8 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 
 pub async fn render_page(state: &AppState) -> String {
     match state.node.get_config().await {
-        Ok(cfg) => render_ok(&cfg),
-        Err(_e) => render_degraded(),
+        Ok(cfg) => render_ok(&state.caps, &cfg),
+        Err(_e) => render_degraded(&state.caps),
     }
 }
 
@@ -277,7 +278,8 @@ fn build_card_view(m: &'static WidgetManifest, cur: &CurrentWidget) -> WidgetCar
     }
 }
 
-fn render_ok(cfg: &Value) -> String {
+fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
+    let chrome = Chrome::new(caps, "widgets");
     let mut current = resolve_current(cfg);
     sort_by_order(&mut current);
     let cards = current
@@ -286,7 +288,7 @@ fn render_ok(cfg: &Value) -> String {
         .collect();
 
     let tmpl = WidgetsTemplate {
-        active: "widgets",
+        chrome,
         daemon_up: true,
         cards,
     };
@@ -294,9 +296,10 @@ fn render_ok(cfg: &Value) -> String {
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
 }
 
-fn render_degraded() -> String {
+fn render_degraded(caps: &CapabilitySnapshot) -> String {
+    let chrome = Chrome::new(caps, "widgets");
     let tmpl = WidgetsTemplate {
-        active: "widgets",
+        chrome,
         daemon_up: false,
         cards: Vec::new(),
     };

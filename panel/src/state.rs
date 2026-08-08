@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::bridge::DevBridge;
+use crate::capabilities::CapabilitySnapshot;
 use crate::config::AppConfig;
 use crate::exec::Recovery;
 use crate::transport::NodeTransport;
@@ -14,6 +15,11 @@ use crate::updates::UpdatesState;
 /// recovery) and the Updates feature's cache/job state.
 pub struct AppState {
     pub cfg: AppConfig,
+    /// What the node declared it can do, resolved ONCE before the router was
+    /// built (`crate::capabilities::handshake`). Route registration and the
+    /// nav both read it, so a link can never point at an unregistered route.
+    /// Static by design — see [`crate::capabilities`].
+    pub caps: CapabilitySnapshot,
     /// The node this panel speaks for. Held as a trait object so the pages
     /// depend on *what* a node can do, not on the Unix socket that happens to
     /// serve the local one — see [`crate::transport`].

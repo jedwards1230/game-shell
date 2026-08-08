@@ -7,6 +7,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 
+use crate::capabilities::Chrome;
 use crate::config;
 use crate::state::{AppState, SharedState};
 use crate::text::strip_ansi;
@@ -17,12 +18,14 @@ const MAX_LINES: usize = 1000;
 #[derive(Template)]
 #[template(path = "logs.html")]
 struct LogsTemplate {
-    active: &'static str,
+    chrome: Chrome,
 }
 
 /// `GET /logs` — the page shell.
-pub async fn page(State(_state): State<SharedState>) -> impl IntoResponse {
-    super::render(LogsTemplate { active: "logs" })
+pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
+    super::render(LogsTemplate {
+        chrome: Chrome::new(&state.caps, "logs"),
+    })
 }
 
 #[derive(Deserialize)]
