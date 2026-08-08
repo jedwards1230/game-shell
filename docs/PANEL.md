@@ -42,6 +42,12 @@ config management.
    reboot/suspend via logind. The UI labels which tier each action uses;
    destructive actions are confirmed and single-flight.
 
+Tiers 1 and 2 are reached through traits, not concrete clients: `AppState`
+holds `Arc<dyn NodeTransport>` (`transport.rs` — `IpcTransport` is the only
+implementation today) and `Arc<dyn DevBridge>` (`bridge.rs`). That is the seam
+a node reached over HTTP instead of a Unix socket plugs into — see
+[MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md) §2.
+
 ## Pages
 
 | Page | Contents |
