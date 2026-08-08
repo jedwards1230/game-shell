@@ -184,6 +184,36 @@ truncated, breaking browser login forever while `Bearer` kept working. The
 middleware also fails closed at runtime — auth on with no token rejects
 everything.
 
+### How the layer is attached — and the axum footgun it hides
+
+The gate is `.route_layer(..)`, which wraps **only routes that match**. Two
+consequences follow, and both serve traffic **unauthenticated** while looking
+completely correct:
+
+1. **A `.fallback(..)` catch-all is never wrapped.** It is not a matched route,
+   so the layer does not run for it. An auth layer plus a fallback handler is an
+   open handler.
+2. **Any `.route(..)` registered *after* the `.route_layer(..)` call is never
+   wrapped.** Ordering is load-bearing, and nothing about the builder chain
+   signals that.
+
+The same hole exists for `.merge(..)`, `.nest(..)`, `.nest_service(..)` and
+`route_service`, which graft in handlers the layer never sees.
+
+None of this is visible in review: the router compiles, the app boots, and every
+existing test passes. So it is enforced by **test rather than convention** — see
+`panel/src/tests.rs`, which asserts the last `.route(` appears before
+`.route_layer(`, and rejects each of the five router forms the completeness gate
+cannot parse. Adding a route with any other method form fails the suite loudly
+instead of slipping through.
+
+> This was a live defect, not a hypothetical. The first version of the gating
+> test recognized only `get(`/`post(` and silently skipped anything else, so an
+> ungated `PUT` served 200 unauthenticated with the whole suite green. A check
+> that silently does nothing is indistinguishable from a check that passed —
+> which is why the parser now panics on an unrecognized form rather than
+> ignoring it.
+
 ### Startup refusal
 
 The panel refuses to start when it is bound to a **non-loopback** address with
