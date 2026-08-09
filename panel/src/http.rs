@@ -216,6 +216,21 @@ impl HttpTransport {
         }
     }
 
+    /// Build a transport for a resolved `[[nodes]]` entry.
+    ///
+    /// The seam between the config half of this change and the transport half:
+    /// [`RemoteNode`] has already had its token read under the panel's own
+    /// hygiene rules (config-dir-confined, 0600, non-empty) and its `base_url`
+    /// validated, so this cannot be handed a credential from an arbitrary path.
+    ///
+    /// Its caller is the node switcher (`docs/MULTI_NODE_PANEL.md` §4,
+    /// sequencing step 6) — see [`crate::config::AppConfig::remote_nodes`] for
+    /// why the config lands before the thing that serves it.
+    #[allow(dead_code)]
+    pub fn for_node(node: &crate::config::RemoteNode) -> Self {
+        Self::new(&node.base_url, node.token.clone())
+    }
+
     /// Issue `route` under `timeout` and return the node's reply body.
     ///
     /// The `tokio::time::timeout` wraps **send AND body read**, not just the

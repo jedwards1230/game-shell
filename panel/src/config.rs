@@ -85,6 +85,73 @@ pub struct HttpSection {
     pub token_file: Option<String>,
 }
 
+/// One `[[nodes]]` entry, as written in `config.toml`.
+///
+/// ```toml
+/// [[nodes]]
+/// id = "desktop-2"
+/// base_url = "http://192.168.8.153:47995"
+/// sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+/// ```
+///
+/// **`sidecar_token_file`, not `token_file`.** `docs/MULTI_NODE_PANEL.md` §4
+/// draws a hard line the field name has to carry: a panel may hold credentials
+/// **only for sidecar nodes it serves**, and never another *shell* node's token
+/// — those panels are peers reachable by `<a href>`, and a link carries no
+/// credential. Two fields both called `token_file` would make the rule a
+/// convention; naming this one for what it may only ever be makes a
+/// shell-node token an obviously wrong thing to put here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawRemoteNode {
+    /// Stable identifier for this node, used in logs and (later) the node
+    /// switcher. Not required to match the node's self-declared
+    /// `Capabilities.node_id` — that is the node's statement about itself and
+    /// is read from the handshake, never from here.
+    pub id: String,
+    /// Base URL of the sidecar's HTTP listener, e.g.
+    /// `"http://192.168.8.153:47995"`.
+    pub base_url: String,
+    /// Path to a 0600 file under the config dir holding the sidecar's bearer
+    /// token. Required: every sidecar route but `/art/{appid}` is bearer-auth'd
+    /// (`host/src/main.rs`), so a node entry with no credential could do
+    /// nothing but 401.
+    pub sidecar_token_file: String,
+}
+
+/// A resolved remote sidecar node: its id, its base URL, and its bearer token
+/// read eagerly at startup.
+#[derive(Clone)]
+pub struct RemoteNode {
+    pub id: String,
+    pub base_url: String,
+    /// The sidecar's bearer token. Redacted by this type's [`Debug`] — see
+    /// below.
+    ///
+    /// Read only by [`HttpTransport::for_node`](crate::http::HttpTransport::for_node),
+    /// which is itself waiting on the node switcher — hence the same
+    /// milestone-scoped `#[allow(dead_code)]` as
+    /// [`AppConfig::remote_nodes`].
+    #[allow(dead_code)]
+    pub token: String,
+}
+
+/// Hand-written so a `{:?}` of the config — a startup log line, a panic
+/// message, an `anyhow` chain — cannot print a node's bearer token.
+///
+/// The panel's own token and the daemon bridge token sit in a `derive(Debug)`
+/// struct today and survive only because nothing formats them. That is a
+/// property of the call sites, not of the type, and it does not scale to one
+/// credential per served node.
+impl std::fmt::Debug for RemoteNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteNode")
+            .field("id", &self.id)
+            .field("base_url", &self.base_url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Top-level shape captured from `config.toml`. Deliberately does NOT declare
 /// the daemon's other sections (`mcp`, `cec`, `plex`, `steam`, `observability`,
 /// `input`) — serde ignores unknown top-level keys by default (no
@@ -98,6 +165,10 @@ struct RawConfig {
     http: HttpSection,
     #[serde(default)]
     dev: DevSection,
+    /// `[[nodes]]` — remote sidecar nodes this panel may serve
+    /// (`docs/MULTI_NODE_PANEL.md` §4). Absent on every node deployed today.
+    #[serde(default)]
+    nodes: Vec<RawRemoteNode>,
 }
 
 /// Resolved, ready-to-use panel configuration.
@@ -130,6 +201,22 @@ pub struct AppConfig {
     /// (tilde-expanded, trimmed). `None` on any error (missing/unreadable
     /// file, no `token_file` configured).
     pub http_token: Option<String>,
+    /// Remote **sidecar** nodes from `[[nodes]]`, each with its bearer token
+    /// resolved eagerly under the same rules as the panel's own
+    /// (`config`-dir-confined, 0600, non-empty) — see [`read_remote_nodes`].
+    ///
+    /// Empty on every node deployed today, and **nothing reads it yet**: this
+    /// PR lands `HttpTransport` and the config that will point one at a node;
+    /// the node switcher that actually serves a second node is the next
+    /// milestone (`docs/MULTI_NODE_PANEL.md` §4, sequencing step 6). Same
+    /// `#[allow(dead_code)]` treatment (and same reason) as
+    /// [`shell_journal_tag`] and [`crate::transport::Reachability`]: a landed
+    /// surface whose consumer is a later milestone, kept honest by tests
+    /// rather than deleted and re-derived. The alternative — landing the
+    /// config in the same PR as the switcher — is what makes a switcher PR
+    /// carry an unreviewed credential-handling change.
+    #[allow(dead_code)]
+    pub remote_nodes: Vec<RemoteNode>,
 }
 
 impl Default for AppConfig {
@@ -149,6 +236,7 @@ impl Default for AppConfig {
             allow_insecure_lan: false,
             http_bridge_base: None,
             http_token: None,
+            remote_nodes: Vec::new(),
         }
     }
 }
@@ -286,6 +374,13 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
         _ => None,
     };
 
+    // Resolved eagerly, and a failure ABORTS startup — same posture as the
+    // panel's own token and for the same reason: a node entry whose token is
+    // missing, world-readable or outside the config dir must not degrade into
+    // a node the panel silently cannot talk to. It would 401 on every request
+    // and the operator would go looking at the sidecar.
+    let remote_nodes = read_remote_nodes(&raw.nodes, &tv_shell_protocol::brand::config_dir())?;
+
     let cfg = AppConfig {
         enabled: raw.panel.enabled,
         panel_bind,
@@ -296,11 +391,119 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
         allow_insecure_lan: raw.dev.allow_insecure_lan,
         http_bridge_base,
         http_token,
+        remote_nodes,
     };
     if cfg.enabled {
         cfg.validate()?;
     }
     Ok(cfg)
+}
+
+/// Resolve every `[[nodes]]` entry into a [`RemoteNode`], or abort startup.
+///
+/// Each entry's token goes through the **same** [`resolve_token_path`] +
+/// [`ensure_owner_only`] checks the panel's own credential does — config-dir
+/// confinement (CWE-22), no group/other access, non-empty. Deliberately not a
+/// looser check: `docs/MULTI_NODE_PANEL.md` §4 accepts that a panel serving a
+/// sidecar holds that sidecar's token, on the condition that the blast radius
+/// stays bounded, and "read a secret from wherever the config points" is how
+/// that bound is lost.
+///
+/// The one rule NOT inherited is cookie-safety — see [`read_sidecar_token`].
+fn read_remote_nodes(raw: &[RawRemoteNode], config_dir: &Path) -> anyhow::Result<Vec<RemoteNode>> {
+    let mut out: Vec<RemoteNode> = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let id = entry.id.trim();
+        if id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "config: a [[nodes]] entry has an empty `id`; refusing to start — the \
+                 id names the node in logs and in the node switcher, and an unnamed \
+                 node cannot be told from another one"
+            ));
+        }
+        if out.iter().any(|n| n.id == id) {
+            return Err(anyhow::anyhow!(
+                "config: two [[nodes]] entries share id {id:?}; refusing to start — \
+                 whichever one lost would be silently unreachable"
+            ));
+        }
+        let base_url = validate_base_url(entry.base_url.trim(), id)?;
+        let field = format!("nodes.{id}.sidecar_token_file");
+        let resolved = resolve_token_path(&entry.sidecar_token_file, config_dir, &field)?;
+        let token = read_sidecar_token(&resolved, &field)?;
+        out.push(RemoteNode {
+            id: id.to_string(),
+            base_url,
+            token,
+        });
+    }
+    Ok(out)
+}
+
+/// Read a `[[nodes]]` entry's bearer token: owner-only, non-empty, trimmed.
+///
+/// Separate from [`read_owner_only_token`] rather than sharing it, because the
+/// two differ on one rule and on their advice:
+///
+/// - **No cookie-octet check.** `ensure_cookie_safe_token` exists because the
+///   panel's own token is interpolated into `Set-Cookie` and parsed back out of
+///   `Cookie:`, so a `;` in it silently truncates and breaks browser login
+///   forever. A sidecar token only ever leaves as
+///   `Authorization: Bearer <token>`, which has no such round trip. Inheriting
+///   the rule would refuse valid bearer tokens for a reason that does not apply
+///   here — a rule kept past its justification.
+/// - **Different advice on empty.** An empty panel token bricks the recovery
+///   panel; an empty sidecar token means one remote node 401s. Telling the
+///   operator to `openssl rand -hex 32` into the panel's token file when the
+///   problem is a node's file would send them to the wrong place.
+fn read_sidecar_token(path: &Path, field: &str) -> anyhow::Result<String> {
+    ensure_owner_only(path, field)?;
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("config: {field} {} unreadable: {e}", path.display()))?;
+    let token = raw.trim();
+    if token.is_empty() {
+        return Err(anyhow::anyhow!(
+            "config: {field} {} is empty; refusing to start — every route on a \
+             tv-shell-host sidecar except /art/{{appid}} requires a bearer token, so \
+             this node could do nothing but 401. Write the sidecar's \
+             TV_SHELL_HOST_TOKEN into that file, or remove the [[nodes]] entry.",
+            path.display()
+        ));
+    }
+    Ok(token.to_string())
+}
+
+/// Accept only an absolute `http`/`https` URL with a non-empty authority.
+///
+/// No `url` crate is in the graph and pulling one in for this would be
+/// disproportionate, so the check is deliberately narrow rather than a full
+/// parse: it rejects the mistakes that actually happen in a hand-edited
+/// config — a bare `host:port` with no scheme, a `file://` or `unix://`
+/// path, an empty string, embedded whitespace — and lets `reqwest` reject
+/// anything subtler at request time.
+///
+/// Rejecting at startup matters because the alternative is a node that
+/// appears configured and fails every request with a URL parse error the
+/// operator sees only in a per-request log line.
+fn validate_base_url(url: &str, id: &str) -> anyhow::Result<String> {
+    let authority = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "config: [[nodes]] {id:?} has base_url {url:?}, which is not an \
+                 http:// or https:// URL; refusing to start — write the sidecar's \
+                 full listener URL, e.g. \"http://192.168.8.153:47995\""
+            )
+        })?;
+    let authority = authority.trim_end_matches('/');
+    if authority.is_empty() || authority.chars().any(char::is_whitespace) {
+        return Err(anyhow::anyhow!(
+            "config: [[nodes]] {id:?} has base_url {url:?} with no usable host; \
+             refusing to start"
+        ));
+    }
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 /// Resolve `[panel].token_file` into the panel's own credential.
@@ -741,6 +944,211 @@ mod tests {
             "{err}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── [[nodes]] — remote sidecar nodes (docs/MULTI_NODE_PANEL.md §4) ──────
+
+    /// A config dir holding a token file for a `[[nodes]]` entry.
+    fn node_fixture(name: &str, contents: &str, mode: u32) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tv-shell-panel-nodes-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("sidecar-token");
+        std::fs::write(&token, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let _ = mode;
+        (dir, token)
+    }
+
+    fn node_entry(token_path: &Path) -> RawRemoteNode {
+        RawRemoteNode {
+            id: "desktop-2".to_string(),
+            base_url: "http://192.168.8.153:47995".to_string(),
+            sidecar_token_file: token_path.to_str().unwrap().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_nodes_entry_resolves_its_base_url_and_token() {
+        let (dir, token) = node_fixture("ok", "  sidecar-s3kret\n", 0o600);
+        let nodes = read_remote_nodes(&[node_entry(&token)], &dir).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "desktop-2");
+        assert_eq!(nodes[0].base_url, "http://192.168.8.153:47995");
+        assert_eq!(nodes[0].token, "sidecar-s3kret");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The three token-file hygiene rules the panel's own credential obeys
+    /// apply unchanged to a node's, because the reason is the same: a token
+    /// read from an arbitrary path, or readable by anyone on the box, is a
+    /// blast radius that `docs/MULTI_NODE_PANEL.md` §4's "bounded" claim
+    /// depends on not existing.
+    #[test]
+    fn a_nodes_token_obeys_the_same_hygiene_as_the_panels_own() {
+        // World-readable ⇒ refuse.
+        #[cfg(unix)]
+        {
+            let (dir, token) = node_fixture("perms", "s3kret\n", 0o644);
+            let err = read_remote_nodes(&[node_entry(&token)], &dir)
+                .expect_err("a world-readable sidecar credential must abort startup");
+            assert!(err.to_string().contains("group/other-accessible"), "{err}");
+            assert!(
+                err.to_string()
+                    .contains("nodes.desktop-2.sidecar_token_file"),
+                "the message must name WHICH node's token: {err}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        // Outside the config dir ⇒ refuse.
+        let (dir, token) = node_fixture("escape", "s3kret\n", 0o600);
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let err = read_remote_nodes(&[node_entry(&token)], &elsewhere)
+            .expect_err("a token file outside the config dir must abort startup");
+        assert!(
+            err.to_string().contains("escapes the config directory"),
+            "{err}"
+        );
+
+        // Empty ⇒ refuse. Every sidecar route but /art is bearer-auth'd, so an
+        // empty token is a node that can only ever 401.
+        std::fs::write(&token, "   \n").unwrap();
+        let err = read_remote_nodes(&[node_entry(&token)], &dir).expect_err("empty must abort");
+        assert!(err.to_string().contains("is empty"), "{err}");
+
+        // Missing ⇒ refuse.
+        std::fs::remove_file(&token).unwrap();
+        let err = read_remote_nodes(&[node_entry(&token)], &dir).expect_err("missing must abort");
+        assert!(
+            err.to_string().contains("cannot resolve token file path"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A sidecar token only ever leaves as `Authorization: Bearer`, never
+    /// through a `Set-Cookie`, so the panel-token cookie-octet rule must NOT be
+    /// inherited here — it would reject valid bearer tokens for no reason.
+    #[test]
+    fn a_nodes_token_is_not_held_to_the_session_cookie_alphabet() {
+        let (dir, token) = node_fixture("cookie", "abc;def ghi\n", 0o600);
+        let nodes = read_remote_nodes(&[node_entry(&token)], &dir)
+            .expect("a bearer token never round-trips through a cookie");
+        assert_eq!(nodes[0].token, "abc;def ghi");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_nodes_entry_refuses_a_base_url_that_is_not_http() {
+        let (dir, token) = node_fixture("url", "s3kret\n", 0o600);
+        for bad in [
+            "192.168.8.153:47995", // no scheme — the common hand-edit mistake
+            "unix:///run/user/1000/sock",
+            "file:///etc/passwd",
+            "",
+            "http://",
+            "http:// host:1",
+        ] {
+            let entry = RawRemoteNode {
+                base_url: bad.to_string(),
+                ..node_entry(&token)
+            };
+            let outcome = read_remote_nodes(&[entry], &dir)
+                .map(|n| format!("ACCEPTED {:?}", n[0].base_url))
+                .unwrap_or_else(|e| e.to_string());
+            assert!(
+                outcome.contains("refusing to start"),
+                "{bad:?} must be refused at startup, got: {outcome}"
+            );
+        }
+
+        // The other half: a valid URL is accepted, and a trailing slash is
+        // normalized away so `…:47995/` and `…:47995` address one node rather
+        // than building `…:47995//library` for one of them.
+        for good in ["http://192.168.8.153:47995", "https://desktop-2.lan:47995/"] {
+            let entry = RawRemoteNode {
+                base_url: good.to_string(),
+                ..node_entry(&token)
+            };
+            let nodes = read_remote_nodes(&[entry], &dir)
+                .unwrap_or_else(|e| panic!("{good:?} must be accepted: {e}"));
+            assert!(!nodes[0].base_url.ends_with('/'), "{:?}", nodes[0].base_url);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn duplicate_or_unnamed_nodes_are_refused() {
+        let (dir, token) = node_fixture("dupe", "s3kret\n", 0o600);
+        let err = read_remote_nodes(&[node_entry(&token), node_entry(&token)], &dir)
+            .expect_err("two nodes with one id: whichever lost would be unreachable");
+        assert!(err.to_string().contains("share id"), "{err}");
+
+        let unnamed = RawRemoteNode {
+            id: "   ".to_string(),
+            ..node_entry(&token)
+        };
+        let err = read_remote_nodes(&[unnamed], &dir).expect_err("an unnamed node must abort");
+        assert!(err.to_string().contains("empty `id`"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A node's token must not be printable by an accidental `{:?}` — a
+    /// startup log line, a panic payload, an `anyhow` chain. One credential per
+    /// served node is exactly the scale at which "nothing formats it today"
+    /// stops being a safety property.
+    #[test]
+    fn a_nodes_debug_redacts_its_token() {
+        let node = RemoteNode {
+            id: "desktop-2".to_string(),
+            base_url: "http://192.168.8.153:47995".to_string(),
+            token: "super-secret-bearer".to_string(),
+        };
+        let rendered = format!("{node:?}");
+        assert!(
+            !rendered.contains("super-secret-bearer"),
+            "the token leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        // The non-secret fields must still be there — a Debug that hides
+        // everything is useless for the diagnostics it exists for.
+        assert!(rendered.contains("desktop-2"), "{rendered}");
+        assert!(rendered.contains("192.168.8.153"), "{rendered}");
+    }
+
+    #[test]
+    fn no_nodes_section_is_the_normal_case_and_yields_an_empty_list() {
+        let cfg = resolve(RawConfig::default()).unwrap();
+        assert!(cfg.remote_nodes.is_empty());
+    }
+
+    #[test]
+    fn nodes_parse_from_the_documented_toml_shape() {
+        let toml_text = r#"
+            [panel]
+            bind = "127.0.0.1:8091"
+
+            [[nodes]]
+            id = "desktop-2"
+            base_url = "http://192.168.8.153:47995"
+            sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+        "#;
+        let raw: RawConfig = toml::from_str(toml_text).expect("parse");
+        assert_eq!(raw.nodes.len(), 1);
+        assert_eq!(raw.nodes[0].id, "desktop-2");
+        assert_eq!(raw.nodes[0].base_url, "http://192.168.8.153:47995");
+        assert_eq!(
+            raw.nodes[0].sidecar_token_file,
+            "~/.config/tv-shell/desktop-2-sidecar-token"
+        );
     }
 
     #[test]
