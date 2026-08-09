@@ -764,25 +764,41 @@ mod tests {
     /// also be honored. This is the direction a generic
     /// `timeout(default, command())` wrapper would silently break, and the
     /// reason the bound is each implementation's obligation rather than the
-    /// trait's.
+    /// trait's. It is also the direction a `reqwest::Client`-level timeout
+    /// breaks, which is why [`HttpTransport::new`] sets none.
+    ///
+    /// **The margin is load-bearing, not padding.** A bare
+    /// `elapsed > DEFAULT_TIMEOUT` was tried and is a gate that cannot fail:
+    /// under a client-level 3s timeout the request returns at ~3.002s, which
+    /// satisfies `> 3s` by two milliseconds, and the mutation passed. The
+    /// assertion has to sit between the capped time (`DEFAULT_TIMEOUT`) and
+    /// the honored time (`DEFAULT_TIMEOUT + OVERRUN`), so it is checked
+    /// against the midpoint.
     #[tokio::test]
     async fn a_budget_longer_than_the_default_is_not_capped_to_it() {
+        /// How far past the default the caller asks for.
+        const OVERRUN: Duration = Duration::from_millis(1200);
+        /// Midway between "capped at the default" and "honored in full".
+        const FLOOR: Duration = Duration::from_millis(DEFAULT_TIMEOUT.as_millis() as u64 + 600);
+
         let base = spawn_hung_peer().await;
         let t = HttpTransport::new(&base, TOKEN);
 
         let started = std::time::Instant::now();
         let err = t
-            .command_timeout("library", DEFAULT_TIMEOUT + Duration::from_millis(1200))
+            .command_timeout("library", DEFAULT_TIMEOUT + OVERRUN)
             .await
             .expect_err("the peer never replies");
         let elapsed = started.elapsed();
 
         assert!(matches!(err, TransportError::Timeout), "got {err:?}");
         assert!(
-            elapsed > DEFAULT_TIMEOUT,
-            "returned after {elapsed:?}, i.e. capped at the transport's own \
-             {DEFAULT_TIMEOUT:?} default — a caller that needs longer (POST /launch \
-             waits for Big Picture) would be cut off with no error"
+            elapsed > FLOOR,
+            "returned after {elapsed:?}, short of {FLOOR:?} — the caller asked for \
+             {:?} and was capped near the transport's own {DEFAULT_TIMEOUT:?} \
+             default. A caller that needs longer (POST /launch waits for Big \
+             Picture to come up) would be cut off with no error and no log.",
+            DEFAULT_TIMEOUT + OVERRUN
         );
     }
 
