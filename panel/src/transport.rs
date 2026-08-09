@@ -121,6 +121,13 @@ impl TransportError {
     /// The one failure whose fix is on the PANEL's side — its configured
     /// token for that node is wrong, missing, or stale — which is why it is
     /// worth a predicate rather than leaving callers to compare numbers.
+    ///
+    /// Test-only caller today. Same `#[allow(dead_code)]` treatment (and the
+    /// same reason) as [`Reachability`] and
+    /// [`crate::config::shell_journal_tag`]: its consumer is the node
+    /// switcher's per-node status line (`docs/MULTI_NODE_PANEL.md` §4), which
+    /// is the milestone that first renders a remote node at all.
+    #[allow(dead_code)]
     pub fn is_auth_failure(&self) -> bool {
         matches!(self.http_status(), Some(401) | Some(403))
     }
