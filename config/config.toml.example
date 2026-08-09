@@ -90,6 +90,27 @@
 # drive the same systemd units, and recovery is the reason the panel exists.
 #allow_dangerous = false
 
+# Remote SIDECAR nodes this panel serves over HTTP (docs/MULTI_NODE_PANEL.md
+# §4) — read by the PANEL binary only, never the daemon. One entry per sidecar
+# (e.g. tv-shell-host on a gaming PC); base_url is its HTTP listener,
+# sidecar_token_file a 0600 file holding ITS bearer token, same hygiene as
+# [panel].token_file above (0600, must live under ~/.config/tv-shell/, or the
+# panel refuses to start). Never point this at another tv-shell SHELL node's
+# own token — that panel is a peer reachable by link, not a credential this
+# one holds.
+#
+# Nested under [panel] deliberately: config.toml is shared, and the daemon's
+# top-level parser is deny_unknown_fields, so a top-level [[nodes]] would abort
+# DAEMON startup. The daemon tolerates unknown keys inside [panel] by design.
+#
+# Nothing serves an entry here yet: HttpTransport and this config resolve, but
+# the node switcher that would actually render a second node's UI hasn't
+# landed (docs/MULTI_NODE_PANEL.md sequencing step 6).
+#[[panel.nodes]]
+#id = "desktop-2"
+#base_url = "http://192.168.8.153:47995"
+#sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+
 # --- MCP server (optional, requires the daemon built with --features mcp) -----
 [mcp]
 # Streamable-HTTP MCP endpoint at /mcp exposing the daemon's control surface as

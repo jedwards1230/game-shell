@@ -1430,6 +1430,64 @@ mod tests {
         assert!(DaemonConfig::parse("[panel]\nfuture_panel_key = 42\n").is_ok());
     }
 
+    /// The panel's remote-sidecar entries live at `[[panel.nodes]]`, and the
+    /// daemon must parse-and-ignore them.
+    ///
+    /// This is the concrete case the "no `deny_unknown_fields` on
+    /// `PanelConfig`" decision above was made for, so it is worth pinning
+    /// rather than trusting: `config.toml` is SHARED, and the daemon's
+    /// top-level `deny_unknown_fields` plus `load_from`'s hard `Err` on a parse
+    /// failure means an unknown top-level table does not degrade — it aborts
+    /// daemon startup and takes the TV down.
+    ///
+    /// The second half is the point. A **top-level** `[[nodes]]` — the shape
+    /// `docs/MULTI_NODE_PANEL.md` §4 originally sketched — really is rejected
+    /// here, which is why the panel nests its entries under `[panel]`. Without
+    /// that assertion the first half proves only that some spelling works, not
+    /// that the spelling was chosen for a reason.
+    #[test]
+    fn panel_nodes_parse_and_are_ignored_by_daemon() {
+        let c = DaemonConfig::parse(
+            r#"
+            [panel]
+            bind = "127.0.0.1:8091"
+
+            [[panel.nodes]]
+            id = "desktop-2"
+            base_url = "http://192.168.8.153:47995"
+            sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+
+            [http]
+            bind = "127.0.0.1:8089"
+        "#,
+        )
+        .expect("[[panel.nodes]] must not abort daemon startup");
+        // The daemon models none of it and does not need to — but its own
+        // sections still parse alongside.
+        assert_eq!(c.panel.bind.as_deref(), Some("127.0.0.1:8091"));
+        assert_eq!(c.http.bind.as_deref(), Some("127.0.0.1:8089"));
+
+        // A TOP-LEVEL [[nodes]] is rejected by deny_unknown_fields. If this
+        // ever starts passing, the nesting is no longer load-bearing and the
+        // panel is free to flatten it.
+        let err = DaemonConfig::parse(
+            r#"
+            [[nodes]]
+            id = "desktop-2"
+            base_url = "http://192.168.8.153:47995"
+            sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+        "#,
+        )
+        .expect_err(
+            "a top-level [[nodes]] must still be rejected — the panel nests its \
+             entries under [panel] precisely because this aborts the daemon",
+        );
+        assert!(
+            err.to_string().contains("nodes"),
+            "the error should name the offending key: {err}"
+        );
+    }
+
     // ── [mqtt] ──────────────────────────────────────────────────────────────
 
     #[test]

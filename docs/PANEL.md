@@ -12,10 +12,11 @@ config management.
 >
 > **Single-node today.** The panel dials the daemon's Unix-socket IPC
 > unconditionally, so it serves exactly one node and does not build on Windows.
-> Its pages are now capability-gated (below), and the transport is behind a
-> trait; what remains before a second node ships — an `HttpTransport`, platform
-> ops, the peer switcher — is designed in
-> [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md).
+> Its pages are now capability-gated (below), the transport is behind a trait,
+> and a second implementation — `HttpTransport`, for a **sidecar** node — has
+> landed alongside its `[[panel.nodes]]` config (see [below](#the-sidecarremote-node-transport));
+> what remains before a second node ships is the node switcher that actually
+> serves one, designed in [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md).
 
 ## Architecture
 
@@ -44,10 +45,56 @@ config management.
    destructive actions are confirmed and single-flight.
 
 Tiers 1 and 2 are reached through traits, not concrete clients: `AppState`
-holds `Arc<dyn NodeTransport>` (`transport.rs` — `IpcTransport` is the only
-implementation today) and `Arc<dyn DevBridge>` (`bridge.rs`). That is the seam
-a node reached over HTTP instead of a Unix socket plugs into — see
-[MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md) §2.
+holds `Arc<dyn NodeTransport>` (`transport.rs`) and `Arc<dyn DevBridge>`
+(`bridge.rs`). That is the seam a node reached over HTTP instead of a Unix
+socket plugs into — see [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md) §2.
+
+### The sidecar/remote-node transport
+
+A **sidecar** node (`tv-shell-host`, e.g. desktop-2) has no local recovery
+tier worth serving — see [MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md) §4 — so it
+is reached remotely over HTTP by `HttpTransport` (`panel/src/http.rs`): a
+second `NodeTransport` implementation beside `IpcTransport`, speaking the
+sidecar's own bearer-auth routes rather than the daemon's IPC vocabulary.
+
+| Command line | Request |
+|---|---|
+| `capabilities` | `GET /capabilities` |
+| `library` | `GET /library` |
+| `status` | `GET /status` |
+| `open-bpm` | `POST /open-bpm` |
+| `sleep` | `POST /sleep` |
+| `launch <appid>` | `POST /launch` `{"appid":<u32>}` |
+| `quit <appid>` | `POST /quit` `{"appid":<u32>}` |
+
+Configured per node via `[[panel.nodes]]` in `config.toml` (see
+`config/config.toml.example`):
+
+```toml
+[[panel.nodes]]
+id = "desktop-2"
+base_url = "http://192.168.8.153:47995"
+sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+```
+
+`sidecar_token_file`, not `token_file` — a panel may hold credentials only for
+**sidecar** nodes it serves, never another shell node's own token. The token
+gets the same hygiene as the panel's own (config-dir-confined, 0600,
+non-empty); a resolution failure aborts panel startup rather than degrading
+silently.
+
+A non-2xx reply is `TransportError::Http { status, body }`, deliberately
+**not** `is_unreachable()`: a 401/403 means the node is up but the credential
+is wrong (`is_auth_failure()`), and a 404 means the node predates the route —
+neither is "the node is down", and collapsing either into `Unreachable` sends
+an operator to the wrong machine. Default per-request timeout is 3s, matching
+`IpcTransport`; a route whose protocol-level wait can exceed that (`launch`
+waits for Big Picture to come up on the sidecar) must pass its own budget via
+`NodeTransport::command_timeout`.
+
+**Landed, not yet served.** `HttpTransport` and `[[panel.nodes]]` resolve, but no
+page constructs one from a live node — that is the node switcher,
+[MULTI_NODE_PANEL.md](MULTI_NODE_PANEL.md) sequencing step 6.
 
 ## Pages
 

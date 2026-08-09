@@ -6,10 +6,12 @@
 > handshake, which htpc-1's daemon (`input-v0.3.0`) and desktop-2's sidecar
 > (`host-v0.7.0`) both answer in production.
 >
-> What remains is giving the **sidecar** node a UI: it still has none, because
-> `HttpTransport` is unwritten. §4 has since been amended — a sidecar is served
-> **remotely** rather than running its own panel, which takes a Windows build off
-> the path entirely.
+> `HttpTransport` and the `[[panel.nodes]]` config that points one at a sidecar have
+> since **landed** too (step 5) — desktop-2's sidecar still has no UI, because
+> nothing yet constructs an `HttpTransport` from a resolved node and serves it;
+> that is the node switcher (step 6), not the transport. §4 has since been
+> amended — a sidecar is served **remotely** rather than running its own panel,
+> which takes a Windows build off the path entirely.
 
 ## The problem
 
@@ -134,8 +136,9 @@ line protocol of `docs/IPC_PROTOCOL.md`.
 Implementations:
 
 - `IpcTransport` — the existing `ipc.rs`, gated `#[cfg(unix)]`. **Landed.**
-- `HttpTransport` — bearer-auth HTTP wrapping the sidecar's routes. Its consumer
-  is §4's remote-panel case, not a Windows build.
+- `HttpTransport` — bearer-auth HTTP wrapping the sidecar's routes. **Landed**
+  (`panel/src/http.rs`); its consumer is §4's remote-panel case, not a Windows
+  build — nothing constructs one from a live node yet (step 6).
 
 #### What actually blocks a Windows build
 
@@ -235,7 +238,7 @@ credential-aggregator objection is reduced, not eliminated, so bound it:
   link, and a link carries no credential.
 - **No route proxies to a peer panel.** The node switcher renders `<a href>`, not
   a reverse proxy. A test asserting the config struct has no peer-*panel* token
-  field still holds; the new `[nodes]` entries are sidecar tokens, which are a
+  field still holds; the new `[[panel.nodes]]` entries are sidecar tokens, which are a
   different thing and should be named so they cannot be confused.
 - Blast radius is therefore "every sidecar this panel serves", not "every node in
   the fleet" — and a sidecar token buys Steam launch/quit/sleep, not root on a
@@ -374,10 +377,13 @@ re-implementing the checks.
 5. **`HttpTransport`** + an HTTP-status shape for `TransportError` (a 401/403/404
    must collapse into neither `Command` — the dashboard would claim reachable and
    render `unwrap_or_default()` garbage — nor `Unreachable`, which would make an
-   auth misconfig indistinguishable from a down node). This is what actually
-   gives desktop-2 a UI.
-6. **Serve desktop-2 remotely**: a `[nodes]` config entry, its sidecar token, and
-   the node switcher. Settle the "where does it run" question in §4 first.
+   auth misconfig indistinguishable from a down node). **Landed**
+   (`panel/src/http.rs`, `panel/src/transport.rs`).
+6. **Serve desktop-2 remotely**: a `[[panel.nodes]]` config entry and its sidecar
+   token are **landed** too (`panel/src/config.rs`). What remains is the node
+   switcher that actually constructs an `HttpTransport` from a resolved entry
+   and renders it — this is what actually gives desktop-2 a UI. Settle the
+   "where does it run" question in §4 first.
 
 **`PlatformOps` and a Windows panel build are no longer on this path.** They were
 step 5 when the plan assumed a panel deployed onto every node; §4 removes that

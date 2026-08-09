@@ -55,6 +55,29 @@ pub struct PanelConfig {
     /// suspend, `pacman -Syu`, raw IPC). `false` by default: a fresh node
     /// gets the read-only + recovery surface until an operator opts in.
     pub allow_dangerous: bool,
+    /// `[[panel.nodes]]` — remote sidecar nodes this panel may serve
+    /// (`docs/MULTI_NODE_PANEL.md` §4). Absent on every node deployed today.
+    ///
+    /// # Why this is nested under `[panel]` and not a top-level `[[nodes]]`
+    ///
+    /// `config.toml` is **shared with the daemon**, and `DaemonConfig` is
+    /// `#[serde(default, deny_unknown_fields)]` at the top level with a hard
+    /// `Err` on a parse failure — so a top-level `[[nodes]]` table would abort
+    /// **daemon** startup, taking the TV down over a key the daemon has no
+    /// interest in. That is not theoretical: the daemon carries a
+    /// parse-and-ignore `panel: PanelConfig` field for exactly this reason,
+    /// and its own comment says `PanelConfig` deliberately omits
+    /// `deny_unknown_fields` "so the panel can add its own keys later without
+    /// forcing a matching daemon-struct change". This is that extension point,
+    /// used as designed.
+    ///
+    /// `docs/MULTI_NODE_PANEL.md` §4 sketched a top-level `[nodes]`; nesting
+    /// is the same idea correctly scoped, and it also reads truer — these are
+    /// the *panel's* nodes, not the node's.
+    ///
+    /// Pinned from the daemon side by
+    /// `daemon_config::tests::panel_nodes_parse_and_are_ignored_by_daemon`.
+    pub nodes: Vec<RawRemoteNode>,
 }
 
 impl Default for PanelConfig {
@@ -64,6 +87,7 @@ impl Default for PanelConfig {
             bind: DEFAULT_PANEL_BIND.to_string(),
             token_file: None,
             allow_dangerous: false,
+            nodes: Vec::new(),
         }
     }
 }
@@ -85,14 +109,17 @@ pub struct HttpSection {
     pub token_file: Option<String>,
 }
 
-/// One `[[nodes]]` entry, as written in `config.toml`.
+/// One `[[panel.nodes]]` entry, as written in `config.toml`.
 ///
 /// ```toml
-/// [[nodes]]
+/// [[panel.nodes]]
 /// id = "desktop-2"
 /// base_url = "http://192.168.8.153:47995"
 /// sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
 /// ```
+///
+/// Nested under `[panel]` because `config.toml` is shared with the daemon —
+/// see [`PanelConfig::nodes`].
 ///
 /// **`sidecar_token_file`, not `token_file`.** `docs/MULTI_NODE_PANEL.md` §4
 /// draws a hard line the field name has to carry: a panel may hold credentials
@@ -165,10 +192,6 @@ struct RawConfig {
     http: HttpSection,
     #[serde(default)]
     dev: DevSection,
-    /// `[[nodes]]` — remote sidecar nodes this panel may serve
-    /// (`docs/MULTI_NODE_PANEL.md` §4). Absent on every node deployed today.
-    #[serde(default)]
-    nodes: Vec<RawRemoteNode>,
 }
 
 /// Resolved, ready-to-use panel configuration.
@@ -201,7 +224,7 @@ pub struct AppConfig {
     /// (tilde-expanded, trimmed). `None` on any error (missing/unreadable
     /// file, no `token_file` configured).
     pub http_token: Option<String>,
-    /// Remote **sidecar** nodes from `[[nodes]]`, each with its bearer token
+    /// Remote **sidecar** nodes from `[[panel.nodes]]`, each with its bearer token
     /// resolved eagerly under the same rules as the panel's own
     /// (`config`-dir-confined, 0600, non-empty) — see [`read_remote_nodes`].
     ///
@@ -379,7 +402,8 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
     // missing, world-readable or outside the config dir must not degrade into
     // a node the panel silently cannot talk to. It would 401 on every request
     // and the operator would go looking at the sidecar.
-    let remote_nodes = read_remote_nodes(&raw.nodes, &tv_shell_protocol::brand::config_dir())?;
+    let remote_nodes =
+        read_remote_nodes(&raw.panel.nodes, &tv_shell_protocol::brand::config_dir())?;
 
     let cfg = AppConfig {
         enabled: raw.panel.enabled,
@@ -399,7 +423,7 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
     Ok(cfg)
 }
 
-/// Resolve every `[[nodes]]` entry into a [`RemoteNode`], or abort startup.
+/// Resolve every `[[panel.nodes]]` entry into a [`RemoteNode`], or abort startup.
 ///
 /// Each entry's token goes through the **same** [`resolve_token_path`] +
 /// [`ensure_owner_only`] checks the panel's own credential does — config-dir
@@ -416,14 +440,14 @@ fn read_remote_nodes(raw: &[RawRemoteNode], config_dir: &Path) -> anyhow::Result
         let id = entry.id.trim();
         if id.is_empty() {
             return Err(anyhow::anyhow!(
-                "config: a [[nodes]] entry has an empty `id`; refusing to start — the \
+                "config: a [[panel.nodes]] entry has an empty `id`; refusing to start — the \
                  id names the node in logs and in the node switcher, and an unnamed \
                  node cannot be told from another one"
             ));
         }
         if out.iter().any(|n| n.id == id) {
             return Err(anyhow::anyhow!(
-                "config: two [[nodes]] entries share id {id:?}; refusing to start — \
+                "config: two [[panel.nodes]] entries share id {id:?}; refusing to start — \
                  whichever one lost would be silently unreachable"
             ));
         }
@@ -440,7 +464,7 @@ fn read_remote_nodes(raw: &[RawRemoteNode], config_dir: &Path) -> anyhow::Result
     Ok(out)
 }
 
-/// Read a `[[nodes]]` entry's bearer token: owner-only, non-empty, trimmed.
+/// Read a `[[panel.nodes]]` entry's bearer token: owner-only, non-empty, trimmed.
 ///
 /// Separate from [`read_owner_only_token`] rather than sharing it, because the
 /// two differ on one rule and on their advice:
@@ -466,7 +490,7 @@ fn read_sidecar_token(path: &Path, field: &str) -> anyhow::Result<String> {
             "config: {field} {} is empty; refusing to start — every route on a \
              tv-shell-host sidecar except /art/{{appid}} requires a bearer token, so \
              this node could do nothing but 401. Write the sidecar's \
-             TV_SHELL_HOST_TOKEN into that file, or remove the [[nodes]] entry.",
+             TV_SHELL_HOST_TOKEN into that file, or remove the [[panel.nodes]] entry.",
             path.display()
         ));
     }
@@ -491,7 +515,7 @@ fn validate_base_url(url: &str, id: &str) -> anyhow::Result<String> {
         .or_else(|| url.strip_prefix("https://"))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "config: [[nodes]] {id:?} has base_url {url:?}, which is not an \
+                "config: [[panel.nodes]] {id:?} has base_url {url:?}, which is not an \
                  http:// or https:// URL; refusing to start — write the sidecar's \
                  full listener URL, e.g. \"http://192.168.8.153:47995\""
             )
@@ -499,7 +523,7 @@ fn validate_base_url(url: &str, id: &str) -> anyhow::Result<String> {
     let authority = authority.trim_end_matches('/');
     if authority.is_empty() || authority.chars().any(char::is_whitespace) {
         return Err(anyhow::anyhow!(
-            "config: [[nodes]] {id:?} has base_url {url:?} with no usable host; \
+            "config: [[panel.nodes]] {id:?} has base_url {url:?} with no usable host; \
              refusing to start"
         ));
     }
@@ -946,9 +970,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── [[nodes]] — remote sidecar nodes (docs/MULTI_NODE_PANEL.md §4) ──────
+    // ── [[panel.nodes]] — remote sidecar nodes (docs/MULTI_NODE_PANEL.md §4) ──────
 
-    /// A config dir holding a token file for a `[[nodes]]` entry.
+    /// A config dir holding a token file for a `[[panel.nodes]]` entry.
     fn node_fixture(name: &str, contents: &str, mode: u32) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "tv-shell-panel-nodes-{}-{name}",
@@ -975,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nodes_entry_resolves_its_base_url_and_token() {
+    fn a_panel_nodes_entry_resolves_its_base_url_and_token() {
         let (dir, token) = node_fixture("ok", "  sidecar-s3kret\n", 0o600);
         let nodes = read_remote_nodes(&[node_entry(&token)], &dir).unwrap();
         assert_eq!(nodes.len(), 1);
@@ -991,7 +1015,7 @@ mod tests {
     /// blast radius that `docs/MULTI_NODE_PANEL.md` §4's "bounded" claim
     /// depends on not existing.
     #[test]
-    fn a_nodes_token_obeys_the_same_hygiene_as_the_panels_own() {
+    fn a_panel_nodes_token_obeys_the_same_hygiene_as_the_panels_own() {
         // World-readable ⇒ refuse.
         #[cfg(unix)]
         {
@@ -1038,7 +1062,7 @@ mod tests {
     /// through a `Set-Cookie`, so the panel-token cookie-octet rule must NOT be
     /// inherited here — it would reject valid bearer tokens for no reason.
     #[test]
-    fn a_nodes_token_is_not_held_to_the_session_cookie_alphabet() {
+    fn a_panel_nodes_token_is_not_held_to_the_session_cookie_alphabet() {
         let (dir, token) = node_fixture("cookie", "abc;def ghi\n", 0o600);
         let nodes = read_remote_nodes(&[node_entry(&token)], &dir)
             .expect("a bearer token never round-trips through a cookie");
@@ -1047,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nodes_entry_refuses_a_base_url_that_is_not_http() {
+    fn a_panel_nodes_entry_refuses_a_base_url_that_is_not_http() {
         let (dir, token) = node_fixture("url", "s3kret\n", 0o600);
         for bad in [
             "192.168.8.153:47995", // no scheme — the common hand-edit mistake
@@ -1106,7 +1130,7 @@ mod tests {
     /// served node is exactly the scale at which "nothing formats it today"
     /// stops being a safety property.
     #[test]
-    fn a_nodes_debug_redacts_its_token() {
+    fn a_panel_nodes_debug_redacts_its_token() {
         let node = RemoteNode {
             id: "desktop-2".to_string(),
             base_url: "http://192.168.8.153:47995".to_string(),
@@ -1125,28 +1149,28 @@ mod tests {
     }
 
     #[test]
-    fn no_nodes_section_is_the_normal_case_and_yields_an_empty_list() {
+    fn no_panel_nodes_section_is_the_normal_case_and_yields_an_empty_list() {
         let cfg = resolve(RawConfig::default()).unwrap();
         assert!(cfg.remote_nodes.is_empty());
     }
 
     #[test]
-    fn nodes_parse_from_the_documented_toml_shape() {
+    fn panel_nodes_parse_from_the_documented_toml_shape() {
         let toml_text = r#"
             [panel]
             bind = "127.0.0.1:8091"
 
-            [[nodes]]
+            [[panel.nodes]]
             id = "desktop-2"
             base_url = "http://192.168.8.153:47995"
             sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
         "#;
         let raw: RawConfig = toml::from_str(toml_text).expect("parse");
-        assert_eq!(raw.nodes.len(), 1);
-        assert_eq!(raw.nodes[0].id, "desktop-2");
-        assert_eq!(raw.nodes[0].base_url, "http://192.168.8.153:47995");
+        assert_eq!(raw.panel.nodes.len(), 1);
+        assert_eq!(raw.panel.nodes[0].id, "desktop-2");
+        assert_eq!(raw.panel.nodes[0].base_url, "http://192.168.8.153:47995");
         assert_eq!(
-            raw.nodes[0].sidecar_token_file,
+            raw.panel.nodes[0].sidecar_token_file,
             "~/.config/tv-shell/desktop-2-sidecar-token"
         );
     }
