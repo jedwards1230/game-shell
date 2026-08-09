@@ -37,14 +37,21 @@ use tv_shell_protocol::Capabilities;
 
 /// Errors a single transport command can produce.
 ///
-/// This is the former `ipc::IpcError`, renamed but otherwise untouched: same
-/// variants, same [`Display`](std::fmt::Display) strings, same
-/// [`is_unreachable`](TransportError::is_unreachable). Pages render off these
-/// strings, so they are part of the panel's observable behavior.
+/// The first four variants are the former `ipc::IpcError`, renamed but
+/// otherwise untouched: same variants, same [`Display`](std::fmt::Display)
+/// strings, same [`is_unreachable`](TransportError::is_unreachable). Pages
+/// render off these strings, so they are part of the panel's observable
+/// behavior.
+///
+/// [`TransportError::Http`] is the fifth, added with [`HttpTransport`] — see
+/// its own docs for why an HTTP status could not be folded into any of the
+/// four.
+///
+/// [`HttpTransport`]: crate::http::HttpTransport
 #[derive(Debug)]
 pub enum TransportError {
     /// The node could not be reached (connect refused, socket file missing,
-    /// or the request/read timed out).
+    /// DNS failure, or the request/read timed out).
     Unreachable,
     /// The request timed out.
     Timeout,
@@ -53,13 +60,69 @@ pub enum TransportError {
     Command(String),
     /// The reply could not be parsed as the expected type.
     Parse(String),
+    /// The node answered over HTTP with a non-success status.
+    ///
+    /// **This variant exists because the other four each state something
+    /// false about a 401/403/404**, and the panel's whole contract is that it
+    /// does not render a claim the node did not make:
+    ///
+    /// - [`Command`](TransportError::Command) says *the node processed the
+    ///   request and refused it*. `is_unreachable()` is false for it, so the
+    ///   dashboard renders the node as up and healthy and the page falls
+    ///   through to its `unwrap_or_default()` — an empty Steam library shown
+    ///   as fact, when the truth is "we were never let in".
+    /// - [`Unreachable`](TransportError::Unreachable) says *nothing answered*.
+    ///   Something did. Collapsing a bad bearer token into "node is down"
+    ///   makes an auth misconfiguration — fixed by editing one config line —
+    ///   indistinguishable from a powered-off machine, and the operator goes
+    ///   looking at the wrong box.
+    /// - [`Parse`](TransportError::Parse) says the body was the wrong shape.
+    ///   A 404's body is not a malformed reply; there was no reply.
+    /// - [`Timeout`](TransportError::Timeout) is plainly not it.
+    ///
+    /// So it is its own variant, carrying the status the node actually sent
+    /// plus (a bounded prefix of) its body, and [`Display`] turns the three
+    /// statuses an operator can act on into the action.
+    ///
+    /// [`Display`]: std::fmt::Display
+    Http {
+        /// The HTTP status code the node answered with.
+        status: u16,
+        /// The response body, truncated — see
+        /// [`HttpTransport`](crate::http::HttpTransport)'s `MAX_ERROR_BODY`.
+        /// Empty when the node sent none.
+        body: String,
+    },
 }
 
 impl TransportError {
     /// `true` for the two "the node is not there" variants (`Unreachable` and
     /// `Timeout`), letting callers render a single degraded state for both.
+    ///
+    /// **Deliberately false for [`Http`](TransportError::Http).** A node that
+    /// answered 401 is up; saying otherwise is the misdiagnosis that variant
+    /// exists to prevent.
     pub fn is_unreachable(&self) -> bool {
         matches!(self, TransportError::Unreachable | TransportError::Timeout)
+    }
+
+    /// The HTTP status this error carries, if it is one. `None` for every
+    /// non-HTTP variant — so a caller can branch on the code without
+    /// string-matching [`Display`](std::fmt::Display).
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            TransportError::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// The node answered, but rejected our credential (HTTP 401 or 403).
+    ///
+    /// The one failure whose fix is on the PANEL's side — its configured
+    /// token for that node is wrong, missing, or stale — which is why it is
+    /// worth a predicate rather than leaving callers to compare numbers.
+    pub fn is_auth_failure(&self) -> bool {
+        matches!(self.http_status(), Some(401) | Some(403))
     }
 }
 
@@ -70,6 +133,27 @@ impl std::fmt::Display for TransportError {
             TransportError::Timeout => write!(f, "daemon request timed out"),
             TransportError::Command(msg) => write!(f, "{msg}"),
             TransportError::Parse(msg) => write!(f, "failed to parse daemon reply: {msg}"),
+            // The three statuses below each have a DIFFERENT fix, and an
+            // operator reading a banner is the whole audience for this string.
+            TransportError::Http { status: 401, .. } | TransportError::Http { status: 403, .. } => {
+                write!(
+                    f,
+                    "node rejected our credential (HTTP {}) — check this node's \
+                     token file against the token the node itself is running with",
+                    self.http_status().unwrap_or_default()
+                )
+            }
+            TransportError::Http { status: 404, .. } => write!(
+                f,
+                "node has no such route (HTTP 404) — it is probably older than \
+                 this panel; redeploy the node's agent"
+            ),
+            TransportError::Http { status, body } if body.is_empty() => {
+                write!(f, "node returned HTTP {status}")
+            }
+            TransportError::Http { status, body } => {
+                write!(f, "node returned HTTP {status}: {body}")
+            }
         }
     }
 }
@@ -85,9 +169,10 @@ impl std::error::Error for TransportError {}
 /// cheaply and once for real, is how a panel ends up rendering a status that
 /// disagrees with its own content.
 ///
-/// Only the local-socket form exists today because `IpcTransport` is the only
-/// implementation; the remote/HTTP form arrives with `HttpTransport` and the
-/// multi-node work (`docs/MULTI_NODE_PANEL.md` §3).
+/// Both forms now exist: [`Reachability::LocalSocket`] for `IpcTransport`
+/// (the node is this machine) and [`Reachability::Remote`] for
+/// [`HttpTransport`](crate::http::HttpTransport) (the node is a sidecar on the
+/// LAN — `docs/MULTI_NODE_PANEL.md` §4).
 ///
 /// No page reads this yet, and the capability gating deliberately did not give
 /// it one: "which node is this?" is answered by the handshake's `node_id`, and
@@ -103,6 +188,11 @@ pub enum Reachability {
     /// Reached over a local Unix-domain socket at this path — i.e. the node is
     /// this machine.
     LocalSocket(PathBuf),
+    /// Reached over HTTP at this base URL — i.e. the node is somewhere else.
+    ///
+    /// Carries the base URL only, **never the bearer token**: this is a
+    /// display/diagnostic descriptor and the credential has no business in it.
+    Remote(String),
 }
 
 /// What the panel needs from *anything* that speaks for a node.
@@ -121,6 +211,28 @@ pub trait NodeTransport: Send + Sync {
     /// Send `line` (without a trailing newline — the transport appends its own
     /// framing) and return the node's reply, with an `error:<msg>` reply
     /// surfaced as [`TransportError::Command`].
+    ///
+    /// # The trait fixes the SHAPE of a command, not its VOCABULARY
+    ///
+    /// Worth stating outright, because the single-implementation era let it go
+    /// unsaid and a caller could reasonably assume otherwise. `command` is
+    /// "one request line in, one reply out" — it is not a promise that every
+    /// node answers the same lines.
+    ///
+    /// A shell node speaks `docs/IPC_PROTOCOL.md`'s vocabulary (`sys-status`,
+    /// `get-config`, `cec-scan`, …). A sidecar speaks its own, mapped by
+    /// [`HttpTransport`](crate::http::HttpTransport) onto its HTTP routes
+    /// (`library`, `launch <appid>`, `sleep`, …). Neither understands the
+    /// other's lines, and a line the node has no mapping for is a
+    /// [`TransportError::Command`] — the node is up, that command just is not
+    /// part of what it does.
+    ///
+    /// That is not a leak the trait should close by inventing a union
+    /// vocabulary. **`Capabilities.features` already declares which surfaces a
+    /// node serves**, and route registration is gated on it
+    /// ([`crate::capabilities`]), so a page that can issue a line is by
+    /// construction only registered on a node that declared the feature behind
+    /// it. The vocabulary split is the capability split, seen from the wire.
     async fn command(&self, line: &str) -> Result<String, TransportError>;
 
     /// Like [`command`](Self::command), but with a caller-supplied `timeout`
