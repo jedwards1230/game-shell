@@ -124,17 +124,41 @@ line protocol of `docs/IPC_PROTOCOL.md`.
 Implementations:
 
 - `IpcTransport` — the existing `ipc.rs`, gated `#[cfg(unix)]`. **Landed.**
-- `HttpTransport` — bearer-auth HTTP wrapping the sidecar's routes. **Deferred**
-  until there is a consumer (§4's node switcher).
+- `HttpTransport` — bearer-auth HTTP wrapping the sidecar's routes. Its consumer
+  is §4's remote-panel case, not a Windows build.
 
-**Windows is still blocked, and `cfg(unix)` alone does not unblock it.** With no
-`HttpTransport`, a Windows build has *zero* transport implementations and cannot
-construct `AppState` at all — so Windows needs `HttpTransport` **plus** new
-config for a remote base URL. Independently, `config.rs` and `pages/cec.rs` call
-`libc` unconditionally while `libc` is a `cfg(unix)` dependency, `exec.rs` shells
-to `systemctl`/`journalctl`, and most of the test suite binds a
-`tokio::net::UnixListener`. `CONTRIBUTING.md`'s "does not build on Windows"
-therefore remains true, and the panel's CI stays Linux/macOS.
+#### What actually blocks a Windows build
+
+Worth stating precisely, because the imprecise version ("`exec.rs` shells to
+`systemctl`") reads as a compile blocker and is not one. **Capability gating is a
+runtime decision; compilation is not** — every page module is compiled into the
+binary regardless of what any node declares, so `pages/cec.rs` blocks a Windows
+build even on a node that would never render the CEC page.
+
+The complete blocker list, verified against the tree:
+
+| Blocker | Where |
+|---|---|
+| `tokio::net::UnixStream` | `ipc.rs:25`, `ipc.rs:49` |
+| `libc::getuid()` | `config.rs:477` |
+| `libc::gethostname()` | `pages/cec.rs:689` |
+| `tokio::net::UnixListener` | `ipc.rs` + `tests.rs` — **test-only** |
+
+`libc` is declared under `[target.'cfg(unix)'.dependencies]`, so the two `libc`
+call sites fail at *name resolution* off unix, not merely at link time.
+(`config.rs`'s `std::os::unix::fs::PermissionsExt` uses are already `cfg(unix)`-
+gated and are not blockers.)
+
+**`systemctl` / `journalctl` / `pacman` / `checkupdates` are NOT compile
+blockers.** They are `Command::new("…")` string literals in `exec.rs` and
+`updates.rs`; `std::process::Command` compiles on Windows and those calls simply
+fail at runtime. That distinction matters for scoping: porting them is a
+`PlatformOps` behavior question (§3), not a prerequisite for the crate to build.
+
+`CONTRIBUTING.md`'s "does not build on Windows" remains true and the panel's CI
+stays Linux/macOS — but note that **§4 removes the reason to change that**: a
+sidecar node is served by a Linux-built panel over HTTP, so no Windows panel
+build is on the path.
 
 ### 3. Platform ops behind a second trait
 
