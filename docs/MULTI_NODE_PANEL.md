@@ -1,10 +1,15 @@
 # Multi-Node Panel — one UI, N nodes, capability-gated
 
-> Status: **design, not built.** Today exactly one node runs a panel (htpc-1,
-> `tv-shell-panel` on `:8091`). The gaming PC runs `tv-shell-host`, which has no
-> UI at all. This document defines the pattern for giving every node with an
-> agent its own panel, and the security work that must land *before* the pattern
-> is replicated rather than after.
+> Status: **the pattern is built; the second node is not served yet.** Steps 1–4
+> of the sequencing have landed and are deployed — the panel authenticates, fails
+> closed on an insecure bind, and gates route *registration* on a capability
+> handshake, which htpc-1's daemon (`input-v0.3.0`) and desktop-2's sidecar
+> (`host-v0.7.0`) both answer in production.
+>
+> What remains is giving the **sidecar** node a UI: it still has none, because
+> `HttpTransport` is unwritten. §4 has since been amended — a sidecar is served
+> **remotely** rather than running its own panel, which takes a Windows build off
+> the path entirely.
 
 ## The problem
 
@@ -16,6 +21,11 @@ The panel is structurally single-node today, in four separate ways:
 | Unix socket is unconditional | `panel/` dials `AF_UNIX` with no `cfg` | The crate **does not build on Windows** (`CONTRIBUTING.md` says so explicitly) |
 | ~~Routes are flat and ungated~~ — **fixed**, see §1 | `build_router` registers each route in one of four tiers (recovery / node / capability / danger); only 22 stay unconditional, 7 of them `post` | — |
 | Platform ops are Linux-only | `exec.rs` (systemd), `updates.rs` (pacman) | A Windows node has no systemctl and no `checkupdates` |
+
+The two rows that remain are **only** blockers for putting a panel *on* a Windows
+node. §4 stops requiring that, so neither is on the current path — the gap that
+actually keeps desktop-2 UI-less is the missing `HttpTransport`, not either of
+these.
 
 `protocol/` already exists as the shared daemon↔host wire-type crate, which is
 the natural home for the fix.
@@ -173,30 +183,72 @@ build is on the path.
 Each is a declared capability, so a node that can't do one simply doesn't render
 that page — rather than rendering a page that errors on click.
 
-### 4. One panel *per node*, federated by link — not one central panel
+> **Deprioritized by §4.** The Windows column existed to support a panel deployed
+> *onto* a sidecar. Serving sidecars remotely removes that need, so no `PlatformOps`
+> port is on the current path. The trait is still the right shape if a **shell**
+> node ever runs a non-Linux OS; nothing plans that. Note also that none of these
+> are compile blockers (§2) — they are runtime shell-outs, so a Windows build
+> would produce pages that compile and fail on click, which is precisely what a
+> declared capability is meant to prevent.
 
-This is the load-bearing architectural call, and it goes against the instinct to
-build a single pane of glass.
+### 4. Local panel for a shell node; remote panel for a sidecar node
 
-**Deploy the same binary to every node; each panel manages only its own node.**
-Peers appear in the nav as a node-switcher rendered from a config list of URLs.
-They are **links, not proxies**.
+This is the load-bearing architectural call, and the rule is **per node kind**,
+not uniform. An earlier revision of this document said "one panel per node,
+federated by link" flatly. That is right for a shell node and wrong for a
+sidecar, for a reason worth keeping rather than deleting.
 
-Why not a central panel:
+**Shell node** (`kind: shell` — htpc-1): the panel runs **on** it.
 
 - **The exec tier is inherently local.** The panel exists to be the recovery path
-  when the daemon is wedged — `systemctl restart` on a hung unit. A central panel
-  cannot do that remotely. It would be exactly useless in the one scenario the
-  panel was built for.
-- **A central panel is a credential aggregator.** It would hold every node's
-  token, turning one compromise into all of them.
+  when the daemon is wedged — `systemctl restart` on a hung unit. A remote panel
+  cannot do that. It would be exactly useless in the one scenario the panel was
+  built for.
 - **It contradicts the daemon's own boundary.** The daemon is deliberately "an
   HTTP *client*, not a process supervisor" of its sidecar (`CLAUDE.md`). A panel
-  that supervises remote nodes re-introduces exactly the coupling the daemon
-  refuses.
+  that supervises a remote shell node re-introduces that coupling.
 
-**Invariant: no panel ever holds a peer's credential, and no route forwards to a
-peer.** Worth a test that asserts the config struct has no peer-token field.
+**Sidecar node** (`kind: sidecar` — desktop-2): served **remotely over HTTP** by
+a Linux-built panel, via `HttpTransport`.
+
+Both arguments above evaporate here, which is why the rule splits:
+
+- **There is no local tier worth recovering.** `tv-shell-host` is a single HTTP
+  service — no Unix socket, no CEC adapter, no compositor, no QML shell. Its
+  entire recovery story is "restart the scheduled task", which the config
+  manager already owns and does better than a web button.
+- **The supervision objection doesn't apply.** Reading a sidecar's
+  `GET /capabilities` and rendering its Steam library is being an HTTP *client* —
+  precisely the relationship the daemon already has with it.
+- **It removes the Windows build from the path entirely.** A panel deployed
+  *onto* a sidecar would need the §2 blockers fixed **plus** a whole `PlatformOps`
+  port (Task Scheduler, Event Log, winget). Served remotely, it needs neither:
+  CI already builds the panel on Linux.
+
+#### The cost, stated rather than waved away
+
+A panel serving a sidecar **does hold that sidecar's bearer token**. The
+credential-aggregator objection is reduced, not eliminated, so bound it:
+
+- A panel may hold credentials **only for sidecar nodes it serves**. It never
+  holds another **shell** node's token — those panels are peers reachable by
+  link, and a link carries no credential.
+- **No route proxies to a peer panel.** The node switcher renders `<a href>`, not
+  a reverse proxy. A test asserting the config struct has no peer-*panel* token
+  field still holds; the new `[nodes]` entries are sidecar tokens, which are a
+  different thing and should be named so they cannot be confused.
+- Blast radius is therefore "every sidecar this panel serves", not "every node in
+  the fleet" — and a sidecar token buys Steam launch/quit/sleep, not root on a
+  shell node.
+
+#### Open: where the remote panel process runs
+
+Serving desktop-2 remotely raises a question the per-node rule never had to
+answer — **which machine runs that panel**. Candidates: a second unit on htpc-1
+bound to another port, a separate Linux host, or the cluster. The deciding factor
+is which box is acceptable as the holder of desktop-2's token, and whether a
+sleeping htpc-1 taking the sidecar's UI down with it is acceptable. Unresolved
+here on purpose; it is a deployment decision, not a design one.
 
 ### 5. Fix the version while you're here
 
@@ -319,10 +371,21 @@ re-implementing the checks.
    off `state.ipc`. No behavior change on htpc-1 — this step should be invisible.
 4. **Capability-gated routes + nav**, with the ungated-mutating-route test.
    **Landed** — `panel/src/capabilities.rs`; see §1.
-5. **`PlatformOps` trait**; Windows implementations; panel added to the Windows
-   CI leg.
-6. **Deploy to desktop-2**, peer switcher, per-node Ansible vars and token.
+5. **`HttpTransport`** + an HTTP-status shape for `TransportError` (a 401/403/404
+   must collapse into neither `Command` — the dashboard would claim reachable and
+   render `unwrap_or_default()` garbage — nor `Unreachable`, which would make an
+   auth misconfig indistinguishable from a down node). This is what actually
+   gives desktop-2 a UI.
+6. **Serve desktop-2 remotely**: a `[nodes]` config entry, its sidecar token, and
+   the node switcher. Settle the "where does it run" question in §4 first.
+
+**`PlatformOps` and a Windows panel build are no longer on this path.** They were
+step 5 when the plan assumed a panel deployed onto every node; §4 removes that
+requirement for sidecars. Revisit only if a *shell* node ever runs Windows, which
+nothing plans today.
 
 Steps 1–4 are worth doing even if a second node never ships: they fix a live
 credential-laundering issue and delete the "reserved for a later milestone"
-comment that has been load-bearing for longer than intended.
+comment that has been load-bearing for longer than intended. **Steps 1–4 have
+landed** (`#389`, `#391`, `#393`, `#395`), and both nodes now answer a
+capabilities handshake in production.
