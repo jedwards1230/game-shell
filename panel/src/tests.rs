@@ -2647,6 +2647,118 @@ async fn htpc_1_declared_set_registers_todays_entire_route_set() {
     }
 }
 
+/// desktop-2's REAL declared feature set, parsed from the live sidecar's
+/// `GET /capabilities` (`host-v0.7.0` at 192.168.8.153:47995, captured
+/// 2026-08-07):
+///
+/// ```text
+/// {"node_id":"desktop","kind":"sidecar","agent_version":"0.7.0",
+///  "platform":"windows","features":["steam_library","game_launch","sleep"]}
+/// ```
+///
+/// **Deserialized from that payload rather than hand-listed.** A hand-written
+/// `[Feature::SteamLibrary, …]` would be a fixture asserting what this test
+/// already believes; going through the wire format means a rename or an
+/// `as_str()` drift on either side shows up here.
+fn desktop_2_capabilities() -> CapabilitySnapshot {
+    const LIVE: &str = r#"{"node_id":"desktop","kind":"sidecar","agent_version":"0.7.0","platform":"windows","features":["steam_library","game_launch","sleep"]}"#;
+    let caps: tv_shell_protocol::Capabilities =
+        serde_json::from_str(LIVE).expect("desktop-2's live /capabilities payload");
+    assert_eq!(caps.kind, tv_shell_protocol::NodeKind::Sidecar);
+    assert_eq!(
+        caps.features,
+        [Feature::SteamLibrary, Feature::GameLaunch, Feature::Sleep]
+            .into_iter()
+            .collect(),
+        "the captured payload changed shape — re-capture it, do not edit the \
+         expectation"
+    );
+    caps.into()
+}
+
+/// **The gating claim for the node `HttpTransport` exists to serve, checked
+/// against the real router rather than eyeballed.**
+///
+/// A sidecar declares `steam_library`, `game_launch` and `sleep`. **No [`Gate`]
+/// names any of the three** (`no_gate_names_a_feature_the_daemon_never_emits`
+/// pins that), so a panel pointed at desktop-2 must register exactly the
+/// recovery tier plus the node tier — the handshake did succeed — and **not one
+/// capability-tier route**. CEC, Controllers, Widgets, Settings, WebApps and
+/// Screenshot must all 404: desktop-2 has no CEC adapter, no gamepad fleet, no
+/// QML shell and no `settings.json`, so rendering any of those pages would be
+/// the panel inventing a surface the node never claimed.
+///
+/// `allow_dangerous = true` throughout, so nothing here disappears merely for
+/// being in the danger tier — `/dev/deploy` and `/dev/build` still vanish
+/// because their block ALSO requires `Gate::DevDeploy`, which a sidecar does
+/// not declare.
+#[tokio::test]
+async fn desktop_2_sidecar_registers_the_node_tier_and_no_capability_route() {
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        desktop_2_capabilities(),
+    ))
+    .await;
+    let c = client();
+
+    let mut registered = 0usize;
+    let mut absent = 0usize;
+    for spec in route_table() {
+        if spec.access == Public {
+            continue;
+        }
+        // Recovery is unconditional; Node is open because the handshake
+        // succeeded; every capability gate names a feature no sidecar declares.
+        let expected = match spec.gate {
+            Gate::Recovery | Gate::Node => 401,
+            _ => 404,
+        };
+        let status = request(&c, &base, probe_method(&spec), spec.request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(
+            status,
+            expected,
+            "{} (Gate::{}) against desktop-2's declared set \
+             [steam_library, game_launch, sleep]",
+            spec.request,
+            spec.gate.ident()
+        );
+        if expected == 401 {
+            registered += 1;
+        } else {
+            absent += 1;
+        }
+    }
+
+    // The split must be non-trivial in BOTH directions, or the assertion above
+    // is satisfied by a router that registers everything or nothing.
+    assert!(
+        registered > 0 && absent > 0,
+        "registered={registered}, absent={absent} — the sidecar gating claim is vacuous"
+    );
+
+    // And name the pages explicitly, so the test says what it means rather than
+    // only what its loop happens to cover.
+    for path in ["/cec", "/controllers", "/widgets", "/settings"] {
+        let status = c
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(
+            status, 404,
+            "{path} must not exist on a sidecar — it has no CEC adapter, no gamepad \
+             fleet, no QML shell and no settings.json"
+        );
+    }
+}
+
 /// The five features `daemon/src/ipc.rs::features()` deliberately never emits
 /// must not appear in htpc-1's set — if one crept in, the test above would go
 /// green on a fiction.

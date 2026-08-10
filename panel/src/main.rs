@@ -22,6 +22,7 @@ mod bridge;
 mod capabilities;
 mod config;
 mod exec;
+mod http;
 mod humanize;
 #[cfg(unix)]
 mod ipc;
