@@ -3,6 +3,8 @@
 > **Status:** source of truth for the intended end state · 2026-08-22 · repo: [`jedwards1230/tv-shell`](https://github.com/jedwards1230/tv-shell) (public, GPL-3.0)
 >
 > This document describes what tv-shell **is meant to be, fully realized**. It is not a task list — open work lives in GitHub issues, and §10 links the two. Where a claim is about today rather than the end state, it says so.
+>
+> ⚠️ **One decision in this document is deliberately open**: whether the fleet console may serve remote *shell* nodes, which would require it to hold their RCE-capable daemon bridge tokens. See **§12 decision 3**. Everything else here is settled. **Sidecars-only is the operative behavior until the owner decides — do not implement the remote-shell-node path.**
 
 ## 1. What it is
 
@@ -105,7 +107,7 @@ A dedicated TV box has requirements a desktop session structurally cannot meet:
 | CEC scope in-repo | libcec statically linked behind `--features cec`; no site-specific helper scripts invoked | Keeps homelab identity out of a public repo |
 | Site config vs source | **AV device addresses, node addresses and the panel's deployment target are configuration, never literals in code.** No hostname, IP or MAC of any deployment appears in a non-test source path | The repo is public; site identity has been rejected from it three separate times |
 | AV lifecycle owner | **The daemon owns IP-based AV control** alongside CEC — receiver power/zone control and display wake, driven from typed config | The box must be self-sufficient for AV; an external automation platform is not a dependency |
-| Panel topology | **A fleet console with a node switcher.** Every shell node also runs its own local panel as the recovery path of last resort | The exec tier is local; a remote console cannot restart a hung unit |
+| Panel topology | **A fleet console with a node switcher.** Every shell node also runs its own local panel as the recovery path of last resort. **Which node kinds it may serve is an open decision — see §12.3**; sidecars-only is operative today | The exec tier is local; a remote console cannot restart a hung unit |
 | Text entry | **A narrow on-screen keyboard** for flows that strand a user mid-use (Wi-Fi password, stream target) — not a general keyboard | A fresh install must be able to join a network without a second device; nothing more |
 | Wedge recovery | **Sensor in the daemon, actuator outside** — export a frame-presentation counter; let external automation decide to act | An actuator that fires wrongly kills a live game; the daemon cannot see enough context |
 | Doctrine | **The daemon reports; the caller decides** — no `busy` boolean, no auto-suspend on unknown | Policy belongs to the automation, not the device |
@@ -308,7 +310,7 @@ User preferences live separately in `settings.json`, written only by the daemon:
 | Screenshot fidelity | A capture under fullscreen HDR is current and 10-bit | partial — triggers done, capture engine returns stale/flattened frames | jedwards1230/tv-shell#284 |
 | Web control panel | Capability-gated, recovery-first operator surface | shipped | — |
 | Panel information architecture | Six grouped areas behind a drawer, dangerous actions in one place | shipped — jedwards1230/tv-shell#412 merged 2026-08-22; the Services allowlist needs a sudoers rule per node | jedwards1230/tv-shell#409 |
-| Fleet console | One panel serves N nodes behind a node switcher; every shell node keeps a local recovery panel | partial — transport and node config landed, nothing serves a second node | jedwards1230/tv-shell#409 and MULTI_NODE_PANEL.md step 6 |
+| Fleet console | One panel serves N nodes behind a node switcher; every shell node keeps a local recovery panel. Sidecars only until §12.3 is decided | partial — transport and node config landed, nothing serves a second node | jedwards1230/tv-shell#409 and MULTI_NODE_PANEL.md step 6 |
 | On-screen keyboard | A narrow OSK for stranding flows only (Wi-Fi password, stream target) | not started | jedwards1230/tv-shell#20 |
 | Web apps | Add from the couch or the panel; presets and icons | partial — panel add flow shipped; presets, icons, on-TV flow deferred | jedwards1230/tv-shell#187 |
 | Packaging | Installable the standard way for the platform | not started — `packaging/` is empty | jedwards1230/tv-shell#144, jedwards1230/tv-shell#147 |
@@ -337,7 +339,7 @@ User preferences live separately in `settings.json`, written only by the daemon:
 - **`--features mcp` is compiled by the deploy and release builds but never by CI.** `cec` has a dedicated CI leg; `mcp` has none, so a break in the agent control surface — the one carrying the RCE-by-design dev tools — passes PR CI green and fails only at release or on the device (jedwards1230/tv-shell#414).
 - **The panel does not build on Windows** because every page module compiles regardless of capability gating; serving sidecars remotely removes the reason to care, and nothing plans a non-Linux shell node.
 - **Site identity is already leaking into source, and both the AV and fleet-console decisions push harder on it.** A deployment hostname appears in a non-test doc comment in `panel/src/capabilities.rs` and in `panel/src/updates.rs`'s module doc, and the update path hard-codes `checkupdates`/`pacman`. This is the exact class of thing two PRs were closed over, now sitting in `main`. The locked rule in §5 is the mitigation: addresses and identities are configuration, and the fix is a cleanup plus a gate, not vigilance (jedwards1230/tv-shell#417).
-- **A fleet console concentrates device-control credentials.** Serving a *remote shell node* means holding that node's daemon bridge token — the same token that reaches `/dev/deploy`. A fleet console is therefore only as safe as the least-trusted node it serves is allowed to be, and must be deployed on a host no less trusted than the most privileged node in its set.
+- **A fleet console would concentrate device-control credentials — and that is why the question is still open.** Serving a *remote shell node* means holding that node's daemon bridge token, the same credential that reaches `/dev/deploy` and MCP. One console holding several of them is a single point whose compromise is remote code execution on every node in the set. The existing rule — a panel holds credentials only for the sidecar nodes it serves — keeps that from arising, and it stands unamended. **Deferred; see §12 decision 3.**
 - **Hardware-bound verification is a throughput limit, not a scheduling detail.** The three hardest open problems (multi-pad handoff, CEC wedge recovery, render-wedge detection) all require a physical, singly-available TV to verify.
 - **Version reporting is uneven**: the daemon and sidecar carry real released versions; the shell and panel ship from git and report none, so "what is deployed" is answered by `build-info`/`tv_shell_build_info` (sha + branch) rather than a version number (jedwards1230/tv-shell#418).
 
@@ -349,11 +351,24 @@ The five forks that shaped this document, and how they were settled. None remain
 
 **2. Who is this for? → Package it; skip onboarding.** Packaging is an end-state goal and the single biggest gap between the stated goals and reality. First-run onboarding is an **explicit non-goal**. Consequence: the product is installable by someone who already runs Hyprland, and makes no promise to a user who does not.
 
-**3. Is the panel a fleet console or a per-node tool? → A fleet console.** The node switcher is end-state, not a nicety, and the deployment question `MULTI_NODE_PANEL.md` left open is answered here:
+**3. Is the panel a fleet console or a per-node tool? → A fleet console.** The node switcher is end-state, not a nicety. Two of the three questions `MULTI_NODE_PANEL.md` left open are answered here; the third is deliberately not.
+
+*Settled:*
 
 - **Where it runs.** The fleet console is a second `tv-shell-panel` instance on a Linux shell node, bound to its own port with its own token file. It does not replace the per-node panel: **every shell node keeps a local panel on the default bind**, because the exec tier — restarting a hung unit — is inherently local and is the reason the panel exists. The fleet instance is the convenience surface; the local instance is the recovery surface of last resort.
-- **What it serves.** Sidecar nodes are served in full over `HttpTransport` with a per-node `sidecar_token_file`. A remote **shell** node is served in a **degraded tier**: everything reachable through that node's daemon (state, settings, controllers, CEC, intents, dev bridge) but *not* its local exec tier. Capability gating already produces exactly this shape with no new mechanism — an unreachable tier is simply a set of routes that never register.
-- **How it is secured.** All node transports are LAN-scoped HTTP with bearer auth and a per-node credential; a non-loopback bind without a token refuses to start. Reach beyond the LAN is the environment's job — a VPN or an authenticating reverse proxy — and never the panel's. The escalation is stated plainly: serving a remote shell node means holding its **daemon bridge token**, which reaches `/dev/deploy`, so a fleet console must be deployed on a host no less trusted than the most privileged node it serves, and a node's *panel* token is still never shared.
+- **How it is secured.** All node transports are LAN-scoped HTTP with bearer auth and a per-node credential; a non-loopback bind without a token refuses to start. Reach beyond the LAN is the environment's job — a VPN or an authenticating reverse proxy — and never the panel's. A node's *panel* token is never shared with another node's panel, under either option below.
+
+> ### ⚠️ OPEN — what node kinds may the fleet console serve?
+>
+> **Status: deferred, owner decision pending. Do not implement the remote-shell-node path until this is settled.** This is the one deliberate exception to this document's no-open-forks rule.
+>
+> **Option A — sidecars only.** The console serves sidecar nodes over `HttpTransport` with a per-node `sidecar_token_file`, and nothing else. The existing locked credential rule — *a panel may hold credentials only for the sidecar nodes it serves, never another shell node's own token* (§6.5) — stays **fully intact, unamended**. A remote shell node is reached by opening its own local panel.
+>
+> **Option B — remote shell nodes too.** The console additionally serves remote shell nodes in a degraded tier: everything reachable through that node's daemon (state, settings, controllers, CEC, intents, dev bridge) but not its local exec tier. Capability gating already produces that shape with no new mechanism. **This requires amending the credential rule** to permit holding a remote shell node's **daemon bridge token**, with the amendment reading: *a fleet console must be deployed on a host no less trusted than the most privileged node it serves.*
+>
+> **What is at stake.** The bridge token reaches `/dev/deploy`, `/dev/build` and MCP — all RCE-by-design. Option B concentrates one such credential per served node in a single process, so compromising the console is remote code execution on every node in its set. Option A keeps each node's blast radius to itself at the cost of a node switcher that cannot reach the node kind you most often want to look at.
+>
+> **Operative until decided: Option A.** It is what the current rule already permits and it needs no amendment.
 
 **4. Is an on-screen keyboard part of the end state? → Yes, narrowly.** Scoped to flows that strand a user **mid-use** with no second device — joining a Wi-Fi network, entering a stream target. Not a general 10-foot keyboard, and explicitly not scoped to first-run setup, which is a non-goal per decision 2. The panel remains the comfortable surface for bulk text entry.
 
