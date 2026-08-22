@@ -454,6 +454,76 @@ async fn appearance_save_patches_only_the_appearance_group() {
     }
 }
 
+/// **`wallpaperPath` has one editor, and the typed form is not it.**
+///
+/// Phase 4 moved the key from the `Display` group (where it rendered as a raw
+/// path text field on a page that cannot browse the wallpapers dir) into
+/// `Appearance`, whose wallpaper grid writes it — and excluded it from the
+/// rendered form via `settings::CUSTOM_EDITOR_KEYS`.
+///
+/// Omitting a field from a form omits it from the patch, which is only safe
+/// because it is a `FieldKind::Str`: non-`Bool` kinds are written only when
+/// present, and the daemon's shallow merge leaves an unmentioned key alone. So
+/// an Appearance save must leave the stored wallpaper selection untouched
+/// rather than clearing it — that is the data-loss question this pins.
+#[tokio::test]
+async fn an_appearance_save_never_touches_the_wallpaper_selection() {
+    let (sock, received) =
+        spawn_config_daemon("wallpaper-scope", r#"{"wallpaperPath":"/w/a.png"}"#);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let html = pages::appearance::render_page(&state).await;
+    assert!(
+        !html.contains(r#"name="wallpaperPath""#),
+        "the grid is wallpaperPath's editor — a raw path input beside it would \
+         be a second, worse one that bypasses the containment checks: {html}"
+    );
+
+    let pairs = form(&[("__group", "Appearance"), ("themeMode", "light")]);
+    let _ = pages::appearance::render_save(&state, &pairs).await;
+    let patch = only_patch(&received);
+    assert!(
+        patch.get("wallpaperPath").is_none(),
+        "wallpaperPath must be ABSENT from the patch, so the shallow merge \
+         leaves the current selection alone: {patch}"
+    );
+
+    // It is still in the schema (Advanced's raw hatch and the picker both rely
+    // on that), and in the group whose page owns its editor.
+    let field = crate::pages::settings::SCHEMA
+        .iter()
+        .find(|f| f.key == "wallpaperPath")
+        .expect("wallpaperPath stays in the schema");
+    assert_eq!(field.group, "Appearance");
+    assert!(
+        matches!(field.kind, crate::pages::settings::FieldKind::Str),
+        "the omission-is-safe argument holds only for a non-Bool kind"
+    );
+    assert!(crate::pages::settings::CUSTOM_EDITOR_KEYS.contains(&"wallpaperPath"));
+}
+
+/// The picker writes the key the typed form no longer renders — the other half
+/// of the test above. Without this, "absent from the patch" could equally
+/// describe a key nothing writes at all.
+#[tokio::test]
+async fn the_wallpaper_picker_is_what_writes_wallpaper_path() {
+    let (sock, received) = spawn_config_daemon("wallpaper-select", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let html = pages::appearance::render_select(&state, "").await;
+    assert!(
+        html.to_lowercase().contains("cleared"),
+        "an empty name is the None tile — it clears the selection: {html}"
+    );
+    let patch = only_patch(&received);
+    assert_eq!(
+        patch["wallpaperPath"], "",
+        "the picker is the writer of this key: {patch}"
+    );
+}
+
 #[tokio::test]
 async fn apps_save_patches_only_the_apps_group() {
     let (sock, received) = spawn_config_daemon("apps-save", "{}");
@@ -522,7 +592,6 @@ async fn display_audio_save_patches_its_four_groups_and_no_others() {
         ("__group", "Audio"),
         ("hdrEnabled", "on"),
         ("overscan", "2"),
-        ("wallpaperPath", "/home/u/wall.png"),
         ("nightLightTemp", "3800"),
         ("sleepTimerMinutes", "30"),
         ("defaultSink", "hdmi"),
@@ -536,7 +605,6 @@ async fn display_audio_save_patches_its_four_groups_and_no_others() {
     let patch = only_patch(&received);
     assert_eq!(patch["hdrEnabled"], true);
     assert_eq!(patch["overscan"], 2);
-    assert_eq!(patch["wallpaperPath"], "/home/u/wall.png");
     assert_eq!(patch["nightLightTemp"], 3800);
     assert_eq!(patch["sleepTimerMinutes"], 30);
     assert_eq!(patch["defaultSink"], "hdmi");
@@ -549,6 +617,9 @@ async fn display_audio_save_patches_its_four_groups_and_no_others() {
         "reduceMotion",
         "controllerDebug",
         "cecFocusOnWake",
+        // Moved to Appearance in phase 4, with the wallpaper grid as its
+        // editor — this page must no longer write it at all.
+        "wallpaperPath",
     ] {
         assert!(
             patch.get(other).is_none(),
@@ -808,34 +879,120 @@ async fn widgets_page_degrades_when_daemon_unreachable() {
 }
 
 #[tokio::test]
-async fn media_page_degrades_when_daemon_unreachable() {
-    // The daemon owns wallpaperPath and the web-app registry, so with it down
-    // the page must still render (200 + honest banner) rather than 500 — the
-    // wallpaper FILES are local and still listable.
+async fn appearance_page_carries_the_wallpaper_surface_and_its_oob_markers() {
+    // The daemon owns wallpaperPath, so with it down the page must still
+    // render (200 + honest banner) rather than 500 — the wallpaper FILES are
+    // local and still listable.
     let state = hermetic_state();
-    let html = pages::media::render_page(&state).await;
+    let html = pages::appearance::render_page(&state).await;
     assert!(!html.is_empty());
     assert!(
         html.to_lowercase().contains("unreachable"),
-        "media page must show an unreachable marker when the daemon is down: {html}"
+        "the appearance page must show an unreachable marker when the daemon is \
+         down: {html}"
     );
-    // Both sections still render their shells.
-    assert!(html.contains("Wallpapers"), "missing wallpapers section");
-    assert!(html.contains("Web apps"), "missing web apps section");
+    assert!(
+        html.contains("<h2>Wallpaper</h2>"),
+        "the Media page's wallpaper half lives here as of phase 4: {html}"
+    );
+    assert!(
+        html.contains("<!--wallpaper-list-start-->") && html.contains("<!--wallpaper-list-end-->"),
+        "the OOB list-refresh markers must survive any template restructuring — \
+         without them every post-action grid refresh silently swaps in nothing: \
+         {html}"
+    );
+}
+
+/// **The OOB refresh, end to end.** `render_wallpaper_list_oob` re-renders the
+/// page that owns the list and string-slices it between the two comment
+/// markers, so a template edit that drops or renames a marker degrades to an
+/// empty string — a silent failure the eye does not catch on a page that
+/// otherwise looks fine.
+#[tokio::test]
+async fn wallpaper_oob_refresh_returns_the_list_fragment() {
+    let state = hermetic_state();
+    let frag = pages::appearance::render_wallpaper_list_oob(&state).await;
+    assert!(
+        frag.starts_with(r#"<div id="wallpaper-list" hx-swap-oob="innerHTML">"#),
+        "expected an OOB swap wrapper for the grid: {frag}"
+    );
+    assert!(
+        frag.len() > 60 && frag.contains("wallpaper"),
+        "expected non-empty list markup inside the wrapper: {frag}"
+    );
+    assert!(
+        !frag.contains("<h1>") && !frag.contains("<nav"),
+        "the fragment must be a SLICE of the page, not the whole page: {frag}"
+    );
 }
 
 #[tokio::test]
-async fn media_webapp_add_relays_a_compact_json_body() {
+async fn apps_page_carries_the_webapp_registry_and_its_oob_markers() {
+    let state = hermetic_state();
+    let html = pages::apps::render_page(&state).await;
+    assert!(!html.is_empty());
+    assert!(
+        html.to_lowercase().contains("unreachable"),
+        "the apps page must show an unreachable marker when the daemon is down: {html}"
+    );
+    assert!(
+        html.contains("<h2>Web apps</h2>"),
+        "the Media page's web-app half lives here as of phase 4: {html}"
+    );
+    assert!(
+        html.contains("<!--webapp-list-start-->") && html.contains("<!--webapp-list-end-->"),
+        "the OOB list-refresh markers must survive any template restructuring: {html}"
+    );
+}
+
+/// The webapp half of the same coupling, with a daemon that actually answers
+/// `webapp-list` — so the fragment must carry the real table markup, not just
+/// an empty-state paragraph.
+#[tokio::test]
+async fn webapp_oob_refresh_returns_the_list_fragment() {
+    let mut replies = HashMap::new();
+    replies.insert(
+        "webapp-list",
+        r#"[{"id":"yt","name":"YouTube","url":"https://y.tv","wmClass":"tvshell-yt"}]"#,
+    );
+    replies.insert("webapp-remove yt", "ok");
+    let sock = spawn_canned_daemon("webapp-oob", replies);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let frag = pages::apps::render_webapp_list_oob(&state).await;
+    assert!(
+        frag.starts_with(r#"<div id="webapp-list" hx-swap-oob="innerHTML">"#),
+        "expected an OOB swap wrapper for the registry table: {frag}"
+    );
+    assert!(
+        frag.contains("tvshell-yt") && frag.contains("<table>"),
+        "expected the registry table markup inside the wrapper: {frag}"
+    );
+    assert!(
+        !frag.contains("<h1>"),
+        "the fragment must be a SLICE of the page: {frag}"
+    );
+
+    // And the action that triggers it appends the fragment to its result.
+    let html = pages::apps::render_webapp_remove(&state, "yt").await;
+    assert!(
+        html.contains(r#"id="webapp-list" hx-swap-oob="innerHTML""#),
+        "a remove must carry the OOB table refresh: {html}"
+    );
+}
+
+#[tokio::test]
+async fn apps_webapp_add_relays_a_compact_json_body() {
     // The panel must not validate/allocate ids itself — it relays name+url and
     // lets the daemon (the registry's sole writer) do the work.
     let (sock, received) = spawn_recording_daemon(
-        "media-webapp-add",
+        "apps-webapp-add",
         r#"{"id":"youtube","name":"YouTube","url":"https://youtube.com/tv","wmClass":"tvshell-youtube"}"#,
     );
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
-    let _ =
-        pages::media::render_webapp_add(&state, "  YouTube  ", " https://youtube.com/tv ").await;
+    let _ = pages::apps::render_webapp_add(&state, "  YouTube  ", " https://youtube.com/tv ").await;
     let sent: Vec<String> = received
         .lock()
         .unwrap()
@@ -1020,14 +1177,18 @@ async fn widgets_reorder_at_the_boundary_is_a_position_noop_but_still_renumbers(
 }
 
 // ---------------------------------------------------------------------------
-// M3: Tools console
+// IA phase 4: the pages the Tools console dissolved into
+//
+// Same coverage as the Tools console's own tests, re-pointed at the modules
+// that now own each domain. The validators they exercise moved intact into
+// `pages::ipc_console`.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn tools_intent_rejects_whitespace_without_ipc() {
+async fn navigation_intent_rejects_whitespace_without_ipc() {
     // Validation must fail before any IPC call — no daemon needed.
     let state = hermetic_state();
-    let html = pages::tools::render_intent(&state, "settings audio").await;
+    let html = pages::navigation::render_intent(&state, "settings audio").await;
     assert!(
         html.to_lowercase().contains("whitespace"),
         "expected a whitespace validation error: {html}"
@@ -1035,9 +1196,9 @@ async fn tools_intent_rejects_whitespace_without_ipc() {
 }
 
 #[tokio::test]
-async fn tools_intent_degrades_when_daemon_unreachable() {
+async fn navigation_intent_degrades_when_daemon_unreachable() {
     let state = hermetic_state();
-    let html = pages::tools::render_intent(&state, "home").await;
+    let html = pages::navigation::render_intent(&state, "home").await;
     assert!(
         html.to_lowercase().contains("unreachable"),
         "expected a daemon-unreachable marker: {html}"
@@ -1045,9 +1206,9 @@ async fn tools_intent_degrades_when_daemon_unreachable() {
 }
 
 #[tokio::test]
-async fn tools_key_rejects_unknown_key_without_ipc() {
+async fn navigation_key_rejects_unknown_key_without_ipc() {
     let state = hermetic_state();
-    let html = pages::tools::render_key(&state, "north").await;
+    let html = pages::navigation::render_key(&state, "north").await;
     assert!(
         html.to_lowercase().contains("unknown key"),
         "expected an unknown-key error: {html}"
@@ -1055,9 +1216,9 @@ async fn tools_key_rejects_unknown_key_without_ipc() {
 }
 
 #[tokio::test]
-async fn tools_net_ping_rejects_whitespace_in_host() {
+async fn launcher_launch_rejects_whitespace_in_wm_class() {
     let state = hermetic_state();
-    let html = pages::tools::render_net_ping(&state, "1.1.1.1 extra", None).await;
+    let html = pages::launcher::render_launch_app(&state, "org.mozilla firefox").await;
     assert!(
         html.to_lowercase().contains("whitespace"),
         "expected a whitespace validation error: {html}"
@@ -1065,9 +1226,19 @@ async fn tools_net_ping_rejects_whitespace_in_host() {
 }
 
 #[tokio::test]
-async fn tools_net_ping_rejects_out_of_range_count() {
+async fn network_ping_rejects_whitespace_in_host() {
     let state = hermetic_state();
-    let html = pages::tools::render_net_ping(&state, "1.1.1.1", Some("99")).await;
+    let html = pages::network::render_ping(&state, "1.1.1.1 extra", None).await;
+    assert!(
+        html.to_lowercase().contains("whitespace"),
+        "expected a whitespace validation error: {html}"
+    );
+}
+
+#[tokio::test]
+async fn network_ping_rejects_out_of_range_count() {
+    let state = hermetic_state();
+    let html = pages::network::render_ping(&state, "1.1.1.1", Some("99")).await;
     assert!(
         html.contains("1 and 10"),
         "expected a count-range validation error: {html}"
@@ -1075,9 +1246,9 @@ async fn tools_net_ping_rejects_out_of_range_count() {
 }
 
 #[tokio::test]
-async fn tools_net_throughput_rejects_path_separator_in_iface() {
+async fn network_throughput_rejects_path_separator_in_iface() {
     let state = hermetic_state();
-    let html = pages::tools::render_net_throughput(&state, "../etc").await;
+    let html = pages::network::render_throughput(&state, "../etc").await;
     assert!(
         html.to_lowercase().contains("invalid interface"),
         "expected an invalid-interface error: {html}"
@@ -1085,9 +1256,9 @@ async fn tools_net_throughput_rejects_path_separator_in_iface() {
 }
 
 #[tokio::test]
-async fn tools_bt_action_rejects_unknown_action() {
+async fn network_bt_action_rejects_unknown_action() {
     let state = hermetic_state();
-    let html = pages::tools::render_bt_action(&state, "AA:BB:CC:DD:EE:FF", "reboot").await;
+    let html = pages::network::render_bt_action(&state, "AA:BB:CC:DD:EE:FF", "reboot").await;
     assert!(
         html.to_lowercase().contains("unknown bluetooth action"),
         "expected an unknown-action error: {html}"
@@ -1095,16 +1266,16 @@ async fn tools_bt_action_rejects_unknown_action() {
 }
 
 #[tokio::test]
-async fn tools_sys_status_json_roundtrip() {
+async fn ipc_console_json_reply_is_pretty_printed() {
     let mut replies = HashMap::new();
     replies.insert(
         "sys-status",
         r#"{"os":"Test OS","kernel":"1.2.3","hostname":"h","uptime":"1h"}"#,
     );
-    let sock = spawn_canned_daemon("tools-sys-status", replies);
+    let sock = spawn_canned_daemon("ipc-json", replies);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
-    let html = pages::tools::run_line(&state, "sys-status").await;
+    let html = pages::ipc_console::run_line(&state, "sys-status").await;
     assert!(
         html.contains("Test OS"),
         "expected the pretty-printed sys-status JSON: {html}"
@@ -1112,13 +1283,13 @@ async fn tools_sys_status_json_roundtrip() {
 }
 
 #[tokio::test]
-async fn tools_bt_power_status_bare_text_roundtrip() {
+async fn ipc_console_bare_text_reply_round_trips() {
     let mut replies = HashMap::new();
     replies.insert("bt-power-status", "bt:on");
-    let sock = spawn_canned_daemon("tools-bt-power", replies);
+    let sock = spawn_canned_daemon("ipc-bare-text", replies);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
-    let html = pages::tools::run_line(&state, "bt-power-status").await;
+    let html = pages::ipc_console::run_line(&state, "bt-power-status").await;
     assert!(
         html.contains("bt:on"),
         "expected the bare-text reply: {html}"
@@ -1126,13 +1297,13 @@ async fn tools_bt_power_status_bare_text_roundtrip() {
 }
 
 #[tokio::test]
-async fn tools_raw_error_reply_roundtrip() {
+async fn console_raw_error_reply_roundtrip() {
     let mut replies = HashMap::new();
     replies.insert("sys-metrics", "error:input-runtime-down");
-    let sock = spawn_canned_daemon("tools-raw-error", replies);
+    let sock = spawn_canned_daemon("console-raw-error", replies);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
-    let html = pages::tools::render_raw(&state, "sys-metrics").await;
+    let html = pages::console::render_raw(&state, "sys-metrics").await;
     assert!(
         html.to_lowercase().contains("input-runtime-down"),
         "expected the daemon's error message: {html}"
@@ -1140,13 +1311,13 @@ async fn tools_raw_error_reply_roundtrip() {
 }
 
 #[tokio::test]
-async fn tools_raw_warns_on_guarded_command() {
+async fn console_raw_warns_on_guarded_command() {
     let mut replies = HashMap::new();
     replies.insert("grab", "ok");
-    let sock = spawn_canned_daemon("tools-raw-warn", replies);
+    let sock = spawn_canned_daemon("console-raw-warn", replies);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
-    let html = pages::tools::render_raw(&state, "grab").await;
+    let html = pages::console::render_raw(&state, "grab").await;
     assert!(
         html.to_lowercase().contains("guarded"),
         "expected a warning banner for a guarded command: {html}"
@@ -1154,9 +1325,9 @@ async fn tools_raw_warns_on_guarded_command() {
 }
 
 #[tokio::test]
-async fn tools_raw_rejects_empty_command() {
+async fn console_raw_rejects_empty_command() {
     let state = hermetic_state();
-    let html = pages::tools::render_raw(&state, "   ").await;
+    let html = pages::console::render_raw(&state, "   ").await;
     assert!(
         html.to_lowercase().contains("empty"),
         "expected an empty-command validation error: {html}"
@@ -1266,13 +1437,13 @@ async fn updates_page_renders_the_system_updates_section() {
 }
 
 // ---------------------------------------------------------------------------
-// M3: Dev screenshot viewer
+// Dev ▸ Screenshot (its own page since IA phase 4)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn dev_screenshot_capture_degrades_when_bridge_not_configured() {
     let state = hermetic_state();
-    let html = pages::dev::render_screenshot_capture(&state).await;
+    let html = pages::screenshot::render_capture(&state).await;
     assert!(!html.is_empty());
     assert!(
         html.to_lowercase().contains("not configured"),
@@ -1752,120 +1923,143 @@ fn route_table() -> Vec<RouteSpec> {
         r("/assets/style.css", "/assets/style.css", Get, Public),
     ];
 
-    // ── Node tier: the IPC console, registered iff a node answered ──
+    // ── Node tier: the IPC surface, registered iff a node answered ──
+    //
+    // Phase 4 dissolved the Tools console into the four pages that own its
+    // subjects, plus the two power probes on a page registered elsewhere.
     table.extend(on(
         Gate::Node,
         vec![
-            r("/remote/tools", "/remote/tools", Get, Authenticated),
+            r("/devices/network", "/devices/network", Get, Authenticated),
+            r(
+                "/devices/network/status",
+                "/devices/network/status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/wifi-list",
+                "/devices/network/wifi-list",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/wifi-rescan",
+                "/devices/network/wifi-rescan",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/throughput",
+                "/devices/network/throughput",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/ping",
+                "/devices/network/ping",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/power-status",
+                "/devices/network/bt/power-status",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/power-on",
+                "/devices/network/bt/power-on",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/power-off",
+                "/devices/network/bt/power-off",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/scan-on",
+                "/devices/network/bt/scan-on",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/scan-off",
+                "/devices/network/bt/scan-off",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/list",
+                "/devices/network/bt/list",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/network/bt/action",
+                "/devices/network/bt/action",
+                Post,
+                Authenticated,
+            ),
+            // Two node-tier routes whose PAGE is in the `settings_store`
+            // block — same one-capability-per-block reason as the CEC and
+            // Input saves below, in the other direction. Display & Audio
+            // renders these two buttons only under `Gate::Node`.
+            r(
+                "/devices/display-audio/power/can-suspend",
+                "/devices/display-audio/power/can-suspend",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio/power/battery",
+                "/devices/display-audio/power/battery",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/remote/navigation",
+                "/remote/navigation",
+                Get,
+                Authenticated,
+            ),
+            r(
+                "/remote/navigation/intent",
+                "/remote/navigation/intent",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/remote/navigation/key",
+                "/remote/navigation/key",
+                Post,
+                Authenticated,
+            ),
+            r("/remote/launcher", "/remote/launcher", Get, Authenticated),
+            r(
+                "/remote/launcher/list",
+                "/remote/launcher/list",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/remote/launcher/launch",
+                "/remote/launcher/launch",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/remote/launcher/recents",
+                "/remote/launcher/recents",
+                Post,
+                Authenticated,
+            ),
+            // The console PAGE is node tier; `POST /dev/console/raw` is in the
+            // danger set below.
+            r("/dev/console", "/dev/console", Get, Authenticated),
             r("/tools", "/tools", Get, Authenticated),
-            r("/tools/intent", "/tools/intent", Post, Authenticated),
-            r("/tools/key", "/tools/key", Post, Authenticated),
-            r("/tools/apps/list", "/tools/apps/list", Post, Authenticated),
-            r(
-                "/tools/apps/launch",
-                "/tools/apps/launch",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/apps/recents",
-                "/tools/apps/recents",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/bt/power-status",
-                "/tools/bt/power-status",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/bt/power-on",
-                "/tools/bt/power-on",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/bt/power-off",
-                "/tools/bt/power-off",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/bt/scan-on",
-                "/tools/bt/scan-on",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/bt/scan-off",
-                "/tools/bt/scan-off",
-                Post,
-                Authenticated,
-            ),
-            r("/tools/bt/list", "/tools/bt/list", Post, Authenticated),
-            r("/tools/bt/action", "/tools/bt/action", Post, Authenticated),
-            r(
-                "/tools/net/status",
-                "/tools/net/status",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/net/wifi-list",
-                "/tools/net/wifi-list",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/net/wifi-rescan",
-                "/tools/net/wifi-rescan",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/net/throughput",
-                "/tools/net/throughput",
-                Post,
-                Authenticated,
-            ),
-            r("/tools/net/ping", "/tools/net/ping", Post, Authenticated),
-            r(
-                "/tools/power/can-suspend",
-                "/tools/power/can-suspend",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/power/battery",
-                "/tools/power/battery",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/sys/status",
-                "/tools/sys/status",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/sys/metrics",
-                "/tools/sys/metrics",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/sys/storage",
-                "/tools/sys/storage",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/sys/build-info",
-                "/tools/sys/build-info",
-                Post,
-                Authenticated,
-            ),
         ],
     ));
 
@@ -1873,18 +2067,6 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::Controllers,
         vec![
-            r(
-                "/tools/sys/controllerdb-status",
-                "/tools/sys/controllerdb-status",
-                Post,
-                Authenticated,
-            ),
-            r(
-                "/tools/sys/controllerdb-refresh",
-                "/tools/sys/controllerdb-refresh",
-                Post,
-                Authenticated,
-            ),
             r(
                 "/devices/controllers",
                 "/devices/controllers",
@@ -2120,28 +2302,29 @@ fn route_table() -> Vec<RouteSpec> {
             // `set-config`, and gating the rest with it is what lets the Shell
             // group vanish cleanly with the daemon down. The accepted cost is
             // that wallpaper UPLOAD now needs the handshake to have succeeded.
-            r("/shell/media", "/shell/media", Get, Authenticated),
+            // Phase 4 re-prefixed them onto the page that now owns them, and
+            // deleted the Media page they came from.
             r(
-                "/media/wallpaper/upload",
-                "/media/wallpaper/upload",
+                "/shell/appearance/wallpaper/upload",
+                "/shell/appearance/wallpaper/upload",
                 Post,
                 Authenticated,
             ),
             r(
-                "/media/wallpaper/delete",
-                "/media/wallpaper/delete",
+                "/shell/appearance/wallpaper/delete",
+                "/shell/appearance/wallpaper/delete",
                 Post,
                 Authenticated,
             ),
             r(
-                "/media/wallpaper/file",
-                "/media/wallpaper/file",
+                "/shell/appearance/wallpaper/file",
+                "/shell/appearance/wallpaper/file",
                 Get,
                 Authenticated,
             ),
             r(
-                "/media/wallpaper/select",
-                "/media/wallpaper/select",
+                "/shell/appearance/wallpaper/select",
+                "/shell/appearance/wallpaper/select",
                 Post,
                 Authenticated,
             ),
@@ -2155,14 +2338,14 @@ fn route_table() -> Vec<RouteSpec> {
         Gate::WebApps,
         vec![
             r(
-                "/media/webapp/add",
-                "/media/webapp/add",
+                "/shell/apps/webapp/add",
+                "/shell/apps/webapp/add",
                 Post,
                 Authenticated,
             ),
             r(
-                "/media/webapp/remove",
-                "/media/webapp/remove",
+                "/shell/apps/webapp/remove",
+                "/shell/apps/webapp/remove",
                 Post,
                 Authenticated,
             ),
@@ -2173,7 +2356,15 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::Screenshot,
         vec![
+            // `/dev/screenshot` is the PAGE as of phase 4; the PNG proxy it
+            // used to be moved to `/dev/screenshot/image`.
             r("/dev/screenshot", "/dev/screenshot", Get, Authenticated),
+            r(
+                "/dev/screenshot/image",
+                "/dev/screenshot/image",
+                Get,
+                Authenticated,
+            ),
             r(
                 "/dev/screenshot/capture",
                 "/dev/screenshot/capture",
@@ -2194,7 +2385,7 @@ fn route_table() -> Vec<RouteSpec> {
         danger("/dev/reboot", Post),
         danger("/dev/suspend", Post),
         danger("/system/updates/apply", Post),
-        danger("/tools/raw", Post),
+        danger("/dev/console/raw", Post),
     ]);
 
     table
@@ -2582,12 +2773,13 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        109,
-        "expected 90 pre-IA routes + the 10 phase-1 redirects + the 2 net-new \
-         phase-2 pages (Services, Updates — the other five phase-2 routes moved \
-         rather than being added), then phase 3: the Settings page's 3 routes \
-         out, and 10 in (four new pages with a save each, plus the CEC and \
-         Input groups' scoped saves) (docs/PANEL_IA.md)"
+        106,
+        "expected the 109 routes phase 3 left, then phase 4: 6 deleted outright \
+         (the four `/tools/sys/*` probes, already on the Overview tiles, and the \
+         two `controllerdb-*` duplicates of the Controllers page's own), the \
+         Media and Tools page GETs gone, and `/dev/screenshot/image` net-new \
+         (the PNG proxy renamed to free `/dev/screenshot` for the page). \
+         Everything else moved rather than being added (docs/PANEL_IA.md)"
     );
 }
 
@@ -2692,11 +2884,11 @@ fn dangerous_set_is_exactly_the_root_equivalent_actions() {
         dangerous,
         vec![
             "/dev/build",
+            "/dev/console/raw",
             "/dev/deploy",
             "/dev/reboot",
             "/dev/suspend",
             "/system/updates/apply",
-            "/tools/raw",
         ]
     );
     for recovery_route in RECOVERY_ROUTES {
@@ -2707,6 +2899,54 @@ fn dangerous_set_is_exactly_the_root_equivalent_actions() {
             "{recovery_route} restarts a unit — it is recovery and must stay ungated"
         );
     }
+}
+
+/// **#408's headline claim, checked rather than restated.** Moving the raw
+/// console to Dev was supposed to leave every `allow_dangerous`-gated control
+/// in one group. It very nearly does — and the exception is named here rather
+/// than quietly dropped, because a claim the code does not support is worse
+/// than a documented exception.
+///
+/// `POST /system/updates/apply` is the one dangerous route outside `/dev/`. It
+/// stays where it is deliberately: it is the button at the bottom of the
+/// pending-package table on System ▸ Updates, sharing that page's background
+/// job and its self-terminating status poll. Moving the button to Dev would
+/// separate it from the list it applies and the log tail it produces, which is
+/// a worse page for a marginal gain in tidiness. `docs/PANEL.md` and
+/// `docs/PANEL_IA.md` both state the claim with this exception attached.
+#[test]
+fn the_dangerous_set_is_the_dev_group_plus_the_updates_apply() {
+    let table = route_table();
+    let dangerous: BTreeSet<&str> = table
+        .iter()
+        .filter(|r| r.dangerous)
+        .map(|r| r.declared)
+        .collect();
+
+    const UPDATES_APPLY: &str = "/system/updates/apply";
+    let outside: Vec<&str> = dangerous
+        .iter()
+        .copied()
+        .filter(|p| !p.starts_with("/dev/") && *p != UPDATES_APPLY)
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "every allow_dangerous route must live under /dev/ (the Dev group) — \
+         {outside:?} does not. The ONE documented exception is {UPDATES_APPLY}; \
+         adding a second means the claim in docs/PANEL.md is no longer true and \
+         must be rewritten, not extended"
+    );
+    assert!(
+        dangerous.contains(UPDATES_APPLY),
+        "the exception must still exist — if the pacman apply moved into Dev, \
+         drop it from this test and strengthen the claim in the docs"
+    );
+    // And the console really did land in Dev rather than staying on a
+    // general-purpose page.
+    assert!(
+        dangerous.contains("/dev/console/raw"),
+        "the raw IPC console is the route this phase moved: {dangerous:?}"
+    );
 }
 
 /// The unit-restart routes: recovery, always registered, never in the S5 set.
@@ -2936,6 +3176,91 @@ async fn dangerous_routes_are_registered_when_allow_dangerous_is_true() {
     }
 }
 
+/// **The console page never renders a button for a route that is not there.**
+///
+/// The page is node tier and `POST /dev/console/raw` is in the danger block,
+/// so `allow_dangerous = false` — the default, and what the reference node
+/// htpc-1 runs — leaves a registered page in front of an unregistered action.
+/// It must explain itself and render no form; the failure mode this forbids is
+/// a Send button that 404s.
+#[tokio::test]
+async fn the_console_page_renders_no_form_when_the_raw_route_is_unregistered() {
+    let c = client();
+    let caps = caps_with(every_gated_feature());
+
+    let off = spawn_panel(state_with_caps(cfg_authenticated(false), caps.clone())).await;
+    let body = c
+        .get(format!("{off}/dev/console"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("raw IPC console is disabled"),
+        "the page must say why it is inert: {body}"
+    );
+    assert!(
+        !body.contains(r#"hx-post="/dev/console/raw""#) && !body.contains("<form"),
+        "no control may target the unregistered route — the banner names the \
+         path in prose, but there must be no form: {body}"
+    );
+    assert_eq!(
+        c.post(format!("{off}/dev/console/raw"))
+            .bearer_auth(TEST_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        404,
+        "the route really is absent — that is what the page is explaining"
+    );
+
+    let on = spawn_panel(state_with_caps(cfg_authenticated(true), caps)).await;
+    let body = c
+        .get(format!("{on}/dev/console"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains(r#"hx-post="/dev/console/raw""#),
+        "with the route registered the form comes back — otherwise the check \
+         above would pass on a page that never has a form: {body}"
+    );
+}
+
+/// The guarded-verb vocabulary is duplicated: `WARN_COMMANDS` server-side
+/// warns after the fact, and a JS regex in `console.html` sharpens the confirm
+/// prompt before the request. Two copies of one list drift silently — a verb
+/// added to one keeps working, just without half its guard.
+#[test]
+fn the_console_guard_list_matches_its_template_regex() {
+    const TEMPLATE: &str = include_str!("../templates/console.html");
+    let line = TEMPLATE
+        .lines()
+        .find(|l| l.contains("var GUARDED ="))
+        .expect("console.html declares the GUARDED regex");
+    let alternation = line
+        .split_once("/^(")
+        .and_then(|(_, rest)| rest.split_once(")"))
+        .map(|(inner, _)| inner)
+        .expect("the regex is an anchored alternation");
+    let in_template: Vec<&str> = alternation.split('|').collect();
+    assert_eq!(
+        in_template,
+        crate::pages::console::WARN_COMMANDS,
+        "console.html's GUARDED regex and pages::console::WARN_COMMANDS are the \
+         same vocabulary in two places — update both"
+    );
+}
+
 /// **The capability gate, proven against the real router.** With an EMPTY
 /// capability snapshot — the fail-closed state a failed handshake produces —
 /// every node-tier and capability-tier route answers **404 (it does not
@@ -3063,7 +3388,7 @@ async fn a_single_feature_opens_only_its_own_block() {
 /// route set is exactly today's — every row of `route_table()` is live. This
 /// PR therefore changes nothing on htpc-1.
 ///
-/// This is the test that catches the trap: gating `/media/wallpaper/*` on
+/// This is the test that catches the trap: gating the wallpaper routes on
 /// `Feature::Wallpapers`, `/processes` on `Feature::Processes`, or
 /// `/system/updates/*` on `Feature::SystemUpdates` would fail here, because
 /// `daemon/src/ipc.rs::features()` never emits any of those three.
@@ -3535,8 +3860,8 @@ async fn the_pre_ia_paths_redirect_when_their_target_is_registered() {
         ("/logs", "/system/logs"),
         ("/settings", "/shell/appearance"),
         ("/widgets", "/shell/widgets"),
-        ("/media", "/shell/media"),
-        ("/tools", "/remote/tools"),
+        ("/media", "/shell/appearance"),
+        ("/tools", "/remote/navigation"),
         ("/controllers", "/devices/controllers"),
         ("/cec", "/devices/cec"),
         ("/dev", "/dev/recovery"),
@@ -3663,8 +3988,8 @@ fn declaring_row<'a>(table: &'a [RouteSpec], path: &str) -> Option<&'a RouteSpec
 /// never renders a button that 404s"* — enforced instead of asserted. The nav
 /// gate above only covers the drawer and sub-nav; this covers in-page
 /// affordances, which is where the interesting version of the bug lives: a page
-/// in one tier (`/remote/tools`, node) carrying a button for a route in another
-/// (`/tools/sys/controllerdb-*`, `Gate::Controllers`).
+/// in one tier (Shell ▸ Apps, `settings_store`) carrying a form for a route in
+/// another (`/shell/apps/webapp/*`, `Gate::WebApps`).
 async fn assert_no_page_renders_an_unregistered_target(caps: CapabilitySnapshot, label: &str) {
     let allow_dangerous = true;
     let table = route_table();
@@ -3743,8 +4068,8 @@ async fn no_page_renders_an_unregistered_target_in_recovery_mode() {
 }
 
 /// A node that answers but declares nothing the panel gates on — the shape a
-/// non-Linux sidecar takes. `/tools` exists (node tier) while `controllers`
-/// does not, which is exactly the pairing that put two 404 buttons on the
+/// non-Linux sidecar takes. The node-tier pages exist while `controllers` does
+/// not, which is exactly the pairing that once put two 404 buttons on the
 /// Tools page.
 #[tokio::test]
 async fn no_page_renders_an_unregistered_target_for_a_bare_node() {
@@ -3938,10 +4263,11 @@ async fn unauthenticated_request_never_reaches_the_daemon_bridge() {
     let base = spawn_panel(state_with(cfg)).await;
     let c = client();
 
-    // Two bridge-backed routes: the screenshot proxy (GET) and the log view
-    // (GET, `dev_logs`). Both call `BridgeClient`, which attaches the daemon
+    // Two bridge-backed routes: the screenshot PNG proxy (GET) and the log
+    // view (GET, `dev_logs`). The screenshot *page* is not one — it renders
+    // without calling the bridge, which is why the proxy is probed here. Both call `BridgeClient`, which attaches the daemon
     // token on every request it makes.
-    for path in ["/dev/screenshot", "/system/logs/view"] {
+    for path in ["/dev/screenshot/image", "/system/logs/view"] {
         let status = c
             .get(format!("{base}{path}"))
             .send()

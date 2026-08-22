@@ -1,7 +1,7 @@
 <div class="result {% if ok %}result-ok{% else %}result-error{% endif %}">
 {% if ok %}
   <p class="muted">sha {{ sha }} · branch {{ branch }} · version {{ version }} · captured {{ captured_at }}</p>
-  <img class="screenshot" src="/dev/screenshot?t={{ cache_bust }}" alt="Current display capture">
+  <img class="screenshot" src="/dev/screenshot/image?t={{ cache_bust }}" alt="Current display capture">
 {% else %}
   <p>{{ message }}</p>
 {% endif %}

@@ -809,7 +809,13 @@ textarea {
   line-height: 1;
 }
 
-/* ── Tools page ──────────────────────────────────────────────────────── */
+/* ── IPC console sections ─────────────────────────────────────────────
+   Shared by the pages the Tools console dissolved into (Devices ▸ Network,
+   Remote ▸ Navigation/Launcher, Dev ▸ Console) plus Shell ▸ Appearance and
+   Apps. The class name is kept as-is on purpose: renaming the four
+   synonymous section classes is a normalization pass of its own (see the
+   note below), and folding it into an IA phase would hide a behavioural
+   change inside a rename. */
 
 .tools-section {
   margin-bottom: 1.5rem;
@@ -874,13 +880,13 @@ textarea {
   margin-bottom: 1.5rem;
 }
 
-/* ── Dev page screenshot ─────────────────────────────────────────────── */
+/* ── Dev ▸ Screenshot ────────────────────────────────────────────────── */
 
 .dev-screenshot {
   margin-top: 1.5rem;
 }
 
-/* ── Tools page: probe vs mutate button distinction (#10) ───────────────
+/* ── Probe vs mutate button distinction (#10) ──────────────────────────
    Read-only probe buttons (status/list/metrics reads) get an outline
    style; buttons that change daemon/system state get a tinted/filled
    style — so scanning the page communicates "safe to click" vs "this does
@@ -942,7 +948,7 @@ button.btn-mutate:hover {
   margin-top: 0.5rem;
 }
 
-/* --- Media page: wallpaper grid ------------------------------------------
+/* --- Shell > Appearance: wallpaper grid ----------------------------------
    Fixed-ratio tiles so a mixed bag of aspect ratios still lines up, and the
    grid reflows to a single column on a phone (the panel's mobile target). */
 .wallpaper-grid {

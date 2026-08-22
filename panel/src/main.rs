@@ -1,13 +1,14 @@
 //! tv-shell-panel — a LAN-only, server-rendered (axum + askama + vendored
 //! HTMX) web control panel for the tv-shell HTPC daemon.
 //!
-//! M1 scope: the crate scaffold, three data-tier clients (`ipc` — the
-//! primary Unix-socket IPC tier, `bridge` — the daemon's opt-in HTTP dev-ops
-//! bridge, `exec` — a direct-exec recovery tier for when both of the above
-//! are down), the app shell with nav for all nine pages, and three fully
-//! implemented pages (Dashboard, Logs, Dev). M2 added Settings and Widgets;
-//! M3 added the Tools console, Processes page, and the Dev-page screenshot
-//! viewer. Controllers and CEC still render an honest stub until M4 lands.
+//! Three data-tier clients (`ipc` — the primary Unix-socket IPC tier,
+//! `bridge` — the daemon's opt-in HTTP dev-ops bridge, `exec` — a direct-exec
+//! recovery tier for when both of the above are down) under a two-level
+//! navigation shell: a drawer of six subject groups, each with a sub-nav of
+//! its pages (`docs/PANEL_IA.md`). Every page is fully implemented; phase 4
+//! dissolved the last two grab-bag pages (Media, Tools) into the pages that
+//! own their subjects, so each module under `pages` is one page with one
+//! subject.
 //!
 //! Auth (S1): every route is gated by the [`auth`] middleware except four
 //! exemptions (`GET /assets/htmx.min.js`, `GET /assets/style.css`, and both
@@ -211,47 +212,83 @@ fn build_router(state: SharedState) -> Router {
 
     // ── Node tier — registered iff the handshake succeeded ─────────────────
     //
-    // The Tools console drives the IPC line protocol directly. These map to no
-    // single `Feature` (the daemon does not declare "I answer commands"), so
-    // the honest statement is exactly "these exist iff a node answered a
-    // handshake". The two controller-DB commands that also live under
-    // `/tools/sys/` are in the Controllers block instead — they are the
-    // controllers surface reached from a second page.
+    // These drive the IPC line protocol directly. They map to no single
+    // `Feature` (the daemon does not declare "I answer commands"), so the
+    // honest statement is exactly "these exist iff a node answered a
+    // handshake". Phase 4 dissolved the Tools console that used to own all of
+    // them into the pages that own their subjects — Devices ▸ Network,
+    // Remote ▸ Navigation/Launcher, Dev ▸ Console — plus the two power probes
+    // on Devices ▸ Display & Audio, whose PAGE is in the `settings_store`
+    // block (the same one-capability-per-block reason as the CEC/Input saves
+    // below; that page renders the probe buttons only under `Gate::Node`).
+    //
+    // The four Tools ▸ System probes were DELETED rather than moved: their
+    // content is already on the Overview tiles.
+    //
+    // `GET /dev/console` is node tier while `POST /dev/console/raw` is in the
+    // danger block: the page exists to explain itself, and renders no form
+    // when the route it would post to is unregistered.
     let app = if caps.allows(Gate::Node) {
-        app.route("/remote/tools", get(pages::tools::page))
+        app.route("/devices/network", get(pages::network::page))
+            .route("/devices/network/status", post(pages::network::status))
+            .route(
+                "/devices/network/wifi-list",
+                post(pages::network::wifi_list),
+            )
+            .route(
+                "/devices/network/wifi-rescan",
+                post(pages::network::wifi_rescan),
+            )
+            .route(
+                "/devices/network/throughput",
+                post(pages::network::throughput),
+            )
+            .route("/devices/network/ping", post(pages::network::ping))
+            .route(
+                "/devices/network/bt/power-status",
+                post(pages::network::bt_power_status),
+            )
+            .route(
+                "/devices/network/bt/power-on",
+                post(pages::network::bt_power_on),
+            )
+            .route(
+                "/devices/network/bt/power-off",
+                post(pages::network::bt_power_off),
+            )
+            .route(
+                "/devices/network/bt/scan-on",
+                post(pages::network::bt_scan_on),
+            )
+            .route(
+                "/devices/network/bt/scan-off",
+                post(pages::network::bt_scan_off),
+            )
+            .route("/devices/network/bt/list", post(pages::network::bt_list))
+            .route(
+                "/devices/network/bt/action",
+                post(pages::network::bt_action),
+            )
+            .route(
+                "/devices/display-audio/power/can-suspend",
+                post(pages::display_audio::power_can_suspend),
+            )
+            .route(
+                "/devices/display-audio/power/battery",
+                post(pages::display_audio::power_battery),
+            )
+            .route("/remote/navigation", get(pages::navigation::page))
+            .route("/remote/navigation/intent", post(pages::navigation::intent))
+            .route("/remote/navigation/key", post(pages::navigation::key))
+            .route("/remote/launcher", get(pages::launcher::page))
+            .route("/remote/launcher/list", post(pages::launcher::list_apps))
+            .route("/remote/launcher/launch", post(pages::launcher::launch_app))
+            .route(
+                "/remote/launcher/recents",
+                post(pages::launcher::get_recents),
+            )
+            .route("/dev/console", get(pages::console::page))
             .route("/tools", get(pages::redirects::tools))
-            .route("/tools/intent", post(pages::tools::intent))
-            .route("/tools/key", post(pages::tools::key))
-            .route("/tools/apps/list", post(pages::tools::list_apps))
-            .route("/tools/apps/launch", post(pages::tools::launch_app))
-            .route("/tools/apps/recents", post(pages::tools::get_recents))
-            .route(
-                "/tools/bt/power-status",
-                post(pages::tools::bt_power_status),
-            )
-            .route("/tools/bt/power-on", post(pages::tools::bt_power_on))
-            .route("/tools/bt/power-off", post(pages::tools::bt_power_off))
-            .route("/tools/bt/scan-on", post(pages::tools::bt_scan_on))
-            .route("/tools/bt/scan-off", post(pages::tools::bt_scan_off))
-            .route("/tools/bt/list", post(pages::tools::bt_list))
-            .route("/tools/bt/action", post(pages::tools::bt_action))
-            .route("/tools/net/status", post(pages::tools::net_status))
-            .route("/tools/net/wifi-list", post(pages::tools::net_wifi_list))
-            .route(
-                "/tools/net/wifi-rescan",
-                post(pages::tools::net_wifi_rescan),
-            )
-            .route("/tools/net/throughput", post(pages::tools::net_throughput))
-            .route("/tools/net/ping", post(pages::tools::net_ping))
-            .route(
-                "/tools/power/can-suspend",
-                post(pages::tools::power_can_suspend),
-            )
-            .route("/tools/power/battery", post(pages::tools::power_battery))
-            .route("/tools/sys/status", post(pages::tools::sys_status))
-            .route("/tools/sys/metrics", post(pages::tools::sys_metrics))
-            .route("/tools/sys/storage", post(pages::tools::sys_storage))
-            .route("/tools/sys/build-info", post(pages::tools::sys_build_info))
     } else {
         app
     };
@@ -259,73 +296,67 @@ fn build_router(state: SharedState) -> Router {
     // ── Capability tier — one block per declared `Feature` ─────────────────
     //
     // `Feature::Controllers` is emitted on any Linux daemon build (the
-    // evdev/uinput runtime). The two `/tools/sys/controllerdb-*` routes sit
-    // here, not in the node block: they are the same controller-DB surface the
-    // Controllers page owns, reached from the Tools console.
+    // evdev/uinput runtime). The Tools console's duplicate pair of
+    // controller-DB buttons used to sit here too; phase 4 DELETED them rather
+    // than moving them — they were the same two commands this page already
+    // owns (`/devices/controllers/controllerdb/{status,refresh}`), reached
+    // from a second page.
     let app = if caps.allows(Gate::Controllers) {
-        app.route(
-            "/tools/sys/controllerdb-status",
-            post(pages::tools::controllerdb_status),
-        )
-        .route(
-            "/tools/sys/controllerdb-refresh",
-            post(pages::tools::controllerdb_refresh),
-        )
-        .route("/devices/controllers", get(pages::controllers::page))
-        .route("/controllers", get(pages::redirects::controllers))
-        .route("/devices/controllers/grab", post(pages::controllers::grab))
-        .route(
-            "/devices/controllers/release",
-            post(pages::controllers::release),
-        )
-        .route(
-            "/devices/controllers/handoff",
-            post(pages::controllers::handoff),
-        )
-        .route(
-            "/devices/controllers/pad/battery",
-            post(pages::controllers::pad_battery),
-        )
-        .route(
-            "/devices/controllers/pad/rumble-status",
-            post(pages::controllers::pad_rumble_status),
-        )
-        .route(
-            "/devices/controllers/pad/rumble",
-            post(pages::controllers::pad_rumble),
-        )
-        .route(
-            "/devices/controllers/input-devices",
-            post(pages::controllers::input_devices),
-        )
-        .route(
-            "/devices/controllers/bindings/set",
-            post(pages::controllers::bindings_set),
-        )
-        .route(
-            "/devices/controllers/bindings/capture",
-            post(pages::controllers::bindings_capture),
-        )
-        .route(
-            "/devices/controllers/bindings/capture-cancel",
-            post(pages::controllers::bindings_capture_cancel),
-        )
-        .route(
-            "/devices/controllers/active-game/set",
-            post(pages::controllers::active_game_set),
-        )
-        .route(
-            "/devices/controllers/active-game/clear",
-            post(pages::controllers::active_game_clear),
-        )
-        .route(
-            "/devices/controllers/controllerdb/status",
-            post(pages::controllers::controllerdb_status),
-        )
-        .route(
-            "/devices/controllers/controllerdb/refresh",
-            post(pages::controllers::controllerdb_refresh),
-        )
+        app.route("/devices/controllers", get(pages::controllers::page))
+            .route("/controllers", get(pages::redirects::controllers))
+            .route("/devices/controllers/grab", post(pages::controllers::grab))
+            .route(
+                "/devices/controllers/release",
+                post(pages::controllers::release),
+            )
+            .route(
+                "/devices/controllers/handoff",
+                post(pages::controllers::handoff),
+            )
+            .route(
+                "/devices/controllers/pad/battery",
+                post(pages::controllers::pad_battery),
+            )
+            .route(
+                "/devices/controllers/pad/rumble-status",
+                post(pages::controllers::pad_rumble_status),
+            )
+            .route(
+                "/devices/controllers/pad/rumble",
+                post(pages::controllers::pad_rumble),
+            )
+            .route(
+                "/devices/controllers/input-devices",
+                post(pages::controllers::input_devices),
+            )
+            .route(
+                "/devices/controllers/bindings/set",
+                post(pages::controllers::bindings_set),
+            )
+            .route(
+                "/devices/controllers/bindings/capture",
+                post(pages::controllers::bindings_capture),
+            )
+            .route(
+                "/devices/controllers/bindings/capture-cancel",
+                post(pages::controllers::bindings_capture_cancel),
+            )
+            .route(
+                "/devices/controllers/active-game/set",
+                post(pages::controllers::active_game_set),
+            )
+            .route(
+                "/devices/controllers/active-game/clear",
+                post(pages::controllers::active_game_clear),
+            )
+            .route(
+                "/devices/controllers/controllerdb/status",
+                post(pages::controllers::controllerdb_status),
+            )
+            .route(
+                "/devices/controllers/controllerdb/refresh",
+                post(pages::controllers::controllerdb_refresh),
+            )
     } else {
         app
     };
@@ -375,15 +406,16 @@ fn build_router(state: SharedState) -> Router {
         app
     };
 
-    // `get-config` / `set-config`, plus the whole Media page.
+    // `get-config` / `set-config`, plus the wallpaper surface Shell ▸
+    // Appearance absorbed from the dissolved Media page.
     //
     // The wallpaper routes are served out of the PANEL's own filesystem and
     // need no node, so they were recovery tier — deliberately not gated on
     // `Feature::Wallpapers`, which `daemon/src/ipc.rs::features()` never emits
     // (gating on it would delete a working page from every live node).
     // `Gate::SettingsStore` is a different claim: the daemon DOES emit
-    // `settings_store`, and picking a wallpaper already required it
-    // (`/media/wallpaper/select` writes `wallpaperPath` through `set-config`).
+    // `settings_store`, and picking a wallpaper already required it (select
+    // writes `wallpaperPath` through `set-config`).
     // Gating the whole wallpaper surface together is what lets the Shell group
     // vanish cleanly in recovery mode instead of rendering a one-page shell,
     // and it removes two entries from `tests::RECOVERY_TIER_MUTATING`.
@@ -401,7 +433,7 @@ fn build_router(state: SharedState) -> Router {
     // capability — there is no two-capability AND — and `set-config` is the
     // capability these two actually need, so they sit here. The consequence is
     // that each can exist with no page in front of it, which is harmless and
-    // already precedented by `/tools/raw`; the inverse — a page rendering a
+    // already precedented by `/dev/console/raw`; the inverse — a page rendering a
     // form that posts to an unregistered route — is NOT harmless, so both
     // pages render their settings form only under
     // `caps.allows(Gate::SettingsStore)`.
@@ -422,49 +454,67 @@ fn build_router(state: SharedState) -> Router {
                 "/devices/controllers/settings/save",
                 post(pages::controllers::save_settings),
             )
-            .route("/shell/media", get(pages::media::page))
             .route(
-                "/media/wallpaper/upload",
-                post(pages::media::upload)
-                    .layer(DefaultBodyLimit::max(pages::media::MAX_UPLOAD_BYTES)),
+                "/shell/appearance/wallpaper/upload",
+                post(pages::appearance::upload)
+                    .layer(DefaultBodyLimit::max(pages::appearance::MAX_UPLOAD_BYTES)),
             )
-            .route("/media/wallpaper/delete", post(pages::media::delete))
-            .route("/media/wallpaper/file", get(pages::media::file))
-            .route("/media/wallpaper/select", post(pages::media::select))
+            .route(
+                "/shell/appearance/wallpaper/delete",
+                post(pages::appearance::delete),
+            )
+            .route(
+                "/shell/appearance/wallpaper/file",
+                get(pages::appearance::file),
+            )
+            .route(
+                "/shell/appearance/wallpaper/select",
+                post(pages::appearance::select),
+            )
             .route("/settings", get(pages::redirects::settings))
             .route("/media", get(pages::redirects::media))
     } else {
         app
     };
 
-    // The daemon-owned web-app registry (`webapp-add` / `webapp-remove`).
+    // The daemon-owned web-app registry (`webapp-add` / `webapp-remove`). The
+    // Shell ▸ Apps page that renders these two forms is registered in the
+    // `settings_store` block above, so it renders them only under
+    // `Gate::WebApps` — otherwise a node declaring one capability and not the
+    // other would be shown a form posting to an unregistered route.
     let app = if caps.allows(Gate::WebApps) {
-        app.route("/media/webapp/add", post(pages::media::webapp_add))
-            .route("/media/webapp/remove", post(pages::media::webapp_remove))
+        app.route("/shell/apps/webapp/add", post(pages::apps::webapp_add))
+            .route(
+                "/shell/apps/webapp/remove",
+                post(pages::apps::webapp_remove),
+            )
     } else {
         app
     };
 
-    // Both routes proxy the daemon's bridge `/screenshot`. The daemon emits
+    // The two capture routes proxy the daemon's bridge `/screenshot`; the third
+    // is the page in front of them. The daemon emits
     // `Feature::Screenshot` on Linux with EITHER network bridge configured
     // (`[http]` or `[mcp]`), while this proxy speaks only to the HTTP one — so
     // an MCP-only node declares the capability and registers these routes while
     // the panel has no bridge to call. That is a handled degradation, not a
     // dangling route: `BridgeClient` with no base URL returns
-    // `BridgeError::NotConfigured` and `pages::dev` renders the honest
+    // `BridgeError::NotConfigured` and `pages::screenshot` renders the honest
     // "bridge not configured" message. Deliberately NOT additionally gated on
     // `http_bridge_base.is_some()`: the capability is the NODE's statement
     // about itself, and folding a local config check into it would make the
-    // route set depend on two different kinds of fact. `dev.html` already
-    // carries `bridge_configured` for the UI half.
+    // route set depend on two different kinds of fact. `screenshot.html` carries
+    // `bridge_configured` for the UI half, and says so before the click rather
+    // than after it.
     //
     // No htpc-1 impact either way — it sets `[http].bind`.
+    //
+    // `GET /dev/screenshot` is the PAGE as of phase 4 (it was the PNG proxy,
+    // which moved to `/dev/screenshot/image` to free the path).
     let app = if caps.allows(Gate::Screenshot) {
-        app.route("/dev/screenshot", get(pages::dev::screenshot_png))
-            .route(
-                "/dev/screenshot/capture",
-                post(pages::dev::screenshot_capture),
-            )
+        app.route("/dev/screenshot", get(pages::screenshot::page))
+            .route("/dev/screenshot/image", get(pages::screenshot::image))
+            .route("/dev/screenshot/capture", post(pages::screenshot::capture))
     } else {
         app
     };
@@ -496,18 +546,24 @@ fn build_router(state: SharedState) -> Router {
     // Reboot/suspend and the pacman apply are the PANEL's own exec tier, so
     // they carry no capability gate.
     //
-    // `/tools/raw` keeps none either, but the honest statement is narrower than
-    // it looks: with the handshake failed, `/tools` — the only UI that drives
-    // it — is gone, so what survives is a curl-only escape hatch. It is kept
-    // ungated because `allow_dangerous` is already the operator's explicit
-    // opt-in to an arbitrary-command surface and narrowing it would not remove
-    // a capability lie (the route reports the node's own error when the node is
-    // down). It is NOT kept because the UI still works, which it does not.
+    // `/dev/console/raw` keeps none either, but the honest statement is
+    // narrower than it looks: with the handshake failed, `/dev/console` — the
+    // only UI that drives it — is gone, so what survives is a curl-only escape
+    // hatch. It is kept ungated because `allow_dangerous` is already the
+    // operator's explicit opt-in to an arbitrary-command surface and narrowing
+    // it would not remove a capability lie (the route reports the node's own
+    // error when the node is down). It is NOT kept because the UI still works,
+    // which it does not.
+    //
+    // As of phase 4 every route in this block is under `/dev/` except the
+    // pacman apply, which belongs beside the pending-package table and the
+    // job poll on System ▸ Updates — see `docs/PANEL.md` § Dangerous actions,
+    // and `tests::the_dangerous_set_is_the_dev_group_plus_the_updates_apply`.
     let app = if allow_dangerous {
         app.route("/dev/reboot", post(pages::dev::reboot))
             .route("/dev/suspend", post(pages::dev::suspend))
             .route("/system/updates/apply", post(pages::updates::apply))
-            .route("/tools/raw", post(pages::tools::raw))
+            .route("/dev/console/raw", post(pages::console::raw))
     } else {
         app
     };

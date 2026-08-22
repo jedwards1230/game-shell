@@ -112,6 +112,17 @@ pub const SCHEMA: &[SettingField] = &[
         kind: FieldKind::Float,
         default: "1.0",
     },
+    // Written by the wallpaper grid on Shell ▸ Appearance, never by a typed
+    // input — see `CUSTOM_EDITOR_KEYS`. It lived in `Display` until phase 4,
+    // which put a raw path text field on Devices ▸ Display & Audio while its
+    // real editor was on another page.
+    SettingField {
+        key: "wallpaperPath",
+        label: "Wallpaper image path (empty = none)",
+        group: "Appearance",
+        kind: FieldKind::Str,
+        default: "",
+    },
     SettingField {
         key: "controllerDebug",
         label: "Controller debug overlay",
@@ -166,13 +177,6 @@ pub const SCHEMA: &[SettingField] = &[
             max: None,
         },
         default: "2",
-    },
-    SettingField {
-        key: "wallpaperPath",
-        label: "Wallpaper image path (empty = none)",
-        group: "Display",
-        kind: FieldKind::Str,
-        default: "",
     },
     SettingField {
         key: "nightLightEnabled",
@@ -285,6 +289,22 @@ pub const DAEMON_OWNED_KEYS: &[&str] = &[
     "webApps",
 ];
 
+/// Schema keys whose page renders a **bespoke editor** for them instead of a
+/// typed input, so [`build_groups`] must not also render the generic field.
+///
+/// `wallpaperPath` is the only one: Shell ▸ Appearance's wallpaper grid writes
+/// it (`POST /shell/appearance/wallpaper/select`), and a raw path text field
+/// beside the grid would be a second, worse editor for the same key —
+/// bypassing the containment checks the picker enforces.
+///
+/// Omitting a key from the rendered form omits it from the submitted form and
+/// therefore from the patch. That is safe **because it is a `FieldKind::Str`**:
+/// non-`Bool` kinds are only written when present, and the daemon's shallow
+/// merge leaves an unmentioned key untouched. A `Bool` could not be handled
+/// this way — [`build_patch`] writes every in-scope `Bool` unconditionally, so
+/// dropping one from the form would write it `false`.
+pub const CUSTOM_EDITOR_KEYS: &[&str] = &["wallpaperPath"];
+
 /// The hidden form field each split settings form emits — once per
 /// [`SettingField::group`] it renders — so [`build_patch`] knows which slice
 /// of the schema the submission actually covers.
@@ -328,13 +348,18 @@ pub fn result_html(ok: bool, message: &str) -> String {
 
 /// Build the grouped typed-form view model for `scope` from the current
 /// settings document, in `SCHEMA` order (first appearance of a group name wins
-/// its position). Groups outside `scope` are skipped entirely, and
-/// `Complex`-kind fields are never rendered — they are surfaced only via
-/// [`complex_notes_html`] and the raw JSON escape hatch on Shell ▸ Advanced.
+/// its position). Groups outside `scope` are skipped entirely; `Complex`-kind
+/// fields are never rendered — they are surfaced only via
+/// [`complex_notes_html`] and the raw JSON escape hatch on Shell ▸ Advanced —
+/// and neither are the [`CUSTOM_EDITOR_KEYS`], which their page edits its own
+/// way.
 pub fn build_groups(cfg: &Value, scope: &[&str]) -> Vec<GroupView> {
     let mut groups: Vec<GroupView> = Vec::new();
     for f in SCHEMA {
-        if matches!(f.kind, FieldKind::Complex) || !scope.contains(&f.group) {
+        if matches!(f.kind, FieldKind::Complex)
+            || CUSTOM_EDITOR_KEYS.contains(&f.key)
+            || !scope.contains(&f.group)
+        {
             continue;
         }
         let field = FieldView {

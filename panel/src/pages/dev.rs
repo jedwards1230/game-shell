@@ -4,12 +4,14 @@
 //! unreachable (deploy has no exec equivalent — it needs the daemon's own
 //! git checkout). Reboot/suspend always go through direct exec. All
 //! destructive exec calls are single-flighted inside [`crate::exec::Recovery`].
+//!
+//! The screenshot viewer used to live here too; `docs/PANEL_IA.md` phase 4
+//! split it onto its own page ([`crate::pages::screenshot`]), leaving this one
+//! with a single subject — recovering the box.
 
 use askama::Template;
-use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::Form;
 use serde::Deserialize;
 
@@ -35,12 +37,9 @@ struct DevTemplate {
     /// pair `build_router` registers `/dev/deploy` + `/dev/build` on. Rendering
     /// those two forms on either half alone would produce buttons that 404.
     deploy_enabled: bool,
-    /// The node's `screenshot` capability — same reasoning for the screenshot
-    /// panel, whose two routes proxy the daemon bridge's `/screenshot`.
-    screenshot_enabled: bool,
 }
 
-/// `GET /dev` — probes daemon reachability (bridge `dev_status`, else IPC
+/// `GET /dev/recovery` — probes daemon reachability (bridge `dev_status`, else IPC
 /// `status`) and renders the action panel with an up/down banner.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     Html(render_page(&state).await)
@@ -58,7 +57,6 @@ pub async fn render_page(state: &AppState) -> String {
         shell_chip_html,
         allow_dangerous: state.cfg.allow_dangerous,
         deploy_enabled: state.cfg.allow_dangerous && state.caps.allows(Gate::DevDeploy),
-        screenshot_enabled: state.caps.allows(Gate::Screenshot),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
@@ -237,100 +235,6 @@ async fn render_suspend(state: &AppState) -> String {
     match state.recovery.suspend().await {
         Ok(body) => result_html("Direct exec", "suspend", true, &body),
         Err(e) => result_html("Direct exec", "suspend", false, &e.to_string()),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Screenshot viewer (M3)
-// ---------------------------------------------------------------------------
-
-#[derive(Template)]
-#[template(path = "dev_screenshot.html")]
-struct DevScreenshotTemplate {
-    ok: bool,
-    message: String,
-    sha: String,
-    branch: String,
-    version: String,
-    captured_at: String,
-    cache_bust: u128,
-}
-
-/// `POST /dev/screenshot/capture` — calls the bridge screenshot endpoint to
-/// confirm reachability and read provenance, then (on success) renders an
-/// `<img>` pointing at the `GET /dev/screenshot` proxy route. The `<img>` tag
-/// is only ever emitted when this call already succeeded, so a daemon-down
-/// or bridge-unconfigured state degrades to a banner — never a broken image.
-pub async fn screenshot_capture(State(state): State<SharedState>) -> impl IntoResponse {
-    Html(render_screenshot_capture(&state).await)
-}
-
-pub async fn render_screenshot_capture(state: &AppState) -> String {
-    match state.bridge.screenshot().await {
-        Ok(shot) => {
-            let tmpl = DevScreenshotTemplate {
-                ok: true,
-                message: String::new(),
-                sha: shot.sha,
-                branch: shot.branch,
-                version: shot.version,
-                captured_at: shot.captured_at,
-                cache_bust: now_millis(),
-            };
-            tmpl.render().unwrap_or_else(|e| {
-                format!("<p class=\"banner banner-error\">render error: {e}</p>")
-            })
-        }
-        Err(e) => {
-            let reason = if e.is_configured() {
-                "unreachable"
-            } else {
-                "not configured"
-            };
-            let tmpl = DevScreenshotTemplate {
-                ok: false,
-                message: format!("HTTP bridge {reason} — see the banner above. ({e})"),
-                sha: String::new(),
-                branch: String::new(),
-                version: String::new(),
-                captured_at: String::new(),
-                cache_bust: 0,
-            };
-            tmpl.render().unwrap_or_else(|e| {
-                format!("<p class=\"banner banner-error\">render error: {e}</p>")
-            })
-        }
-    }
-}
-
-fn now_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-/// `GET /dev/screenshot` — proxies the daemon's `GET /screenshot` PNG bytes
-/// (`Content-Type: image/png`). Only ever linked from the DOM after
-/// [`screenshot_capture`] has already confirmed the bridge is reachable, so
-/// a direct hit here (bridge down between the two calls) degrades to a
-/// `503` text body rather than corrupting an `<img>` tag's expected type.
-pub async fn screenshot_png(State(state): State<SharedState>) -> Response {
-    match state.bridge.screenshot().await {
-        Ok(shot) => {
-            let mut resp = Response::new(Body::from(shot.png));
-            *resp.status_mut() = StatusCode::OK;
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("image/png"),
-            );
-            resp
-        }
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("screenshot unavailable: {e}"),
-        )
-            .into_response(),
     }
 }
 

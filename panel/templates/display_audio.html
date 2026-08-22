@@ -35,4 +35,19 @@
 {% else %}
 <p class="degraded-msg">These forms are unavailable while the daemon is unreachable — it is the only writer of <code>settings.json</code>.</p>
 {% endif %}
+
+{% if node_enabled %}
+{# The two probes read live power state, which is what the `Power` settings
+   group above configures. Their routes sit in the node block, not this page's
+   `settings_store` one, so they render only when that gate is open. #}
+<section class="tools-section">
+  <h2>Power state</h2>
+  <p class="muted">Live reads, not settings. Suspending the box is on the <a href="/dev/recovery">Recovery</a> page.</p>
+  <div id="power-result"></div>
+  <div class="button-row">
+    <form hx-post="/devices/display-audio/power/can-suspend" hx-disabled-elt="find button" hx-target="#power-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Can suspend?</button></form>
+    <form hx-post="/devices/display-audio/power/battery" hx-disabled-elt="find button" hx-target="#power-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Battery</button></form>
+  </div>
+</section>
+{% endif %}
 {% endblock %}

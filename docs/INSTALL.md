@@ -148,8 +148,8 @@ listening on `127.0.0.1:8091`. Widening `[panel] bind` beyond loopback now
 **requires authentication**: set `[panel] token_file` to a 0600 token file inside
 the config dir, or the panel refuses to start (the same refusal the daemon
 applies, reusing the same `[dev] allow_insecure_lan` opt-in). The panel's
-root-equivalent actions (deploy/build/reboot/suspend, `pacman -Syu`,
-`/tools/raw`) are additionally gated behind `[panel] allow_dangerous = true`,
+root-equivalent actions (deploy/build/reboot/suspend, `pacman -Syu`, the raw
+IPC console at `/dev/console/raw`) are additionally gated behind `[panel] allow_dangerous = true`,
 which is **off** by default. Firewall any of these ports you expose beyond
 loopback yourself.
 

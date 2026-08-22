@@ -51,14 +51,21 @@ pub async fn widgets() -> Redirect {
     Redirect::to("/shell/widgets")
 }
 
-/// `GET /media` → `/shell/media`.
+/// `GET /media` → `/shell/appearance`.
+///
+/// The Media page dissolved in phase 4: its wallpaper half joined Appearance
+/// and its web-app half joined Shell ▸ Apps. Appearance is the Shell group's
+/// first page, so the old bookmark lands where the drawer would.
 pub async fn media() -> Redirect {
-    Redirect::to("/shell/media")
+    Redirect::to("/shell/appearance")
 }
 
-/// `GET /tools` → `/remote/tools`.
+/// `GET /tools` → `/remote/navigation`.
+///
+/// The Tools page dissolved in phase 4 across four pages in three groups;
+/// Navigation is the first page of the group that inherited most of it.
 pub async fn tools() -> Redirect {
-    Redirect::to("/remote/tools")
+    Redirect::to("/remote/navigation")
 }
 
 /// `GET /controllers` → `/devices/controllers`.

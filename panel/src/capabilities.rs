@@ -20,8 +20,9 @@
 //!    handshake must never take one away.
 //! 2. **Node** ([`Gate::Node`]) — registered iff the handshake SUCCEEDED.
 //!    Routes that need *some* node speaking the IPC line protocol but map to
-//!    no single [`Feature`] (the Tools console's intent/key/apps/bt/net/power/
-//!    sys commands). The honest statement is "these exist iff a node answered".
+//!    no single [`Feature`]: the network/bluetooth, navigation, launcher and
+//!    power-probe commands, and the raw console page. The honest statement is
+//!    "these exist iff a node answered".
 //! 3. **Capability** (every other [`Gate`]) — registered iff a specific
 //!    [`Feature`] is in the declared set.
 //! 4. **Danger** — `[panel].allow_dangerous`, unchanged, and **intersected**
@@ -125,11 +126,10 @@ macro_rules! gates {
             /// deliberately never emits `wallpapers`, `processes`,
             /// `system_updates`, `steam_library` or `game_launch` — the daemon
             /// serves none of them (they belong to QML, to the panel's own exec
-            /// tier, or to the sidecar it merely proxies). Gating
-            /// `/media/wallpaper/*` on `Feature::Wallpapers` or `/processes*`
-            /// on `Feature::Processes` would therefore delete working pages
-            /// from a live node. Those routes are recovery tier precisely
-            /// because the panel serves them itself.
+            /// tier, or to the sidecar it merely proxies). Gating the
+            /// wallpaper routes on `Feature::Wallpapers`, or the Processes
+            /// page on `Feature::Processes`, would therefore delete working
+            /// pages from a live node.
             pub fn feature(self) -> Option<Feature> {
                 match self { $( $name::$variant => $feature, )+ }
             }
@@ -368,11 +368,12 @@ fn group_of(page_key: &str) -> &str {
 /// `crate::tests::nav_items_agree_with_the_route_table_they_link_to` can pin
 /// the two together.
 ///
-/// This is the phase-3 shape of `docs/PANEL_IA.md`: the groups are final,
-/// System and Shell are at their final pages apart from Shell ▸ Media, and
-/// Devices is one page short of its final four. Media and Remote ▸ Tools are
-/// still the pre-split grab-bags and dissolve in phase 4, which also brings
-/// Devices ▸ Network and Dev ▸ Console/Screenshot.
+/// This is the phase-4 shape of `docs/PANEL_IA.md`, and every group is now at
+/// its final page set: the last two grab-bags (Media, Tools) dissolved into
+/// the pages that own their subjects, which is what brought Devices ▸ Network,
+/// Remote ▸ Navigation/Launcher and Dev ▸ Screenshot/Console. What remains for
+/// phases 5-6 changes page *contents* (Services reading arbitrary units,
+/// Overview rebuilt as pure tiles), not this table.
 pub const NAV: &[NavGroup] = &[
     NavGroup {
         label: "Overview",
@@ -442,15 +443,6 @@ pub const NAV: &[NavGroup] = &[
                 key: "shell.advanced",
                 gate: Gate::SettingsStore,
             },
-            // Last on purpose: Media is the pre-IA grab-bag (wallpapers + web
-            // apps) and phase 4 dissolves it into Appearance and Apps above,
-            // at which point this entry and its page go away.
-            NavPage {
-                href: "/shell/media",
-                label: "Media",
-                key: "shell.media",
-                gate: Gate::SettingsStore,
-            },
         ],
     },
     NavGroup {
@@ -475,28 +467,63 @@ pub const NAV: &[NavGroup] = &[
                 key: "devices.cec",
                 gate: Gate::Cec,
             },
-            // Network arrives in phase 4, out of the Tools page.
+            // NetworkManager + bluez, out of the dissolved Tools page. Node
+            // tier: these map to no declared `Feature`, so the honest
+            // statement is "they exist iff a node answered a handshake".
+            NavPage {
+                href: "/devices/network",
+                label: "Network",
+                key: "devices.network",
+                gate: Gate::Node,
+            },
         ],
     },
     NavGroup {
         label: "Remote",
         key: "remote",
-        pages: &[NavPage {
-            href: "/remote/tools",
-            label: "Tools",
-            key: "remote.tools",
-            gate: Gate::Node,
-        }],
+        pages: &[
+            NavPage {
+                href: "/remote/navigation",
+                label: "Navigation",
+                key: "remote.navigation",
+                gate: Gate::Node,
+            },
+            NavPage {
+                href: "/remote/launcher",
+                label: "Launcher",
+                key: "remote.launcher",
+                gate: Gate::Node,
+            },
+        ],
     },
     NavGroup {
         label: "Dev",
         key: "dev",
-        pages: &[NavPage {
-            href: "/dev/recovery",
-            label: "Recovery",
-            key: "dev.recovery",
-            gate: Gate::Recovery,
-        }],
+        pages: &[
+            NavPage {
+                href: "/dev/recovery",
+                label: "Recovery",
+                key: "dev.recovery",
+                gate: Gate::Recovery,
+            },
+            NavPage {
+                href: "/dev/screenshot",
+                label: "Screenshot",
+                key: "dev.screenshot",
+                gate: Gate::Screenshot,
+            },
+            // The raw IPC console. The PAGE is node tier; `POST
+            // /dev/console/raw` is additionally in the `allow_dangerous`
+            // block, which the nav has no input for — so the page renders a
+            // banner instead of a form when that is off, rather than the nav
+            // trying to model it.
+            NavPage {
+                href: "/dev/console",
+                label: "Console",
+                key: "dev.console",
+                gate: Gate::Node,
+            },
+        ],
     },
 ];
 
@@ -971,9 +998,11 @@ mod tests {
     }
 
     /// A group's drawer href follows registration, not declaration: Shell
-    /// declares Settings first, but with `settings_store` off and `widgets` on
-    /// the only registered Shell page is Widgets, so that is where the drawer
-    /// must land.
+    /// declares Appearance first, but with `settings_store` off and `widgets`
+    /// on, the only registered Shell page is Widgets, so that is where the
+    /// drawer must land. Devices is the same story three pages further in —
+    /// Controllers, Display & Audio and CEC are all gated off, and its link
+    /// lands on Network, the node-tier page phase 4 added last.
     #[test]
     fn a_groups_drawer_link_skips_its_gated_off_first_page() {
         let caps = snapshot(&[Feature::Widgets]);
@@ -984,10 +1013,24 @@ mod tests {
             .find(|g| g.key == "shell")
             .expect("Shell still has one registered page");
         assert_eq!(shell.href, "/shell/widgets");
-        assert!(
-            !chrome.groups.iter().any(|g| g.key == "devices"),
-            "Devices has no registered page here and must not render"
-        );
+
+        let devices = chrome
+            .groups
+            .iter()
+            .find(|g| g.key == "devices")
+            .expect("Devices still has Network, which is node tier");
+        assert_eq!(devices.href, "/devices/network");
+
+        // A group with NOTHING registered still does not render. A failed
+        // handshake closes the node gate too, which takes Devices and Remote
+        // with it.
+        let down = Chrome::new(&CapabilitySnapshot::unreachable(), "overview");
+        for gone in ["shell", "devices", "remote"] {
+            assert!(
+                !down.groups.iter().any(|g| g.key == gone),
+                "{gone} has no registered page with the handshake failed"
+            );
+        }
     }
 
     /// Fewer than two registered pages ⇒ no sub-nav bar at all. Overview is
@@ -1011,9 +1054,31 @@ mod tests {
                 "/shell/widgets",
                 "/shell/apps",
                 "/shell/advanced",
-                "/shell/media",
             ],
             "with every gate open the whole group is its own sub-nav"
+        );
+    }
+
+    /// Recovery mode leaves Dev with exactly one registered page (Recovery is
+    /// the only one of its three that is recovery tier), so the group renders
+    /// but its sub-nav does not — the rule that gives Overview a bare content
+    /// view, applied to a group that only *sometimes* has one page.
+    #[test]
+    fn dev_loses_its_subnav_but_not_its_group_in_recovery_mode() {
+        let down = Chrome::new(&CapabilitySnapshot::unreachable(), "dev.recovery");
+        assert!(
+            down.groups.iter().any(|g| g.key == "dev"),
+            "Dev is the recovery group — it must always render"
+        );
+        assert!(
+            down.subnav.is_empty(),
+            "Screenshot (screenshot) and Console (node) are both gated off"
+        );
+
+        let up = Chrome::new(&CapabilitySnapshot::fully_capable(), "dev.recovery");
+        assert_eq!(
+            up.subnav.iter().map(|p| p.href).collect::<Vec<_>>(),
+            vec!["/dev/recovery", "/dev/screenshot", "/dev/console"]
         );
     }
 

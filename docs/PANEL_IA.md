@@ -20,8 +20,8 @@ Concretely, measured against the deployed build (2026-08-22):
 | One page, 3133px tall at 1440px wide | **Settings** = eight typed form groups + read-only daemon-owned keys + read-only `config.toml` dump + raw-JSON escape hatch |
 | Same action on two pages | Unit restart on **Processes** *and* **Dev** |
 | One subject split across two pages | CEC *config* on **Settings**, CEC *actions* on **CEC** |
-| Page is a grab-bag by input method | **Media** = wallpapers + web apps, related only in that both need a keyboard the couch UI lacks |
-| Overlaps two other pages | **Tools** power/network duplicates **Settings** groups and **Dashboard** tiles |
+| ~~Page is a grab-bag by input method~~ | ~~**Media** = wallpapers + web apps, related only in that both need a keyboard the couch UI lacks~~ — dissolved in phase 4 |
+| ~~Overlaps two other pages~~ | ~~**Tools** power/network duplicates **Settings** groups and **Dashboard** tiles~~ — dissolved in phase 4; the duplicated `sys-*` probes were deleted rather than moved |
 
 The common failure is that "which page is this on?" has no principled answer, so
 it must be memorized. Two levels of navigation fix that: the drawer answers *what
@@ -106,9 +106,9 @@ page.
 
 | Page | From | Notes |
 |---|---|---|
-| **Appearance** | Settings (Appearance group) + Media (Wallpapers) | ✅ the settings half landed in phase 3 at `/shell/appearance`; the wallpaper picker joins it in phase 4 |
+| **Appearance** | Settings (Appearance group) + Media (Wallpapers) | ✅ landed — the settings half in phase 3, the wallpaper picker in phase 4. `wallpaperPath` moved into the `Appearance` schema group with it and is no longer rendered as a typed path field: the grid is its editor |
 | **Widgets** | Widgets | Unchanged |
-| **Apps** | Settings (`prewarmApps`) + Media (Web apps) | ✅ the `prewarmApps` half landed in phase 3 at `/shell/apps`; the web-app registry joins it in phase 4. Both are "what can launch on this box" |
+| **Apps** | Settings (`prewarmApps`) + Media (Web apps) | ✅ landed — `prewarmApps` in phase 3, the web-app registry in phase 4. Both are "what can launch on this box" |
 | **Advanced** | Settings (daemon-owned keys, read-only `config.toml`, raw-JSON hatch) | ✅ landed in phase 3 — all three escape hatches quarantined behind one deliberate click |
 
 Quarantining the escape hatches is the single biggest win here: the raw-JSON
@@ -127,34 +127,57 @@ them, fail-closed when nothing is declared — see PANEL.md's
 | Page | From | Notes |
 |---|---|---|
 | **Controllers** | Controllers | Already single-subject; phase 3 added Settings' `Input` group (`controllerDebug`, `rumbleEnabled`), which is the same subject |
-| **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | ✅ landed in phase 3 at `/devices/display-audio` |
+| **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | ✅ landed in phase 3 at `/devices/display-audio`; phase 4 added Tools' two power probes beside the `Power` group |
 | **CEC** | CEC + Settings (CEC group) | ✅ landed in phase 3 — config and actions on one page. The `settings.json` group stays visibly distinct from the `[cec].osd_name` `config.toml` editor beneath it |
-| **Network** | Tools (Network, Bluetooth) | |
+| **Network** | Tools (Network, Bluetooth) | ✅ landed in phase 4 at `/devices/network`. Node tier: these commands map to no declared `Feature` |
 
 ### Remote
 
 | Page | From | Notes |
 |---|---|---|
-| **Navigation** | Tools (Navigation: intents, settings deep-link, D-pad keys) | |
-| **Launcher** | Tools (Apps: list/launch/recents) | |
+| **Navigation** | Tools (Navigation: intents, settings deep-link, D-pad keys) | ✅ landed in phase 4 at `/remote/navigation` |
+| **Launcher** | Tools (Apps: list/launch/recents) | ✅ landed in phase 4 at `/remote/launcher` |
 
 ### Dev
 
 | Page | From | Notes |
 |---|---|---|
 | **Recovery** | Dev (restart daemon/shell, reboot, suspend, deploy, build) | Unit restart *links to* Services rather than duplicating it |
-| **Screenshot** | Dev (screenshot viewer) | |
-| **Console** | Tools (raw IPC line console) | Belongs with the other `allow_dangerous` surfaces, not under a general-purpose tab |
+| **Screenshot** | Dev (screenshot viewer) | ✅ landed in phase 4 at `/dev/screenshot`. The PNG proxy that used to own that path is now `/dev/screenshot/image` |
+| **Console** | Tools (raw IPC line console) | ✅ landed in phase 4 at `/dev/console`. Belongs with the other `allow_dangerous` surfaces, not under a general-purpose tab |
 
-Moving the raw console here consolidates the danger surface: after this, every
-`allow_dangerous`-gated control in the panel is in one group.
+~~Moving the raw console here consolidates the danger surface: after this, every
+`allow_dangerous`-gated control in the panel is in one group.~~ **Corrected in
+phase 4:** five of the six are. `POST /system/updates/apply` is the exception —
+it is the button under System ▸ Updates' pending-package table, sharing that
+page's background job and status poll, and separating it from the list it
+applies would be a worse page than the tidier danger surface is worth. The
+claim the code supports, and the one
+`tests::the_dangerous_set_is_the_dev_group_plus_the_updates_apply` enforces, is
+**"every `allow_dangerous` control is in the Dev group except the pacman
+apply"** — a *second* exception fails the suite. See PANEL.md's
+[Dangerous actions](PANEL.md#dangerous-actions-allow_dangerous).
 
 ### Dissolved pages
 
 **Settings**, **Media**, and **Tools** cease to exist. Each was a container for
-"things that didn't fit elsewhere" rather than a subject. **Settings** is gone as
-of phase 3 — `/settings` now forwards to `/shell/appearance`; Media and Tools go
-in phase 4.
+"things that didn't fit elsewhere" rather than a subject. All three are gone:
+Settings in phase 3, Media and Tools in phase 4. The old paths keep forwarding
+addresses — `/settings` and `/media` → `/shell/appearance`, `/tools` →
+`/remote/navigation` — but the old *action* paths (`/media/wallpaper/*`,
+`/tools/*`) were deleted, not redirected: they were htmx targets, never
+bookmarks.
+
+Two modules outlived their pages, because each grab-bag did have real shared
+machinery even though it had no subject: `pages::settings` (the schema, the form
+renderer and the scoped patch builder the five settings forms share) and
+`pages::ipc_console` (the result partial, reply pretty-printer and argument
+validators the four pages the console dissolved into share). Neither is a page.
+
+Six routes were deleted outright rather than moved: Tools ▸ System's four
+`sys-status`/`sys-metrics`/`storage-status`/`build-info` probes, whose content
+is already on the Overview tiles, and its two `controllerdb-*` buttons, which
+were exact duplicates of the Controllers page's own.
 
 ## Services (new)
 
@@ -252,7 +275,7 @@ Each phase ships independently and leaves the panel working.
 | **1** ✅ landed | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — | #405 |
 | **2** ✅ landed | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
 | **3** ✅ landed | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC — plus the `Input` group onto Devices/Controllers. Saves are now scoped to the groups the submitting form rendered. | 1 | #407 |
-| **4** | Dissolve **Media** and **Tools** → Shell/*, Devices/Network, Remote/*, Dev/Console. | 1, 3 | #408 |
+| **4** ✅ landed | Dissolve **Media** and **Tools** → Shell/Appearance + Shell/Apps, Devices/Network, Devices/Display & Audio, Remote/Navigation + Remote/Launcher, Dev/Screenshot + Dev/Console. Six duplicate routes deleted rather than moved. | 1, 3 | #408 |
 | **5** | Services: read any unit; `managed_units` config; sudoers generation in the ansible role; danger-tier confirms. | 2 | #409 |
 | **6** | Overview rebuilt as pure read-only tiles with deep links. | 2-5 | #410 |
 

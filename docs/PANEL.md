@@ -102,10 +102,12 @@ page constructs one from a live node — that is the node switcher,
 > (#405) shipped the navigation shell — a left drawer for six subject groups
 > with a horizontal sub-nav inside each — and moved every page onto its new
 > path, with page *contents* unchanged. Phase 2 (#406) split the Processes
-> page three ways under **System**: Services (unit control), Processes
-> (read-only observation) and Updates (pacman). Settings, Media and Tools are
-> still the pre-split grab-bags, and dissolve in phases 3-4. The table below is
-> what is built today.
+> page three ways under **System**: Services, Processes and Updates. Phase 3
+> (#407) dissolved **Settings**, and phase 4 (#408) dissolved the last two
+> grab-bags, **Media** and **Tools** — so every page below has one subject and
+> every group is at its final page set. Phases 5-6 change page *contents*
+> (Services reading arbitrary units, Overview rebuilt as pure tiles), not the
+> structure. The table below is what is built today.
 
 Every page keeps a forwarding address: the pre-IA path 303s to the new one
 (`pages::redirects`), registered in the same capability block as its target so a
@@ -118,16 +120,19 @@ partials moved without redirects — they are poll targets, not bookmarks.
 | Services | `/system/services` | the three tv-shell systemd **user** units (daemon/shell/panel) with a per-unit Restart (color-coded dot + status word, not just text). `POST /system/services/restart/{key}` matches `key` against that fixed three-key set and resolves it to a real unit name **server-side** — an arbitrary client-supplied unit name never reaches `systemctl`. The panel's own unit carries a distinct confirm saying the restart will disconnect the page you are looking at. Reading arbitrary units and the configurable `managed_units` restart allowlist are phase 5 (#409) |
 | Processes | `/system/processes` | **read-only observation, no actions at all**: Hyprland active window/clients (styled table)/monitors via IPC, and a top-processes table (`ps`, CPU-sorted, no kill action in v1) |
 | Updates | `/system/updates` | the pacman System Updates section — pending-package table, cache-bypassing Refresh, the background full-update job and its self-terminating status poll (see [System updates](#system-updates-pacman) below) |
-| Appearance | `/shell/appearance` | the `Appearance` slice of `settings.json` — theme mode, the two auto-theme hours, reduce-motion, text scale — as typed fields over `get-config`/`set-config` (shallow merge; unmentioned keys are left untouched). Phase 4 (#408) folds the Media page's wallpaper picker in beside it |
+| Appearance | `/shell/appearance` | the `Appearance` slice of `settings.json` — theme mode, the two auto-theme hours, reduce-motion, text scale — as typed fields over `get-config`/`set-config` (shallow merge; unmentioned keys are left untouched), **plus the wallpaper picker** (phase 4): upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one or clear it, and delete — the only way to get an image onto the box without SSH. Upload is treated as an attack surface in its own right (the route is authenticated, but auth is opt-in and a loopback panel may run without it): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. `wallpaperPath` moved into this schema group with the picker and is **not** rendered as a typed field — the grid is its editor (`settings::CUSTOM_EDITOR_KEYS`) |
 | Widgets | `/shell/widgets` | per-widget enabled/order/size/prefs editors (`widgets.<id>` subtree) |
-| Apps | `/shell/apps` | the `prewarmApps` list editor (one `StartupWMClass` per line; an emptied box clears the list to `[]`). Phase 4 folds the Media page's web-app registry in here |
+| Apps | `/shell/apps` | what can launch on this box: the `prewarmApps` list editor (one `StartupWMClass` per line; an emptied box clears the list to `[]`), and — since phase 4 — the daemon-owned **web-app registry** (`webapp-list`/`-add`/`-remove`, #187 P1+P3). The panel is the add surface because the couch UI has no on-screen keyboard (#20); the daemon validates, allocates the id/`wmClass` and writes the `.desktop`, so the panel only relays. Removing one keeps its Chromium profile, so re-adding restores logins. The two registry routes are gated on `web_apps` while the page is `settings_store`, so the add/remove forms render only when the node declared both |
 | Advanced | `/shell/advanced` | the three escape hatches, quarantined behind one deliberate click: the daemon-owned keys (binding layers + the `webApps` registry, `docs/WEB_APPS.md`) **read-only** — `keyBindings` is editable via the Controllers page's bindings editor, the per-game/per-player layers are read-only there too; a **read-only** `config.toml` view (a general edit path is deferred — editing still requires a manual edit + daemon/panel restart via the Dev page; the one targeted exception anywhere is the CEC page's `[cec].osd_name` editor); and the raw-JSON hatch with its explicit shallow-merge/`null`-deletes warning, which can write *any* key including ones no typed form models (`widgets`, `cecDeviceNames`) and the daemon-owned layers. Client-side JSON-object validation for immediate feedback, with the server-side object check as the authoritative gate |
-| Display &amp; Audio | `/devices/display-audio` | the `Display`, `Night Light`, `Power` and `Audio` slices of `settings.json` on one form — HDR, overscan, auto-dim, `wallpaperPath`, night-light schedule/temperature, sleep timer, wake-on-controller, default sink and card profile. Phase 4 (#408) adds the Tools page's power probes |
-| Media | `/shell/media` | **Wallpapers**: upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one (persisted as `wallpaperPath` via `set-config`) or clear it, and delete — this is the only way to get an image onto the box without SSH. Upload is treated as an attack surface in its own right (the route is authenticated, but auth is opt-in and a loopback panel may run without it): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. **Web apps**: list/add/remove the daemon-owned registry (`webapp-list`/`-add`/`-remove`, #187 P1+P3) — the panel is the add surface because the couch UI has no on-screen keyboard (#20) |
-| Tools | `/remote/tools` | IPC console grouped by domain — Navigation (intent/key), Apps (list/launch/recents), Bluetooth (power/scan/list/connect-disconnect-pair-trust), Network (status/wifi/throughput/ping), Power (can-suspend/battery), System (sys-status/sys-metrics/storage-status/build-info/controllerdb); plus a raw-line escape hatch with a warning on commands owned by another page's guarded flow. CEC and controller/pads/bindings commands live on their own Controllers/CEC pages (below) instead. |
+| Display &amp; Audio | `/devices/display-audio` | the `Display`, `Night Light`, `Power` and `Audio` slices of `settings.json` on one form — HDR, overscan, auto-dim, night-light schedule/temperature, sleep timer, wake-on-controller, default sink and card profile — plus the two live power probes (`power-can-suspend`, `power-battery`) beside the `Power` group they report on. Those two are **node** tier while the page is `settings_store`, so the buttons render only when the handshake succeeded. `wallpaperPath` left this page in phase 4 (see Appearance) |
 | Controllers | `/devices/controllers` | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Advanced page's raw JSON hatch); the `Input` slice of `settings.json` (`controllerDebug`, `rumbleEnabled`), rendered only when the node declares `settings_store` because its save route lives in that block; controller-DB status/refresh |
 | CEC | `/devices/cec` | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; the `CEC` slice of `settings.json` (claim active source on startup/wake, auto-switch on device power-on, default input) so config and actions finally share a page, rendered only when the node declares `settings_store` because its save route lives in that block; and — distinct from all of the above — an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname), **the panel's one config.toml write**, done format-preservingly via `toml_edit` and applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
-| Dev | `/dev/recovery` | restart daemon/restart shell (always available — unit restart is recovery) plus reboot/suspend behind `allow_dangerous` and deploy/build behind `allow_dangerous` **and** the node's `dev_deploy` capability, all with tier labels + confirms; screenshot viewer (provenance sha/branch/version/captured-at, proxied via `/dev/screenshot`, gated on the node's `screenshot` capability) |
+| Network | `/devices/network` | the box's two radios, from the dissolved Tools page: NetworkManager (link status, Wi-Fi list/rescan, per-interface throughput, ping) and bluez (adapter power, discovery, the known-device list with per-device connect/disconnect/pair/trust). Pairing a gamepad here is the keyboard-free alternative to the couch UI's own Bluetooth page. Every argument that becomes part of an IPC command line goes through the shared validators in `pages::ipc_console`: a ping host and a `wm_class` must be single tokens, an interface name additionally carries no `/` or `..` (it reaches a sysfs path daemon-side), and a ping count must be an integer in `1..=10` |
+| Navigation | `/remote/navigation` | driving the running shell from here, from the dissolved Tools page: free-text and quick-button intents, the three overlay quick actions, a settings deep-link picker over the documented slug vocabulary, and the six-name D-pad key vocabulary (validated server-side too, not just by the fixed button values). Nothing here persists — these change what is on screen right now |
+| Launcher | `/remote/launcher` | `list-apps` rendered with a per-app Launch button (`intent app:<wmClass>`), plus `get-recents`. What *can* launch is Shell ▸ Apps; this is what to launch now |
+| Recovery | `/dev/recovery` | restart daemon/restart shell (always available — unit restart is recovery) plus reboot/suspend behind `allow_dangerous` and deploy/build behind `allow_dangerous` **and** the node's `dev_deploy` capability, all with tier labels + confirms. Every action's response carries out-of-band unit chips + a nav-dot refresh, so the operator sees the unit actually came back |
+| Screenshot | `/dev/screenshot` | the screenshot viewer, its own page since phase 4 — the one read-only surface on a page otherwise made of destructive buttons, and legible at full width. `POST /dev/screenshot/capture` confirms the bridge answers and reads the provenance line (sha/branch/version/captured-at); only then is an `<img>` emitted, pointing at `GET /dev/screenshot/image` — the PNG proxy, renamed from `/dev/screenshot` to free that path for the page. Gated on the node's `screenshot` capability; a node that declares it while this panel has no HTTP bridge configured is told so up front rather than on click |
+| Console | `/dev/console` | the raw IPC line console from the dissolved Tools page: sends any single command from the daemon's vocabulary and shows the raw reply, with a warning banner on the verbs owned by another page's guarded flow (`set-config`, `set-binding`, `grab`, `release`, `handoff`) and a sharpened client-side confirm for the same list. The **page** is node tier; `POST /dev/console/raw` is in the `allow_dangerous` set, so with that off (the default, and htpc-1's setting) the page renders an explanatory banner and **no form** — never a button that 404s |
 | Logs | `/system/logs` | shell + daemon log tails (ANSI-stripped — including "bare" ESC-dropped residue like `[33m`/`[0m` — and wrapped rather than clipped), free-text filter plus one-click "Errors only"/"Hide icon noise" presets, and a Focus Shell/Focus Daemon toggle to expand one pane to full width (state lives on `#log-panels` itself, so it survives every htmx refresh of the panes inside it) |
 
 ### Scoped settings saves
@@ -156,14 +161,26 @@ the 10 checkboxes belonging to the other four. The mechanism:
 `widgets` and `cecDeviceNames` are `FieldKind::Complex`: never rendered as a
 typed field, never in a typed patch, editable only from Advanced's raw hatch.
 
+`wallpaperPath` is a third kind of exception, added in phase 4. It is an
+ordinary `FieldKind::Str` in the `Appearance` group, but it is listed in
+`settings::CUSTOM_EDITOR_KEYS` and therefore **not rendered as a typed input** —
+the wallpaper grid on the same page is its editor, and a raw path field beside
+that grid would be a second, worse one that bypasses the picker's containment
+checks. Omitting a field from the form omits it from the patch, which is safe
+here *only because it is not a `Bool`*: non-`Bool` kinds are written only when
+present, so the daemon's shallow merge leaves the current selection alone. A
+`Bool` handled this way would be written `false` on every save.
+
 ### Navigation
 
 Two levels, both rendered from the startup capability snapshot (`NAV` +
 `Chrome` in `panel/src/capabilities.rs`), so neither can link to a page whose
 routes were not registered — see [Capability gating](#capability-gating):
 
-- a persistent **left drawer** of subject groups — Overview, System, Shell,
-  Devices, Remote, Dev;
+- a persistent **left drawer** of six subject groups — Overview, System, Shell
+  (Appearance · Widgets · Apps · Advanced), Devices (Controllers · Display &
+  Audio · CEC · Network), Remote (Navigation · Launcher), Dev (Recovery ·
+  Screenshot · Console);
 - a **horizontal sub-nav** at the top of the content view listing the registered
   pages of the active group.
 
@@ -353,21 +370,31 @@ tiers — `panel/src/capabilities.rs`:
 
 | Tier | Registered when | Pages |
 |---|---|---|
-| **Recovery** | always | Overview, Services (+ unit restarts), Processes, Updates, Logs, Dev (+ unit restarts), login, assets |
-| **Node** | the handshake succeeded | Tools console |
-| **Capability** | the node declared that `Feature` | Appearance, Apps, Advanced, Display & Audio, **the whole Media page incl. the wallpaper files**, and the CEC/Input groups' save routes (`settings_store`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the Dev screenshot pair (`screenshot`) |
+| **Recovery** | always | Overview, Services (+ unit restarts), Processes, Updates, Logs, Dev ▸ Recovery (+ unit restarts), login, assets |
+| **Node** | the handshake succeeded | Devices ▸ Network, Remote ▸ Navigation, Remote ▸ Launcher, Dev ▸ Console (the *page*), and the two Display & Audio power probes |
+| **Capability** | the node declared that `Feature` | Appearance **incl. the wallpaper files**, Apps, Advanced, Display & Audio, and the CEC/Input groups' save routes (`settings_store`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the three Dev ▸ Screenshot routes (`screenshot`) |
 | **Danger** | `[panel].allow_dangerous`, intersected with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy` |
 
-**Two save routes sit in a block their page does not.** A registration block's
+**Some routes sit in a block their page does not.** A registration block's
 condition may name exactly one capability — `crate::tests`'s `main.rs` parser
 accepts `allow_dangerous`, `caps.allows(Gate::X)`, or those two ANDed, and
-nothing else — so `POST /devices/cec/config` and `POST
-/devices/controllers/settings/save` are registered under `settings_store` while
-the CEC and Controllers *pages* stay under `cec`/`controllers`. `set-config` is
-the capability those two routes actually need. The harmless direction (a route
-with no page in front of it) is already precedented by `/tools/raw`; the harmful
-one — a page rendering a form that posts to an unregistered route — is closed by
-rendering each of those forms only under `caps.allows(Gate::SettingsStore)`.
+nothing else — so a page needing two capabilities has its routes split across
+two blocks, in whichever direction fits:
+
+| Route | Its block | Its page's block |
+|---|---|---|
+| `POST /devices/cec/config` | `settings_store` | `cec` |
+| `POST /devices/controllers/settings/save` | `settings_store` | `controllers` |
+| `POST /shell/apps/webapp/{add,remove}` | `web_apps` | `settings_store` |
+| `POST /devices/display-audio/power/{can-suspend,battery}` | node | `settings_store` |
+| `POST /dev/console/raw` | `allow_dangerous` | node |
+
+Each route sits in the block naming the capability it *actually* needs. The
+harmless direction — a route with no page in front of it — is precedented by
+`/dev/console/raw`. The harmful one, a page rendering a control that posts to an
+unregistered route, is closed by rendering each of those controls only under the
+gate its route sits behind, and `no_page_renders_an_unregistered_target_*`
+fetches every page under three capability sets and checks exactly that.
 
 **A gated-off route 404s — it does not exist.** Non-registration, not a 403 from
 a handler: honest, and it leaks nothing about what the node can do. Both nav
@@ -385,8 +412,8 @@ capability tier. Same for `/system/logs`: `Feature::Logs` describes the
 The wallpaper routes are panel-local filesystem work and were recovery tier —
 correctly *not* gated on `Feature::Wallpapers`, which the daemon never emits.
 `settings_store` is a different claim: the daemon does emit it, and picking a
-wallpaper always required it (`/media/wallpaper/select` writes `wallpaperPath`
-through `set-config`). Gating the whole wallpaper surface on it is what lets the
+wallpaper always required it (select writes `wallpaperPath` through
+`set-config`). Gating the whole wallpaper surface on it is what lets the
 Shell group vanish cleanly with the daemon down instead of rendering a one-page
 shell. The accepted, deliberate cost: **with the daemon down you can no longer
 upload a wallpaper** — the one path that put an image on the box without SSH.
@@ -422,9 +449,10 @@ recovery is the Services page's own panel-restart button.
 
 **Deployment dependency.** The panel now requires the deployed daemon to be at
 or past the commit that added the `capabilities` IPC command. An older daemon
-answers, but not with a capability set — the panel fails closed to five pages and
-says so, naming version skew rather than telling the operator to wait for a
-daemon that is already running. Deploy the daemon first, or deploy both together.
+answers, but not with a capability set — the panel fails closed to the six
+recovery-tier pages (Overview, Services, Processes, Updates, Logs, Dev ▸
+Recovery) and says so, naming version skew rather than telling the operator to
+wait for a daemon that is already running. Deploy the daemon first, or deploy both together.
 
 The handshake itself is bounded: 4 attempts on a 1.2s budget each, 1.5s apart
 (~9.3s worst case), retried **only** while the node is unreachable — the
@@ -459,25 +487,41 @@ are **not registered at all** (404, not a 403 from a handler) and their buttons
 are not rendered:
 
 `POST /dev/deploy` · `/dev/build` · `/dev/reboot` · `/dev/suspend` ·
-`/system/updates/apply` · `/tools/raw`
+`/dev/console/raw` · `/system/updates/apply`
+
+**Almost all of them are in the Dev group — but not quite all.** Phase 4 (#408)
+moved the raw IPC console to Dev ▸ Console to consolidate the danger surface,
+and PANEL_IA.md's phrasing was "after this, every `allow_dangerous`-gated
+control in the panel is in one group". That is true of five of the six.
+`POST /system/updates/apply` is the exception and stays where it is: it is the
+button at the bottom of System ▸ Updates' pending-package table, sharing that
+page's background job and its self-terminating status poll, and moving the
+button away from the list it applies and the log tail it produces would be a
+worse page for a marginal gain in tidiness. So the accurate claim is **"every
+`allow_dangerous` control lives in the Dev group except the pacman apply"**, and
+`tests::the_dangerous_set_is_the_dev_group_plus_the_updates_apply` enforces
+exactly that — a *second* exception fails the suite rather than quietly
+widening the sentence.
 
 `GET /dev/recovery` stays available (observability), as does every
 unit-restart route: `POST /system/services/restart/{key}`, `/devices/cec/recover/restart-daemon`,
 `/dev/restart-daemon` and `/dev/restart-shell`. The last two used to be gated,
 which bought nothing — they drive the *same* two systemd units that the ungated
 `/system/services/restart/{key}` does, so the gate only hid one door to the same room.
-`POST /tools/raw` is in the dangerous set because it drives the entire IPC
+`POST /dev/console/raw` is in the dangerous set because it drives the entire IPC
 vocabulary, making it an arbitrary-command escape hatch. It carries **no**
 capability gate on top — `allow_dangerous` is already an explicit opt-in to an
 arbitrary-command surface, and gating it further would not remove a capability
 lie (it reports the node's own error when the node is down). Note the scope
-honestly: with the handshake failed, `/remote/tools` is gone too, so what survives is
-reachable by `curl`, not from the UI.
+honestly: with the handshake failed, `/dev/console` is gone too, so what
+survives is reachable by `curl`, not from the UI. The inverse case — the page
+registered while the route is not, which is htpc-1's actual state — renders an
+explanatory banner and no form at all.
 
 `/dev/deploy` and `/dev/build` are the one intersection — they need
 `allow_dangerous` **and** the node's `dev_deploy` capability, since they proxy
-the daemon bridge. `GET /dev/screenshot` moved out of this list entirely: it is
-now gated on `screenshot` (see [Capability gating](#capability-gating)).
+the daemon bridge. The screenshot routes moved out of this list entirely: they
+are gated on `screenshot` (see [Capability gating](#capability-gating)).
 
 ## Danger tiers
 

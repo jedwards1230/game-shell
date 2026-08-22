@@ -4,11 +4,20 @@
 //!
 //! One of the five pages the Settings page dissolved into (`docs/PANEL_IA.md`
 //! phase 3): four groups that all describe the picture and sound coming out of
-//! the box, on one page instead of buried in a 3133px scroll. Phase 4 adds the
-//! Tools page's power probes (`can-suspend`, battery) here.
+//! the box, on one page instead of buried in a 3133px scroll. Phase 4 added
+//! the Tools page's two power probes (`power-can-suspend`, `power-battery`)
+//! beside the `Power` settings group they report on.
+//!
+//! **Two gates on one page.** The settings form is [`Gate::SettingsStore`]
+//! (which is also where the page itself is registered); the two probe routes
+//! are [`Gate::Node`], because they are IPC reads that map to no declared
+//! `Feature`. The probe buttons therefore render only under
+//! `caps.allows(Gate::Node)` — otherwise the page would offer two buttons
+//! POSTing to unregistered routes.
 //!
 //! Degradation: with the daemon unreachable the page still returns 200 with a
-//! clear banner and no form — never a 500.
+//! clear banner and no form — never a 500; the probes report the transport
+//! error inline.
 
 use askama::Template;
 use axum::extract::State;
@@ -16,7 +25,8 @@ use axum::response::{Html, IntoResponse};
 use axum::Form;
 use serde_json::Value;
 
-use crate::capabilities::{CapabilitySnapshot, Chrome};
+use crate::capabilities::{CapabilitySnapshot, Chrome, Gate};
+use crate::pages::ipc_console::run_line;
 use crate::pages::settings::{self, GroupView};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
@@ -33,6 +43,9 @@ struct DisplayAudioTemplate {
     daemon_up: bool,
     scope: Vec<&'static str>,
     groups: Vec<GroupView>,
+    /// The node tier — see the module docs. Gates the two probe buttons, whose
+    /// routes are registered in the `Gate::Node` block rather than this page's.
+    node_enabled: bool,
 }
 
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
@@ -51,6 +64,7 @@ fn render(caps: &CapabilitySnapshot, cfg: Option<&Value>) -> String {
         groups: cfg
             .map(|c| settings::build_groups(c, OWNED))
             .unwrap_or_default(),
+        node_enabled: caps.allows(Gate::Node),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
@@ -68,4 +82,18 @@ pub async fn save(
 
 pub async fn render_save(state: &AppState, pairs: &[(String, String)]) -> String {
     settings::render_save(state, OWNED, pairs).await
+}
+
+// ---------------------------------------------------------------------------
+// Power probes (node tier — from the dissolved Tools page)
+// ---------------------------------------------------------------------------
+
+/// `POST /devices/display-audio/power/can-suspend` — `power-can-suspend`.
+pub async fn power_can_suspend(State(state): State<SharedState>) -> impl IntoResponse {
+    Html(run_line(&state, "power-can-suspend").await)
+}
+
+/// `POST /devices/display-audio/power/battery` — `power-battery`.
+pub async fn power_battery(State(state): State<SharedState>) -> impl IntoResponse {
+    Html(run_line(&state, "power-battery").await)
 }
