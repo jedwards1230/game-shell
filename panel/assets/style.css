@@ -230,9 +230,16 @@ a:hover {
 
 /* Narrow viewports: the drawer becomes a horizontal strip above the content
    rather than a column beside it. No JavaScript — the panel has no build step,
-   and a hamburger would need one. Both strips scroll horizontally WITHIN
-   themselves (`overflow-x: auto` + `min-width: 0` on the flex children), so
-   the page itself never gains a horizontal scrollbar. */
+   and a hamburger would need one.
+
+   The strip WRAPS rather than scrolling. An earlier revision scrolled it
+   (`overflow-x: auto`), which kept the page itself free of a horizontal
+   scrollbar but hid the last two groups and the daemon dot off the right edge
+   at 380px with no fade, chevron or scrollbar to say so — a nav level you
+   cannot see is a nav level you do not have. Wrapping costs a row of height
+   and hides nothing. The sub-nav below still scrolls: its tabs are one group's
+   pages, all reachable from the page you are already on, so a hidden tab is a
+   smaller loss than a hidden group. */
 @media (max-width: 700px) {
   .app {
     flex-direction: column;
@@ -247,12 +254,12 @@ a:hover {
     align-self: stretch;
     height: auto;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.25rem;
     padding: 0.5rem 0.75rem;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
   }
 
   .drawer .brand {
@@ -261,9 +268,11 @@ a:hover {
   }
 
   .drawer-groups {
-    /* `0 0 auto`: never squash the group links — the strip scrolls instead. */
-    flex: 0 0 auto;
+    /* `1 1 auto` + wrap: the group links flow onto a second row rather than
+       being squashed or pushed out of sight. */
+    flex: 1 1 auto;
     flex-direction: row;
+    flex-wrap: wrap;
     overflow-y: visible;
   }
 

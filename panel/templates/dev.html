@@ -1,7 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Dev — tv-shell panel{% endblock %}
+{% block title %}Recovery — tv-shell panel{% endblock %}
 {% block content %}
-<h1>Dev</h1>
+{# Titled for the PAGE, not the group. The Dev group has no sub-nav bar while
+   Recovery is its only registered page, so this h1 is the only label the
+   operator gets — naming the group here would leave the page unlabelled. #}
+<h1>Recovery</h1>
 <p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
   Daemon: {% if daemon_up %}up{% else %}down{% endif %}
   · Bridge: {% if bridge_configured %}configured{% else %}not configured{% endif %}

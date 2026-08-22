@@ -14,7 +14,9 @@
     {% for u in units %}
     <tr>
       <td>{{ u.label }} <span class="muted">({{ u.unit }})</span></td>
-      <td><span class="unit-chip"><span class="dot {{ u.dot_class }}"></span>{{ u.state_word }}</span> <span class="muted">({{ u.state }})</span></td>
+      {# The raw systemd token is only worth showing when it is not the word we
+         already printed — otherwise every healthy row reads "active (active)". #}
+      <td><span class="unit-chip"><span class="dot {{ u.dot_class }}"></span>{{ u.state_word }}</span>{% if u.state != u.state_word %} <span class="muted">({{ u.state }})</span>{% endif %}</td>
       <td>
         <form hx-post="/system/services/restart/{{ u.key }}" hx-disabled-elt="find button" hx-target="#services-result" hx-swap="innerHTML"
               hx-confirm="{{ u.confirm }}" class="inline-form">

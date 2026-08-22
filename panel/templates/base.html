@@ -63,13 +63,13 @@
 </div>
 </div>
 <script>
-// Narrow-viewport affordance: below the drawer breakpoint both nav levels
-// become horizontally-scrolling strips, so the current entry can start out
-// scrolled off-screen (the right-edge fade gradient hints there's more, but
-// doesn't say where "here" is) — center it on load. Layout itself is pure
+// Narrow-viewport affordance: the sub-nav is a horizontally-scrolling strip,
+// so the current tab can start out scrolled off-screen (the right-edge fade
+// gradient hints there's more, but doesn't say where "here" is) — center it on
+// load. The drawer needs no equivalent: below the breakpoint it WRAPS rather
+// than scrolling, so nothing in it is ever off-screen. Layout itself is pure
 // CSS; this only scrolls.
 document.querySelector('.subnav a.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
-document.querySelector('.drawer-link.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
 </script>
 </body>
 </html>
