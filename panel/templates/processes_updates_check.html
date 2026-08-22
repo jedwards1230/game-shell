@@ -3,7 +3,7 @@
   <p class="banner banner-error">{{ error }}</p>
   {% endif %}
   {% if reboot_needed %}
-  <p class="banner banner-error"><strong>Reboot needed</strong> — the installed kernel differs from the running one. <a href="/dev">Go to Dev &rarr; Reboot</a>.</p>
+  <p class="banner banner-error"><strong>Reboot needed</strong> — the installed kernel differs from the running one. <a href="/dev/recovery">Go to Dev &rarr; Reboot</a>.</p>
   {% else if reboot_unknown %}
   <p class="muted">Reboot-needed status: unknown (couldn't determine the kernel package unambiguously).</p>
   {% endif %}

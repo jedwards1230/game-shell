@@ -1342,15 +1342,15 @@ fn route_table() -> Vec<RouteSpec> {
     // ── Recovery tier: registered unconditionally ──
     let mut table = vec![
         r("/", "/", Get, Authenticated),
-        r("/dashboard", "/dashboard", Get, Authenticated),
-        r("/dashboard/tiles", "/dashboard/tiles", Get, Authenticated),
+        r("/overview", "/overview", Get, Authenticated),
+        r("/overview/tiles", "/overview/tiles", Get, Authenticated),
         r(
-            "/dashboard/updates-tile",
-            "/dashboard/updates-tile",
+            "/overview/updates-tile",
+            "/overview/updates-tile",
             Get,
             Authenticated,
         ),
-        r("/processes", "/processes", Get, Authenticated),
+        r("/system/processes", "/system/processes", Get, Authenticated),
         // Deliberately an unknown unit key: the handler rejects it before
         // touching `systemctl`, so this row is inert even if probed.
         recovery(
@@ -1370,28 +1370,9 @@ fn route_table() -> Vec<RouteSpec> {
             Get,
             Authenticated,
         ),
-        r("/media", "/media", Get, Authenticated),
-        r(
-            "/media/wallpaper/upload",
-            "/media/wallpaper/upload",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/media/wallpaper/delete",
-            "/media/wallpaper/delete",
-            Post,
-            Authenticated,
-        ),
-        r(
-            "/media/wallpaper/file",
-            "/media/wallpaper/file",
-            Get,
-            Authenticated,
-        ),
-        r("/logs", "/logs", Get, Authenticated),
-        r("/logs/view", "/logs/view", Get, Authenticated),
-        r("/dev", "/dev", Get, Authenticated),
+        r("/system/logs", "/system/logs", Get, Authenticated),
+        r("/system/logs/view", "/system/logs/view", Get, Authenticated),
+        r("/dev/recovery", "/dev/recovery", Get, Authenticated),
         // Recovery, deliberately NOT part of the dangerous set: these restart
         // the very same units `POST /processes/restart/{key}` restarts.
         recovery("/dev/restart-daemon", "/dev/restart-daemon", Post),
@@ -1402,6 +1383,11 @@ fn route_table() -> Vec<RouteSpec> {
             Get,
             Authenticated,
         ),
+        // ── forwarding addresses for the pre-IA paths (recovery tier half) ──
+        r("/dashboard", "/dashboard", Get, Authenticated),
+        r("/processes", "/processes", Get, Authenticated),
+        r("/logs", "/logs", Get, Authenticated),
+        r("/dev", "/dev", Get, Authenticated),
         // ── the four auth exemptions ──
         r("/login", "/login", Get, Public),
         r("/login", "/login", Post, Public),
@@ -1413,6 +1399,7 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::Node,
         vec![
+            r("/remote/tools", "/remote/tools", Get, Authenticated),
             r("/tools", "/tools", Get, Authenticated),
             r("/tools/intent", "/tools/intent", Post, Authenticated),
             r("/tools/key", "/tools/key", Post, Authenticated),
@@ -1541,88 +1528,94 @@ fn route_table() -> Vec<RouteSpec> {
                 Post,
                 Authenticated,
             ),
+            r(
+                "/devices/controllers",
+                "/devices/controllers",
+                Get,
+                Authenticated,
+            ),
             r("/controllers", "/controllers", Get, Authenticated),
             r(
-                "/controllers/grab",
-                "/controllers/grab",
+                "/devices/controllers/grab",
+                "/devices/controllers/grab",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/release",
-                "/controllers/release",
+                "/devices/controllers/release",
+                "/devices/controllers/release",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/handoff",
-                "/controllers/handoff",
+                "/devices/controllers/handoff",
+                "/devices/controllers/handoff",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/pad/battery",
-                "/controllers/pad/battery",
+                "/devices/controllers/pad/battery",
+                "/devices/controllers/pad/battery",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/pad/rumble-status",
-                "/controllers/pad/rumble-status",
+                "/devices/controllers/pad/rumble-status",
+                "/devices/controllers/pad/rumble-status",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/pad/rumble",
-                "/controllers/pad/rumble",
+                "/devices/controllers/pad/rumble",
+                "/devices/controllers/pad/rumble",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/input-devices",
-                "/controllers/input-devices",
+                "/devices/controllers/input-devices",
+                "/devices/controllers/input-devices",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/bindings/set",
-                "/controllers/bindings/set",
+                "/devices/controllers/bindings/set",
+                "/devices/controllers/bindings/set",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/bindings/capture",
-                "/controllers/bindings/capture",
+                "/devices/controllers/bindings/capture",
+                "/devices/controllers/bindings/capture",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/bindings/capture-cancel",
-                "/controllers/bindings/capture-cancel",
+                "/devices/controllers/bindings/capture-cancel",
+                "/devices/controllers/bindings/capture-cancel",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/active-game/set",
-                "/controllers/active-game/set",
+                "/devices/controllers/active-game/set",
+                "/devices/controllers/active-game/set",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/active-game/clear",
-                "/controllers/active-game/clear",
+                "/devices/controllers/active-game/clear",
+                "/devices/controllers/active-game/clear",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/controllerdb/status",
-                "/controllers/controllerdb/status",
+                "/devices/controllers/controllerdb/status",
+                "/devices/controllers/controllerdb/status",
                 Post,
                 Authenticated,
             ),
             r(
-                "/controllers/controllerdb/refresh",
-                "/controllers/controllerdb/refresh",
+                "/devices/controllers/controllerdb/refresh",
+                "/devices/controllers/controllerdb/refresh",
                 Post,
                 Authenticated,
             ),
@@ -1633,25 +1626,56 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::Cec,
         vec![
+            r("/devices/cec", "/devices/cec", Get, Authenticated),
             r("/cec", "/cec", Get, Authenticated),
-            r("/cec/scan", "/cec/scan", Post, Authenticated),
-            r("/cec/device", "/cec/device", Post, Authenticated),
             r(
-                "/cec/active-source",
-                "/cec/active-source",
+                "/devices/cec/scan",
+                "/devices/cec/scan",
                 Post,
                 Authenticated,
             ),
-            r("/cec/power-on", "/cec/power-on", Post, Authenticated),
-            r("/cec/power-off", "/cec/power-off", Post, Authenticated),
-            r("/cec/test", "/cec/test", Post, Authenticated),
-            r("/cec/osd-name", "/cec/osd-name", Post, Authenticated),
+            r(
+                "/devices/cec/device",
+                "/devices/cec/device",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/cec/active-source",
+                "/devices/cec/active-source",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/cec/power-on",
+                "/devices/cec/power-on",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/cec/power-off",
+                "/devices/cec/power-off",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/cec/test",
+                "/devices/cec/test",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/cec/osd-name",
+                "/devices/cec/osd-name",
+                Post,
+                Authenticated,
+            ),
             // A unit restart under a gated prefix, on purpose: it is the CEC
             // page's own recovery ladder rung, and the two ALWAYS-registered
             // paths to that same unit are untouched.
             recovery(
-                "/cec/recover/restart-daemon",
-                "/cec/recover/restart-daemon",
+                "/devices/cec/recover/restart-daemon",
+                "/devices/cec/recover/restart-daemon",
                 Post,
             ),
         ],
@@ -1661,17 +1685,23 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::Widgets,
         vec![
+            r("/shell/widgets", "/shell/widgets", Get, Authenticated),
             r("/widgets", "/widgets", Get, Authenticated),
-            r("/widgets/save", "/widgets/save", Post, Authenticated),
             r(
-                "/widgets/reorder/{id}/up",
-                "/widgets/reorder/plex/up",
+                "/shell/widgets/save",
+                "/shell/widgets/save",
                 Post,
                 Authenticated,
             ),
             r(
-                "/widgets/reorder/{id}/down",
-                "/widgets/reorder/plex/down",
+                "/shell/widgets/reorder/{id}/up",
+                "/shell/widgets/reorder/plex/up",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/shell/widgets/reorder/{id}/down",
+                "/shell/widgets/reorder/plex/down",
                 Post,
                 Authenticated,
             ),
@@ -1682,18 +1712,41 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::SettingsStore,
         vec![
-            r("/settings", "/settings", Get, Authenticated),
+            r("/shell/settings", "/shell/settings", Get, Authenticated),
             r("/settings/save", "/settings/save", Post, Authenticated),
             r("/settings/raw", "/settings/raw", Post, Authenticated),
-            // Selecting a wallpaper WRITES `wallpaperPath` via `set-config`;
-            // upload/delete/file are the panel's own filesystem and stay in
-            // the recovery tier above.
+            // The whole wallpaper surface moved here from the recovery tier
+            // (`docs/PANEL_IA.md` phase 1): selecting one always needed
+            // `set-config`, and gating the rest with it is what lets the Shell
+            // group vanish cleanly with the daemon down. The accepted cost is
+            // that wallpaper UPLOAD now needs the handshake to have succeeded.
+            r("/shell/media", "/shell/media", Get, Authenticated),
+            r(
+                "/media/wallpaper/upload",
+                "/media/wallpaper/upload",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/media/wallpaper/delete",
+                "/media/wallpaper/delete",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/media/wallpaper/file",
+                "/media/wallpaper/file",
+                Get,
+                Authenticated,
+            ),
             r(
                 "/media/wallpaper/select",
                 "/media/wallpaper/select",
                 Post,
                 Authenticated,
             ),
+            r("/settings", "/settings", Get, Authenticated),
+            r("/media", "/media", Get, Authenticated),
         ],
     ));
 
@@ -1754,7 +1807,7 @@ fn route_table() -> Vec<RouteSpec> {
 /// fails the suite on any unconditional `post` that is not here, so a new
 /// ungated mutating route is a test failure rather than a review comment
 /// (`docs/MULTI_NODE_PANEL.md` §1).
-const RECOVERY_TIER_MUTATING: [(&str, &str); 7] = [
+const RECOVERY_TIER_MUTATING: [(&str, &str); 5] = [
     (
         "/processes/restart/{key}",
         "restarting a wedged systemd unit is the reason the panel exists; \
@@ -1764,16 +1817,6 @@ const RECOVERY_TIER_MUTATING: [(&str, &str); 7] = [
         "/processes/updates/refresh",
         "runs the panel's own unprivileged `checkupdates`; the daemon declares \
          no `system_updates` capability because it does not serve one",
-    ),
-    (
-        "/media/wallpaper/upload",
-        "writes into the panel host's own wallpapers dir through the hardened \
-         resolver; needs no node, and `wallpapers` is a feature the daemon \
-         never emits",
-    ),
-    (
-        "/media/wallpaper/delete",
-        "removes a file from that same dir through that same resolver",
     ),
     (
         "/dev/restart-daemon",
@@ -2139,8 +2182,8 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        90,
-        "expected 88 pre-existing routes + GET/POST /login"
+        100,
+        "expected 90 pre-IA routes + the 10 phase-1 redirects (docs/PANEL_IA.md)"
     );
 }
 
@@ -2267,7 +2310,7 @@ fn dangerous_set_is_exactly_the_root_equivalent_actions() {
 /// two systemd units, so gating one and leaving the other open bought nothing.
 const RECOVERY_ROUTES: [&str; 4] = [
     "/processes/restart/{key}",
-    "/cec/recover/restart-daemon",
+    "/devices/cec/recover/restart-daemon",
     "/dev/restart-daemon",
     "/dev/restart-shell",
 ];
@@ -2453,7 +2496,7 @@ async fn dangerous_routes_are_unregistered_when_allow_dangerous_is_false() {
     // never reached even if the auth layer were missing (see `exec_backed`).
     for path in [
         "/processes/restart/not-a-unit",
-        "/cec/recover/restart-daemon",
+        "/devices/cec/recover/restart-daemon",
         "/dev/restart-daemon",
         "/dev/restart-shell",
     ] {
@@ -2743,7 +2786,12 @@ async fn desktop_2_sidecar_registers_the_node_tier_and_no_capability_route() {
 
     // And name the pages explicitly, so the test says what it means rather than
     // only what its loop happens to cover.
-    for path in ["/cec", "/controllers", "/widgets", "/settings"] {
+    for path in [
+        "/devices/cec",
+        "/devices/controllers",
+        "/shell/widgets",
+        "/shell/settings",
+    ] {
         let status = c
             .get(format!("{base}{path}"))
             .send()
@@ -2832,8 +2880,8 @@ async fn dashboard_tiles_never_link_to_a_page_the_snapshot_gated_away() {
         "the tiles must still render — this is the recovery tier: {html}"
     );
     assert!(
-        !html.contains("href=\"/controllers\""),
-        "the tiles linked to /controllers while Gate::Controllers is closed — that \
+        !html.contains("href=\"/devices/controllers\""),
+        "the tiles linked to /devices/controllers while Gate::Controllers is closed — that \
          route is not registered, so the link 404s: {html}"
     );
 
@@ -2844,7 +2892,7 @@ async fn dashboard_tiles_never_link_to_a_page_the_snapshot_gated_away() {
     let open = state_for_socket_with_caps(sock2, CapabilitySnapshot::fully_capable());
     let html = pages::dashboard::render_tiles(&open).await;
     assert!(
-        html.contains("href=\"/controllers\""),
+        html.contains("href=\"/devices/controllers\""),
         "with Gate::Controllers open the tiles must link to it: {html}"
     );
 }
@@ -2887,7 +2935,7 @@ async fn the_recovery_banner_distinguishes_a_down_node_from_an_old_one() {
     ))
     .await;
     let body = c
-        .get(format!("{down}/dashboard"))
+        .get(format!("{down}/"))
         .bearer_auth(TEST_TOKEN)
         .send()
         .await
@@ -2911,7 +2959,7 @@ async fn the_recovery_banner_distinguishes_a_down_node_from_an_old_one() {
     ))
     .await;
     let body = c
-        .get(format!("{refused}/dashboard"))
+        .get(format!("{refused}/"))
         .bearer_auth(TEST_TOKEN)
         .send()
         .await
@@ -2938,41 +2986,217 @@ async fn the_recovery_banner_distinguishes_a_down_node_from_an_old_one() {
 /// **The nav/route drift gate** (the half `allows()` alone does not give).
 ///
 /// Route registration and the nav share the *predicate* — both ask
-/// [`CapabilitySnapshot::allows`] — but not the *assignment*: `NavItem.gate` is
+/// [`CapabilitySnapshot::allows`] — but not the *assignment*: `NavPage.gate` is
 /// hand-typed in `capabilities.rs` while a page's real gate is the
 /// `build_router` block it sits in, which `route_table()` mirrors. Nothing
 /// stops those two diverging, and the dangerous direction is silent: move a
-/// page to a stricter gate, leave the nav on the looser one, and the topnav
-/// renders a link to a route that was never registered.
+/// page to a stricter gate, leave the nav on the looser one, and the drawer or
+/// sub-nav renders a link to a route that was never registered.
+///
+/// Walks groups → pages, so it covers both nav levels: a group's drawer href is
+/// always one of its own pages' hrefs (`Chrome::new` picks the first registered
+/// one), so pinning every page pins every drawer target too.
 #[test]
 fn nav_items_agree_with_the_route_table_they_link_to() {
     let table = route_table();
-    for item in crate::capabilities::NAV {
-        let row = table
-            .iter()
-            .find(|r| r.declared == item.href && r.method == Get)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the topnav links to {} ({}), which `route_table()` declares no \
-                     GET route for — the link would 404",
-                    item.href, item.label
-                )
-            });
-        assert_eq!(
-            row.gate.ident(),
-            item.gate.ident(),
-            "topnav item {} is gated on Gate::{} but its page is registered under \
-             Gate::{} — the nav would render a link to an unregistered route (or \
-             hide a page that exists)",
-            item.href,
-            item.gate.ident(),
-            row.gate.ident()
-        );
+    for group in crate::capabilities::NAV {
         assert!(
-            !row.dangerous,
-            "topnav item {} points at a route in the dangerous set; the nav has no \
-             `allow_dangerous` input, so it cannot honor that gate",
-            item.href
+            !group.pages.is_empty(),
+            "nav group {} declares no pages — it could never render",
+            group.key
+        );
+        for page in group.pages {
+            let row = table
+                .iter()
+                .find(|r| r.declared == page.href && r.method == Get)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the nav links to {} ({} ▸ {}), which `route_table()` declares \
+                         no GET route for — the link would 404",
+                        page.href, group.label, page.label
+                    )
+                });
+            assert_eq!(
+                row.gate.ident(),
+                page.gate.ident(),
+                "nav page {} is gated on Gate::{} but its page is registered under \
+                 Gate::{} — the nav would render a link to an unregistered route (or \
+                 hide a page that exists)",
+                page.href,
+                page.gate.ident(),
+                row.gate.ident()
+            );
+            assert!(
+                !row.dangerous,
+                "nav page {} points at a route in the dangerous set; the nav has no \
+                 `allow_dangerous` input, so it cannot honor that gate",
+                page.href
+            );
+        }
+    }
+}
+
+/// The two-level chrome as `base.html` actually renders it: a drawer of groups
+/// on every page, a sub-nav only where the active group has two or more
+/// registered pages, and the daemon dot in the drawer footer (not the sub-nav).
+///
+/// `Chrome`'s own shape is pinned in `capabilities::tests`; this is the
+/// template half, which is where a `{% for %}` over the wrong collection would
+/// show up.
+#[tokio::test]
+async fn base_html_renders_the_drawer_and_gates_the_subnav_on_group_size() {
+    let base = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        caps_with(every_gated_feature()),
+    ))
+    .await;
+    let c = client();
+    let get = |path: &'static str| {
+        let c = c.clone();
+        let base = base.clone();
+        async move {
+            c.get(format!("{base}{path}"))
+                .bearer_auth(TEST_TOKEN)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+    };
+
+    let overview = get("/").await;
+    for group in crate::capabilities::NAV {
+        assert!(
+            overview.contains(&format!(r#"data-group="{}""#, group.key)),
+            "the drawer is missing the {} group: {overview}",
+            group.key
+        );
+    }
+    assert!(
+        overview.contains(r#"class="drawer-link active""#),
+        "the active group must be marked in the drawer: {overview}"
+    );
+    assert!(
+        !overview.contains(r#"class="subnav""#),
+        "Overview is a single-page group — it must render no sub-nav bar at all: \
+         {overview}"
+    );
+    assert!(
+        overview.contains(r#"<div class="drawer-footer">"#)
+            && overview.contains(r#"id="daemon-status""#),
+        "the daemon dot lives in the drawer footer: {overview}"
+    );
+
+    let processes = get("/system/processes").await;
+    assert!(
+        processes.contains(r#"class="subnav""#),
+        "System has two registered pages, so it gets a sub-nav bar: {processes}"
+    );
+    assert!(
+        processes.contains(r#"<a href="/system/logs""#),
+        "the sub-nav must list the active group's other pages: {processes}"
+    );
+    assert!(
+        !processes.contains(r#"<a href="/shell/widgets""#),
+        "the sub-nav must NOT list another group's pages: {processes}"
+    );
+}
+
+/// **Every pre-IA path still answers**, and answers with a redirect rather than
+/// a 404 — for whoever bookmarked it or typed it from memory.
+///
+/// Each redirect is registered in the same `build_router` block as its target,
+/// which is the property under test in both directions: with the gate open the
+/// old path 303s (never 404s), and with it closed the old path 404s exactly
+/// like the page it points at, instead of forwarding to something that is not
+/// there.
+#[tokio::test]
+async fn the_pre_ia_paths_redirect_when_their_target_is_registered() {
+    const REDIRECTS: [(&str, &str); 10] = [
+        ("/dashboard", "/"),
+        ("/processes", "/system/processes"),
+        ("/logs", "/system/logs"),
+        ("/settings", "/shell/settings"),
+        ("/widgets", "/shell/widgets"),
+        ("/media", "/shell/media"),
+        ("/tools", "/remote/tools"),
+        ("/controllers", "/devices/controllers"),
+        ("/cec", "/devices/cec"),
+        ("/dev", "/dev/recovery"),
+    ];
+
+    let table = route_table();
+    let gate_of = |path: &str| {
+        table
+            .iter()
+            .find(|r| r.declared == path && r.method == Get)
+            .unwrap_or_else(|| panic!("{path} is missing from route_table()"))
+            .gate
+    };
+
+    // Every redirect must sit in the same block as its target, or one of the
+    // two assertions below would be asserting nothing.
+    for (old, new) in REDIRECTS {
+        assert_eq!(
+            gate_of(old).ident(),
+            gate_of(new).ident(),
+            "{old} redirects to {new} from a different registration block — it \
+             could outlive its target and forward to a 404"
+        );
+    }
+
+    let open = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        caps_with(every_gated_feature()),
+    ))
+    .await;
+    let closed = spawn_panel(state_with_caps(
+        cfg_authenticated(true),
+        CapabilitySnapshot::unreachable(),
+    ))
+    .await;
+    let c = client();
+    let caps_down = CapabilitySnapshot::unreachable();
+
+    for (old, new) in REDIRECTS {
+        let resp = c
+            .get(format!("{open}{old}"))
+            .bearer_auth(TEST_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            303,
+            "{old} must still answer — a moved page needs a forwarding address"
+        );
+        assert_eq!(
+            resp.headers().get("location").unwrap(),
+            new,
+            "{old} forwards to the wrong place"
+        );
+
+        let status = c
+            .get(format!("{closed}{old}"))
+            .bearer_auth(TEST_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        let expected = if caps_down.allows(gate_of(old)) {
+            303
+        } else {
+            404
+        };
+        assert_eq!(
+            status,
+            expected,
+            "{old} (Gate::{}) must track its target exactly with the handshake \
+             failed — a redirect that outlives its page forwards to a 404",
+            gate_of(old).ident()
         );
     }
 }
@@ -3022,9 +3246,9 @@ fn declaring_row<'a>(table: &'a [RouteSpec], path: &str) -> Option<&'a RouteSpec
 ///
 /// This is the invariant `build_router`'s doc comment states — *"the panel
 /// never renders a button that 404s"* — enforced instead of asserted. The nav
-/// gate above only covers the topnav; this covers in-page affordances, which
-/// is where the interesting version of the bug lives: a page in one tier
-/// (`/tools`, node) carrying a button for a route in another
+/// gate above only covers the drawer and sub-nav; this covers in-page
+/// affordances, which is where the interesting version of the bug lives: a page
+/// in one tier (`/remote/tools`, node) carrying a button for a route in another
 /// (`/tools/sys/controllerdb-*`, `Gate::Controllers`).
 async fn assert_no_page_renders_an_unregistered_target(caps: CapabilitySnapshot, label: &str) {
     let allow_dangerous = true;
@@ -3218,7 +3442,7 @@ async fn htmx_request_gets_a_401_not_a_login_page() {
 async fn browser_navigation_is_redirected_to_login() {
     let base = spawn_panel(state_with(cfg_authenticated(false))).await;
     let resp = client()
-        .get(format!("{base}/dashboard"))
+        .get(format!("{base}/system/processes"))
         .header("accept", "text/html,application/xhtml+xml")
         .send()
         .await
@@ -3238,7 +3462,7 @@ async fn auth_enabled_with_no_token_rejects_everything() {
     };
     let base = spawn_panel(state_with(cfg)).await;
     let c = client();
-    for path in ["/", "/dashboard", "/nav/daemon-status"] {
+    for path in ["/", "/overview", "/nav/daemon-status"] {
         let status = c
             .get(format!("{base}{path}"))
             .bearer_auth("")
@@ -3302,7 +3526,7 @@ async fn unauthenticated_request_never_reaches_the_daemon_bridge() {
     // Two bridge-backed routes: the screenshot proxy (GET) and the log view
     // (GET, `dev_logs`). Both call `BridgeClient`, which attaches the daemon
     // token on every request it makes.
-    for path in ["/dev/screenshot", "/logs/view"] {
+    for path in ["/dev/screenshot", "/system/logs/view"] {
         let status = c
             .get(format!("{base}{path}"))
             .send()
@@ -3322,7 +3546,7 @@ async fn unauthenticated_request_never_reaches_the_daemon_bridge() {
     // Control: the same route WITH credentials does reach the bridge, so the
     // zero above is the auth layer's doing and not a broken bridge client.
     let ok = c
-        .get(format!("{base}/logs/view"))
+        .get(format!("{base}/system/logs/view"))
         .bearer_auth(TEST_TOKEN)
         .send()
         .await

@@ -1,4 +1,4 @@
-//! `/dashboard` (also `/`) — the home page: daemon status, build identity,
+//! `/` (also `/overview`) — the home page: daemon status, build identity,
 //! system telemetry, storage, controllers, and systemd unit states. Degrades
 //! gracefully (never a 500) when the daemon's IPC socket is unreachable.
 
@@ -22,7 +22,7 @@ struct DashboardTemplate {
 /// in by an htmx poll against `/dashboard/tiles`.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(DashboardTemplate {
-        chrome: Chrome::new(&state.caps, "dashboard"),
+        chrome: Chrome::new(&state.caps, "overview"),
     })
 }
 
@@ -160,9 +160,10 @@ struct DashboardTilesTemplate {
     reachable: bool,
     /// The node's `controllers` capability, from the STARTUP snapshot — not
     /// `reachable`, which is this poll's live probe. The two tiles that link
-    /// to `/controllers` must follow registration, not reachability: a panel
-    /// that started while the daemon was down has no `/controllers` route even
-    /// after the daemon comes back and this probe starts succeeding.
+    /// to `/devices/controllers` must follow registration, not reachability: a
+    /// panel that started while the daemon was down has no
+    /// `/devices/controllers` route even after the daemon comes back and this
+    /// probe starts succeeding.
     controllers_enabled: bool,
     status_text: String,
     status_label: String,

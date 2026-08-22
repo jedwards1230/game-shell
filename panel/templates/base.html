@@ -8,46 +8,68 @@
 <script src="/assets/htmx.min.js"></script>
 </head>
 <body>
-<nav class="topnav">
-  <span class="brand">tv-shell panel</span>
-  {# Driven from the capability snapshot resolved at startup, so the nav never
-     links to a route that was not registered — see panel/src/capabilities.rs. #}
-  {% for item in chrome.nav %}
-  <a href="{{ item.href }}" class="{% if chrome.active == item.key %}active{% endif %}">{{ item.label }}</a>
-  {% endfor %}
-  <span class="nav-spacer"></span>
-  <span class="nav-daemon-status" id="nav-daemon-status"
-        hx-get="/nav/daemon-status" hx-trigger="load, every 10s" hx-swap="innerHTML">
-    <span class="dot dot-neutral" title="checking…"></span>daemon
-  </span>
+<div class="app">
+{# Both nav levels are driven from the capability snapshot resolved at startup,
+   so neither can link to a route that was not registered — see
+   panel/src/capabilities.rs. A group with no registered page is absent
+   entirely rather than rendering an empty shell. #}
+<nav class="drawer">
+  <a class="brand" href="/">tv-shell panel</a>
+  <div class="drawer-groups">
+    {% for group in chrome.groups %}
+    <a href="{{ group.href }}" data-group="{{ group.key }}" class="drawer-link{% if group.active %} active{% endif %}">{{ group.label }}</a>
+    {% endfor %}
+  </div>
+  <div class="drawer-footer">
+    <span class="daemon-status" id="daemon-status"
+          hx-get="/nav/daemon-status" hx-trigger="load, every 10s" hx-swap="innerHTML">
+      <span class="dot dot-neutral" title="checking…"></span>daemon
+    </span>
+  </div>
 </nav>
+<div class="view">
+{# No sub-nav bar at all for a group with fewer than two registered pages —
+   `Chrome::new` empties `subnav` in that case, which is what gives Overview
+   its bare content view. #}
+{% if !chrome.subnav.is_empty() %}
+<nav class="subnav">
+  {% for page in chrome.subnav %}
+  <a href="{{ page.href }}" class="{% if chrome.active == page.key %}active{% endif %}">{{ page.label }}</a>
+  {% endfor %}
+</nav>
+{% endif %}
 <main>
 {% if chrome.recovery_mode %}
 <p class="banner banner-error">
   <strong>Recovery mode.</strong>
   {% if chrome.refused_reason.is_empty() %}
   The node did not answer the capability handshake when this panel started, so only the
-  daemon-independent pages are registered — unit restarts, logs, processes, system updates
-  and the wallpaper files. Route registration is fixed at startup, so once the daemon is
+  daemon-independent pages are registered — unit restarts, logs, processes and system
+  updates. Route registration is fixed at startup, so once the daemon is
   back, <strong>restart the panel</strong> to get the rest: use Restart <code>panel</code>
-  on the <a href="/processes">Processes</a> page.
+  on the <a href="/system/processes">Processes</a> page.
   {% else %}
   The node answered but does not speak <code>capabilities</code>
   (<code>{{ chrome.refused_reason }}</code>), so only the daemon-independent pages are
   registered. This usually means <strong>the daemon is older than this panel</strong> —
   restarting the panel will not help. Rebuild and redeploy the daemon (Deploy then Build on
-  the <a href="/dev">Dev</a> page, or <code>scripts/build-daemon.sh</code>), restart it, then
+  the <a href="/dev/recovery">Dev</a> page, or <code>scripts/build-daemon.sh</code>), restart it, then
   restart the panel.
   {% endif %}
 </p>
 {% endif %}
 {% block content %}{% endblock %}
 </main>
+</div>
+</div>
 <script>
-// Mobile nav affordance: the active page link may be scrolled out of view
-// in the horizontally-scrolling topnav (the right-edge fade gradient hints
-// there's more, but doesn't say where "here" is) — center it on load.
-document.querySelector('.topnav a.active')?.scrollIntoView({ inline: 'center' });
+// Narrow-viewport affordance: below the drawer breakpoint both nav levels
+// become horizontally-scrolling strips, so the current entry can start out
+// scrolled off-screen (the right-edge fade gradient hints there's more, but
+// doesn't say where "here" is) — center it on load. Layout itself is pure
+// CSS; this only scrolls.
+document.querySelector('.subnav a.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+document.querySelector('.drawer-link.active')?.scrollIntoView({ inline: 'center', block: 'nearest' });
 </script>
 </body>
 </html>

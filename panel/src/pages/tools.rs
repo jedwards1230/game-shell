@@ -1,4 +1,4 @@
-//! `/tools` — a console over the daemon's read/act IPC surface, grouped by
+//! `/remote/tools` — a console over the daemon's read/act IPC surface, grouped by
 //! domain (Navigation, Apps, Bluetooth, Network, Power, System), plus a raw
 //! escape hatch that sends any single IPC line. Every action's response
 //! renders into the page's shared `#tools-result` panel.
@@ -77,7 +77,7 @@ struct ToolsTemplate {
 /// by an htmx action.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(ToolsTemplate {
-        chrome: Chrome::new(&state.caps, "tools"),
+        chrome: Chrome::new(&state.caps, "remote.tools"),
         intent_quick: INTENT_QUICK,
         overlay_quick: OVERLAY_QUICK,
         settings_slugs: SETTINGS_SLUGS,

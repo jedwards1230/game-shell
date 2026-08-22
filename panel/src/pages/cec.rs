@@ -1,4 +1,4 @@
-//! `/cec` — HDMI-CEC topology (`cec-scan`/`cec-device`), input switching
+//! `/devices/cec` — HDMI-CEC topology (`cec-scan`/`cec-device`), input switching
 //! (`cec-active-source`, per-device `cec-power-on`/`-off`), and the
 //! transmit-wedge health/recovery flow (`cec-health`/`cec-test` plus an
 //! escalating "Recover CEC" ladder: test → restart daemon → full reboot).
@@ -896,7 +896,7 @@ pub async fn render_page(state: &AppState) -> String {
         },
     };
     let tmpl = CecTemplate {
-        chrome: Chrome::new(&state.caps, "cec"),
+        chrome: Chrome::new(&state.caps, "devices.cec"),
         health_section_html,
         osd_effective,
         osd_source,

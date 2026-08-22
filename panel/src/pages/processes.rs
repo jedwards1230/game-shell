@@ -1,4 +1,4 @@
-//! `/processes` — three read surfaces: the three tv-shell systemd user units
+//! `/system/processes` — three read surfaces: the three tv-shell systemd user units
 //! (daemon/shell/panel) with a per-unit restart, Hyprland windows via IPC
 //! (`hypr-active`/`hypr-clients`/`hypr-monitors`), and a read-only top-
 //! processes snapshot via `ps`.
@@ -176,7 +176,7 @@ pub async fn render_page(state: &AppState) -> String {
     let update_job_html = render_update_job(state).await;
 
     let tmpl = ProcessesTemplate {
-        chrome: Chrome::new(&state.caps, "processes"),
+        chrome: Chrome::new(&state.caps, "system.processes"),
         units,
         hypr_available,
         hypr_active: pretty_or_raw(active_res),

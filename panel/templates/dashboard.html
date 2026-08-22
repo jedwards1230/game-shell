@@ -2,12 +2,12 @@
 {% block title %}Dashboard — tv-shell panel{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
-<div id="tiles" hx-get="/dashboard/tiles" hx-trigger="load, every 5s" hx-swap="innerHTML">
+<div id="tiles" hx-get="/overview/tiles" hx-trigger="load, every 5s" hx-swap="innerHTML">
   <p class="muted">Loading…</p>
 </div>
 <!-- Own, much slower poll (checkupdates shouldn't run on the 5s #tiles
      cadence) — see pages::dashboard::updates_tile. -->
-<div id="updates-tile" hx-get="/dashboard/updates-tile" hx-trigger="load, every 300s" hx-swap="innerHTML">
+<div id="updates-tile" hx-get="/overview/updates-tile" hx-trigger="load, every 300s" hx-swap="innerHTML">
   <p class="muted">Loading…</p>
 </div>
 {% endblock %}

@@ -1,4 +1,4 @@
-//! `/controllers` — the gamepad fleet: pads (battery/rumble/test), grab-state
+//! `/devices/controllers` — the gamepad fleet: pads (battery/rumble/test), grab-state
 //! management (`grab`/`release`/`handoff`), a button-binding editor
 //! (`get-bindings`/`set-binding`/`capture-next`/`capture-cancel`), read-only
 //! per-game/per-player binding layers, `set-active-game`, the controller
@@ -461,7 +461,7 @@ pub async fn render_page(state: &AppState) -> String {
     let bindings_section_html = render_bindings_section(state, None).await;
 
     let tmpl = ControllersTemplate {
-        chrome: Chrome::new(&state.caps, "controllers"),
+        chrome: Chrome::new(&state.caps, "devices.controllers"),
         fleet_section_html,
         bindings_section_html,
         per_game_json,

@@ -167,45 +167,38 @@ fn build_router(state: SharedState) -> Router {
     // routes without touching neighboring lines.
     let app = Router::new()
         .route("/", get(pages::dashboard::page))
-        .route("/dashboard", get(pages::dashboard::page))
-        .route("/dashboard/tiles", get(pages::dashboard::tiles)) // htmx poll partial
+        .route("/overview", get(pages::dashboard::page))
+        .route("/overview/tiles", get(pages::dashboard::tiles)) // htmx poll partial
         .route(
-            "/dashboard/updates-tile",
+            "/overview/updates-tile",
             get(pages::dashboard::updates_tile),
         ) // htmx poll partial, own slower interval
-        .route("/processes", get(pages::processes::page))
+        .route("/system/processes", get(pages::processes::page))
         .route("/processes/restart/{key}", post(pages::processes::restart))
         .route(
             "/processes/updates/refresh",
             post(pages::processes::updates_refresh),
         )
         .route("/processes/updates/job", get(pages::processes::updates_job))
-        // Media: the page itself, plus the wallpaper routes the PANEL serves
-        // out of its own filesystem. The upload route raises the body limit
-        // past axum's 2 MB default; `MAX_UPLOAD_BYTES` is still enforced
-        // per-file in the handler. Deliberately NOT gated on
-        // `Feature::Wallpapers`: `daemon/src/ipc.rs::features()` never emits
-        // that (wallpapers belong to QML and to this filesystem tier), so
-        // gating on it would delete a working page from every live node.
-        .route("/media", get(pages::media::page))
-        .route(
-            "/media/wallpaper/upload",
-            post(pages::media::upload).layer(DefaultBodyLimit::max(pages::media::MAX_UPLOAD_BYTES)),
-        )
-        .route("/media/wallpaper/delete", post(pages::media::delete))
-        .route("/media/wallpaper/file", get(pages::media::file))
         // The shell pane comes from the bridge and degrades inline; the daemon
         // pane is `journalctl` via direct exec. So this page reads logs with no
         // node at all and is NOT `Feature::Logs` (which describes the DAEMON's
         // own `GET /dev/logs` and is emitted only with a network bridge).
-        .route("/logs", get(pages::logs::page))
-        .route("/logs/view", get(pages::logs::view)) // htmx refresh partial
-        .route("/dev", get(pages::dev::page))
+        .route("/system/logs", get(pages::logs::page))
+        .route("/system/logs/view", get(pages::logs::view)) // htmx refresh partial
+        .route("/dev/recovery", get(pages::dev::page))
         // Recovery, NOT part of the S5 set: these restart the same two systemd
         // units `POST /processes/restart/{key}` restarts, so gating them while
         // that stays open would buy nothing.
         .route("/dev/restart-daemon", post(pages::dev::restart_daemon))
         .route("/dev/restart-shell", post(pages::dev::restart_shell))
+        // Forwarding addresses for the pre-IA paths. Each redirect sits in the
+        // SAME block as its target, so it can never outlive the page it points
+        // at — see `pages::redirects`.
+        .route("/dashboard", get(pages::redirects::dashboard))
+        .route("/processes", get(pages::redirects::processes))
+        .route("/logs", get(pages::redirects::logs))
+        .route("/dev", get(pages::redirects::dev))
         .route("/nav/daemon-status", get(pages::nav::daemon_status_dot))
         // The four auth-exempt routes (`auth::PUBLIC_PATHS`): the two
         // compiled-in static assets, plus the login form and its submission.
@@ -223,7 +216,8 @@ fn build_router(state: SharedState) -> Router {
     // `/tools/sys/` are in the Controllers block instead — they are the
     // controllers surface reached from a second page.
     let app = if caps.allows(Gate::Node) {
-        app.route("/tools", get(pages::tools::page))
+        app.route("/remote/tools", get(pages::tools::page))
+            .route("/tools", get(pages::redirects::tools))
             .route("/tools/intent", post(pages::tools::intent))
             .route("/tools/key", post(pages::tools::key))
             .route("/tools/apps/list", post(pages::tools::list_apps))
@@ -275,52 +269,59 @@ fn build_router(state: SharedState) -> Router {
             "/tools/sys/controllerdb-refresh",
             post(pages::tools::controllerdb_refresh),
         )
-        .route("/controllers", get(pages::controllers::page))
-        .route("/controllers/grab", post(pages::controllers::grab))
-        .route("/controllers/release", post(pages::controllers::release))
-        .route("/controllers/handoff", post(pages::controllers::handoff))
+        .route("/devices/controllers", get(pages::controllers::page))
+        .route("/controllers", get(pages::redirects::controllers))
+        .route("/devices/controllers/grab", post(pages::controllers::grab))
         .route(
-            "/controllers/pad/battery",
+            "/devices/controllers/release",
+            post(pages::controllers::release),
+        )
+        .route(
+            "/devices/controllers/handoff",
+            post(pages::controllers::handoff),
+        )
+        .route(
+            "/devices/controllers/pad/battery",
             post(pages::controllers::pad_battery),
         )
         .route(
-            "/controllers/pad/rumble-status",
+            "/devices/controllers/pad/rumble-status",
             post(pages::controllers::pad_rumble_status),
         )
         .route(
-            "/controllers/pad/rumble",
+            "/devices/controllers/pad/rumble",
             post(pages::controllers::pad_rumble),
         )
         .route(
-            "/controllers/input-devices",
+            "/devices/controllers/input-devices",
             post(pages::controllers::input_devices),
         )
         .route(
-            "/controllers/bindings/set",
+            "/devices/controllers/bindings/set",
             post(pages::controllers::bindings_set),
         )
         .route(
-            "/controllers/bindings/capture",
+            "/devices/controllers/bindings/capture",
             post(pages::controllers::bindings_capture),
         )
         .route(
-            "/controllers/bindings/capture-cancel",
+            "/devices/controllers/bindings/capture-cancel",
             post(pages::controllers::bindings_capture_cancel),
         )
         .route(
-            "/controllers/active-game/set",
+            "/devices/controllers/active-game/set",
             post(pages::controllers::active_game_set),
         )
         .route(
-            "/controllers/active-game/clear",
+            "/devices/controllers/active-game/clear",
             post(pages::controllers::active_game_clear),
         )
         .route(
-            "/controllers/controllerdb/status",
+            "/devices/controllers/controllerdb/status",
             post(pages::controllers::controllerdb_status),
         )
         .route(
-            "/controllers/controllerdb/refresh",
+            "/devices/controllers/controllerdb/refresh",
             post(pages::controllers::controllerdb_refresh),
         )
     } else {
@@ -335,16 +336,20 @@ fn build_router(state: SharedState) -> Router {
     // `/processes/restart/{key}`) are untouched, so nothing is lost when the
     // page is absent.
     let app = if caps.allows(Gate::Cec) {
-        app.route("/cec", get(pages::cec::page))
-            .route("/cec/scan", post(pages::cec::scan))
-            .route("/cec/device", post(pages::cec::device))
-            .route("/cec/active-source", post(pages::cec::active_source))
-            .route("/cec/power-on", post(pages::cec::power_on))
-            .route("/cec/power-off", post(pages::cec::power_off))
-            .route("/cec/test", post(pages::cec::test))
-            .route("/cec/osd-name", post(pages::cec::save_osd_name))
+        app.route("/devices/cec", get(pages::cec::page))
+            .route("/cec", get(pages::redirects::cec))
+            .route("/devices/cec/scan", post(pages::cec::scan))
+            .route("/devices/cec/device", post(pages::cec::device))
             .route(
-                "/cec/recover/restart-daemon",
+                "/devices/cec/active-source",
+                post(pages::cec::active_source),
+            )
+            .route("/devices/cec/power-on", post(pages::cec::power_on))
+            .route("/devices/cec/power-off", post(pages::cec::power_off))
+            .route("/devices/cec/test", post(pages::cec::test))
+            .route("/devices/cec/osd-name", post(pages::cec::save_osd_name))
+            .route(
+                "/devices/cec/recover/restart-daemon",
                 post(pages::cec::recover_restart_daemon),
             )
     } else {
@@ -353,25 +358,54 @@ fn build_router(state: SharedState) -> Router {
 
     // The per-widget `widgets.<id>` subtree, read and written over IPC.
     let app = if caps.allows(Gate::Widgets) {
-        app.route("/widgets", get(pages::widgets::page))
-            .route("/widgets/save", post(pages::widgets::save))
-            .route("/widgets/reorder/{id}/up", post(pages::widgets::reorder_up))
+        app.route("/shell/widgets", get(pages::widgets::page))
+            .route("/widgets", get(pages::redirects::widgets))
+            .route("/shell/widgets/save", post(pages::widgets::save))
             .route(
-                "/widgets/reorder/{id}/down",
+                "/shell/widgets/reorder/{id}/up",
+                post(pages::widgets::reorder_up),
+            )
+            .route(
+                "/shell/widgets/reorder/{id}/down",
                 post(pages::widgets::reorder_down),
             )
     } else {
         app
     };
 
-    // `get-config` / `set-config`. `/media/wallpaper/select` is here rather
-    // than with the other wallpaper routes because selecting is the one that
-    // WRITES — it persists `wallpaperPath` through `set-config`.
+    // `get-config` / `set-config`, plus the whole Media page.
+    //
+    // The wallpaper routes are served out of the PANEL's own filesystem and
+    // need no node, so they were recovery tier — deliberately not gated on
+    // `Feature::Wallpapers`, which `daemon/src/ipc.rs::features()` never emits
+    // (gating on it would delete a working page from every live node).
+    // `Gate::SettingsStore` is a different claim: the daemon DOES emit
+    // `settings_store`, and picking a wallpaper already required it
+    // (`/media/wallpaper/select` writes `wallpaperPath` through `set-config`).
+    // Gating the whole wallpaper surface together is what lets the Shell group
+    // vanish cleanly in recovery mode instead of rendering a one-page shell,
+    // and it removes two entries from `tests::RECOVERY_TIER_MUTATING`.
+    //
+    // The accepted consequence, documented in `docs/PANEL.md`: **wallpaper
+    // upload is no longer available with the daemon down.**
+    //
+    // The upload route raises the body limit past axum's 2 MB default;
+    // `MAX_UPLOAD_BYTES` is still enforced per-file in the handler.
     let app = if caps.allows(Gate::SettingsStore) {
-        app.route("/settings", get(pages::settings::page))
+        app.route("/shell/settings", get(pages::settings::page))
             .route("/settings/save", post(pages::settings::save))
             .route("/settings/raw", post(pages::settings::save_raw))
+            .route("/shell/media", get(pages::media::page))
+            .route(
+                "/media/wallpaper/upload",
+                post(pages::media::upload)
+                    .layer(DefaultBodyLimit::max(pages::media::MAX_UPLOAD_BYTES)),
+            )
+            .route("/media/wallpaper/delete", post(pages::media::delete))
+            .route("/media/wallpaper/file", get(pages::media::file))
             .route("/media/wallpaper/select", post(pages::media::select))
+            .route("/settings", get(pages::redirects::settings))
+            .route("/media", get(pages::redirects::media))
     } else {
         app
     };

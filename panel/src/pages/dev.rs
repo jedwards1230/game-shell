@@ -1,4 +1,4 @@
-//! `/dev` — the operator recovery page: deploy/build/restart/reboot/suspend
+//! `/dev/recovery` — the operator recovery page: deploy/build/restart/reboot/suspend
 //! actions. Deploy/build/restart-daemon/restart-shell prefer the daemon HTTP
 //! bridge and fall back to direct exec when the bridge is unconfigured or
 //! unreachable (deploy has no exec equivalent — it needs the daemon's own
@@ -51,7 +51,7 @@ pub async fn render_page(state: &AppState) -> String {
     let daemon_chip_html = render_unit_chip(state, "daemon", config::daemon_unit(), false).await;
     let shell_chip_html = render_unit_chip(state, "shell", config::shell_unit(), false).await;
     let tmpl = DevTemplate {
-        chrome: Chrome::new(&state.caps, "dev"),
+        chrome: Chrome::new(&state.caps, "dev.recovery"),
         daemon_up,
         bridge_configured: state.cfg.http_bridge_base.is_some(),
         daemon_chip_html,
@@ -389,8 +389,8 @@ mod tests {
             "expected an OOB shell unit chip refresh: {html}"
         );
         assert!(
-            html.contains(r#"id="nav-daemon-status""#),
-            "expected an OOB nav-dot refresh: {html}"
+            html.contains(r#"id="daemon-status""#),
+            "expected an OOB drawer-footer dot refresh: {html}"
         );
     }
 

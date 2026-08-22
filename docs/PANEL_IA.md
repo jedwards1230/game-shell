@@ -222,11 +222,17 @@ group whose pages all gated off must not render an empty shell. Rules:
 1. A **page** gates exactly as now — not registered, 404, absent from sub-nav.
 2. A **group** renders iff at least one of its pages registered.
 3. A group's drawer link targets its first *registered* page, not a fixed default.
+4. A group with fewer than two registered pages renders **no sub-nav bar** —
+   which is what gives Overview no tabs, without special-casing it.
 
-In recovery mode (handshake failed, recovery tier only) the drawer collapses to
-**System** and **Dev** — which is the correct answer: those are exactly the
-daemon-independent surfaces, and the operator lands on the two groups that can
-still fix things.
+~~In recovery mode (handshake failed, recovery tier only) the drawer collapses to
+**System** and **Dev**.~~ **Corrected in phase 1:** the drawer collapses to
+**Overview + System + Dev**. Overview is recovery tier — `/` is the landing page
+and its tiles already have a daemon-down branch that reads unit state straight
+from `systemd`, so deleting the group would leave `/` 404ing or force a
+conditional root redirect, which is strictly worse than a three-group drawer.
+Shell, Devices and Remote do all vanish, per rule 2. See PANEL.md's
+[Capability gating](PANEL.md#capability-gating).
 
 ## Phasing
 
@@ -234,7 +240,7 @@ Each phase ships independently and leaves the panel working.
 
 | Phase | Scope | Depends on | Issue |
 |---|---|---|---|
-| **1** | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — | #405 |
+| **1** ✅ landed | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — | #405 |
 | **2** | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
 | **3** | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC. | 1 | #407 |
 | **4** | Dissolve **Media** and **Tools** → Shell/*, Devices/Network, Remote/*, Dev/Console. | 1, 3 | #408 |
@@ -247,8 +253,10 @@ the structure feels wrong in use.
 
 ## Open questions
 
-- **Drawer on narrow viewports.** The panel is used from a phone often enough to
-  matter. Collapse to a hamburger below ~700px, or an icon-only rail?
+- ~~**Drawer on narrow viewports.**~~ **Settled in phase 1:** below 700px the
+  drawer collapses to a horizontal strip above the content — no JavaScript, and
+  both strips scroll within themselves so the page never scrolls sideways. A
+  hamburger would need a build step the panel does not have.
 - **Sub-nav persistence.** Returning to a group — land on its first page every
   time, or remember the last page visited within it?
 - **`managed_units` beyond restart.** Start/stop are strictly more dangerous than

@@ -1,4 +1,4 @@
-//! `/media` — operator management of the two content surfaces the couch UI
+//! `/shell/media` — operator management of the two content surfaces the couch UI
 //! can't manage itself:
 //!
 //! * **Wallpapers** — upload image files into `~/.config/tv-shell/wallpapers/`,
@@ -253,7 +253,7 @@ pub async fn render_page(state: &AppState) -> String {
     };
 
     let tmpl = MediaTemplate {
-        chrome: Chrome::new(&state.caps, "media"),
+        chrome: Chrome::new(&state.caps, "shell.media"),
         daemon_up,
         wallpapers,
         wallpapers_dir: dir.display().to_string(),

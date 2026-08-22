@@ -2,6 +2,9 @@
 //! `dev`, `settings`, `widgets`, `tools`, `processes` (M1-M3), plus
 //! `controllers` and `cec` (M4) — the last two callers of the "coming in a
 //! later milestone" stub, which is removed along with them.
+//!
+//! `redirects` is not a page: it holds the forwarding addresses from the
+//! pre-IA paths (`docs/PANEL_IA.md` phase 1).
 
 pub mod cec;
 pub mod controllers;
@@ -12,6 +15,7 @@ pub mod logs;
 pub mod media;
 pub mod nav;
 pub mod processes;
+pub mod redirects;
 pub mod settings;
 pub mod tools;
 pub mod widgets;

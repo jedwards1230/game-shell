@@ -5,7 +5,7 @@
      carries useful state, so it degrades to a plain div rather than vanishing
      — unlike the Controllers tile below, which has nothing else to say. #}
   {% if controllers_enabled %}
-  <a class="tile" href="/controllers">
+  <a class="tile" href="/devices/controllers">
     <h3>Input daemon</h3>
     <p class="big"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
     <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
@@ -17,25 +17,25 @@
     <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
   </div>
   {% endif %}
-  <a class="tile" href="/dev">
+  <a class="tile" href="/dev/recovery">
     <h3>Build</h3>
     <p>{{ version }}</p>
     <p class="muted">{{ sha }} · {{ branch }}</p>
   </a>
-  <a class="tile" href="/processes">
+  <a class="tile" href="/system/processes">
     <h3>System</h3>
     <p>{{ os }}</p>
     <p class="muted">kernel {{ kernel }}</p>
     <p class="muted">host {{ hostname }}</p>
     <p class="muted">up {{ uptime }}</p>
   </a>
-  <a class="tile" href="/processes">
+  <a class="tile" href="/system/processes">
     <h3>Resources</h3>
     <p>CPU {{ cpu_pct }}%</p>
     <p>Mem {{ mem_used }} / {{ mem_total }} ({{ mem_pct }}%)</p>
     <p>Load1 {{ load1 }}</p>
   </a>
-  <a class="tile" href="/processes">
+  <a class="tile" href="/system/processes">
     <h3>Temperatures</h3>
     {% if temps.is_empty() %}
     <p class="muted">none reported</p>
@@ -43,7 +43,7 @@
     {% for t in temps %}<p>{{ t.label }}: {{ t.celsius }}&deg;C</p>{% endfor %}
     {% endif %}
   </a>
-  <a class="tile" href="/processes">
+  <a class="tile" href="/system/processes">
     <h3>Storage</h3>
     {% if mounts.is_empty() %}
     <p class="muted">no mounts reported</p>
@@ -57,7 +57,7 @@
     {% endif %}
   </a>
   {% if controllers_enabled %}
-  <a class="tile" href="/controllers">
+  <a class="tile" href="/devices/controllers">
     <h3>Controllers</h3>
     {% if pads.is_empty() %}
     <p class="muted">none connected</p>
@@ -68,7 +68,7 @@
     {% endif %}
   </a>
   {% endif %}
-  <a class="tile" href="/processes">
+  <a class="tile" href="/system/processes">
     <h3>Units</h3>
     <p><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }} <span class="muted">({{ daemon_unit.raw }})</span></p>
     <p><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }} <span class="muted">({{ shell_unit.raw }})</span></p>
@@ -86,6 +86,6 @@
       <p><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }} <span class="muted">({{ panel_unit.raw }})</span></p>
     </div>
   </div>
-  <p><a href="/dev">Go to the Dev page for recovery actions →</a></p>
+  <p><a href="/dev/recovery">Go to the Dev page for recovery actions →</a></p>
 </div>
 {% endif %}

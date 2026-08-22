@@ -1,4 +1,4 @@
-//! `/settings` — typed forms over `settings.json` via the daemon's
+//! `/shell/settings` — typed forms over `settings.json` via the daemon's
 //! `get-config`/`set-config` IPC commands (shallow merge; the daemon remains
 //! the sole writer of `settings.json`), plus a read-only view of the
 //! daemon-owned binding keys, a read-only `config.toml` viewer, and a raw
@@ -342,7 +342,7 @@ pub async fn render_page(state: &AppState) -> String {
 }
 
 fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
-    let chrome = Chrome::new(caps, "settings");
+    let chrome = Chrome::new(caps, "shell.settings");
     let (config_toml, config_toml_path) = read_config_toml();
     let tmpl = SettingsTemplate {
         chrome,
@@ -363,7 +363,7 @@ fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
 }
 
 fn render_degraded(caps: &CapabilitySnapshot) -> String {
-    let chrome = Chrome::new(caps, "settings");
+    let chrome = Chrome::new(caps, "shell.settings");
     let (config_toml, config_toml_path) = read_config_toml();
     let tmpl = SettingsTemplate {
         chrome,
