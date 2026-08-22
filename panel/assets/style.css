@@ -436,6 +436,22 @@ table {
   font-size: 0.9rem;
 }
 
+/* Below the drawer breakpoint a table scrolls WITHIN ITSELF rather than
+   pushing the page sideways. `display: block` makes the `<table>` element a
+   block scroll container while its rows and cells keep their internal table
+   display types (an anonymous table box is generated inside), so it still
+   renders as a table — it just clips to the viewport. Applied to the element
+   rather than a wrapper class so it covers the tables built in Rust
+   (`.tools-table` in pages::network / pages::launcher) as well as the ones in
+   templates. `#controllers-bindings table` has its own stacked-card reflow at
+   800px and wins on specificity, which is what we want. */
+@media (max-width: 700px) {
+  table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
 th,
 td {
   text-align: left;
@@ -858,10 +874,19 @@ textarea {
   margin-bottom: 0.75rem;
 }
 
+/* `flex-wrap: wrap` + `max-width: 100%` are what keep a multi-field row from
+   pushing the PAGE sideways on a phone. `.field-wide`'s `min-width: 12rem`
+   floors each field at ~192px, so two of them plus a button have a min-content
+   width around 610px — well past a 380px viewport, and an inline-flex row that
+   cannot wrap simply overflows its container. Wrapping costs a row of height;
+   overflowing costs a button you can only reach by scrolling the page
+   sideways, which is the failure this IA refresh set out to remove. */
 .inline-form {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
+  max-width: 100%;
   margin-bottom: 0.75rem;
 }
 

@@ -62,7 +62,10 @@
     <!--wallpaper-list-start-->
     {% if wallpapers.is_empty() %}
     <p class="muted">No wallpapers yet — upload one above.</p>
-    {% else %}
+    {% endif %}
+    {# The None tile renders even with an empty grid: it is the only control
+       that CLEARS `wallpaperPath`, and hiding it stranded anyone whose
+       configured path no longer resolves to a file on the box. #}
     <div class="wallpaper-grid">
       <div class="wallpaper-tile {% if !any_selected %}wallpaper-selected{% endif %}">
         <div class="wallpaper-none">None<br><span class="muted">(solid colour)</span></div>
@@ -94,7 +97,6 @@
       </div>
       {% endfor %}
     </div>
-    {% endif %}
     <!--wallpaper-list-end-->
   </div>
 </section>
