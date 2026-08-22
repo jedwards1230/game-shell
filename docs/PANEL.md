@@ -98,6 +98,12 @@ page constructs one from a live node — that is the node switcher,
 
 ## Pages
 
+> **A redesign of this structure is proposed** in [PANEL_IA.md](PANEL_IA.md):
+> a left drawer for six subject groups with a horizontal sub-nav inside each,
+> dissolving the Settings/Media/Tools grab-bag pages and adding a Services page
+> for system units (`sshd` et al.). The table below is what is built today.
+
+
 | Page | Contents |
 |---|---|
 | Dashboard | unit status, build info, system/storage tiles, pad fleet, quick actions, an Updates tile (own slow poll — see [System updates](#system-updates-pacman) below) |
