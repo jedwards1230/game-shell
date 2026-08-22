@@ -232,14 +232,14 @@ still fix things.
 
 Each phase ships independently and leaves the panel working.
 
-| Phase | Scope | Depends on |
-|---|---|---|
-| **1** | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — |
-| **2** | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 |
-| **3** | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC. | 1 |
-| **4** | Dissolve **Media** and **Tools** → Shell/*, Devices/Network, Remote/*, Dev/Console. | 1, 3 |
-| **5** | Services: read any unit; `managed_units` config; sudoers generation in the ansible role; danger-tier confirms. | 2 |
-| **6** | Overview rebuilt as pure read-only tiles with deep links. | 2-5 |
+| Phase | Scope | Depends on | Issue |
+|---|---|---|---|
+| **1** | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — | #405 |
+| **2** | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
+| **3** | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC. | 1 | #407 |
+| **4** | Dissolve **Media** and **Tools** → Shell/*, Devices/Network, Remote/*, Dev/Console. | 1, 3 | #408 |
+| **5** | Services: read any unit; `managed_units` config; sudoers generation in the ansible role; danger-tier confirms. | 2 | #409 |
+| **6** | Overview rebuilt as pure read-only tiles with deep links. | 2-5 | #410 |
 
 Phase 1 is deliberately mechanical — it changes navigation without changing any
 page's content, so it can be reviewed as a routing change and reverted cleanly if
