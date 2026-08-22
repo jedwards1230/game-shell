@@ -49,6 +49,23 @@ body {
   line-height: 1.5;
 }
 
+/* The two-level chrome (docs/PANEL_IA.md): a persistent left drawer for the
+   subject groups, and a horizontal sub-nav inside the content view for the
+   pages of the active group. `min-width: 0` on the view is load-bearing — a
+   flex item defaults to `min-width: auto`, so a wide table or `<pre>` inside
+   the content would otherwise push the whole page sideways instead of
+   scrolling within its own panel. */
+.app {
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+}
+
+.view {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 main {
   max-width: 1100px;
   margin: 0 auto;
@@ -60,9 +77,28 @@ h1 {
   margin: 0 0 1rem;
 }
 
+/* The top margin is load-bearing, not decoration. `pre` has no bottom margin
+   (it is usually the last thing in a section), so with `margin-top: 0` a
+   heading that FOLLOWED a code block sat flush against it and read as part of
+   it — on the old Settings page both "config.toml" and "Raw JSON escape hatch"
+   collided that way, and the second was easy to miss entirely. This is a
+   margin rather than padding so it collapses with the previous element's own
+   bottom margin: after a `<p>` the gap is max(1em, 1.25rem), never the sum. */
 h2 {
   font-size: 1.1rem;
-  margin: 0 0 0.5rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+/* …but only when there is something above to separate FROM. A heading that
+   opens its container has nothing, and inside a padded box (`.log-panel`) the
+   margin cannot collapse through the padding edge, so it would stack on top of
+   it as a double gap. Section headings (`.controllers-section`,
+   `.tools-section`, `.processes-section`) are all first-child too, so they keep
+   exactly the spacing they had; giving those four section classes a shared
+   rhythm is the normalization pass this file's later comment defers, not
+   something to smuggle in here. */
+h2:first-child {
+  margin-top: 0;
 }
 
 h3 {
@@ -86,33 +122,100 @@ a:hover {
   color: var(--text-muted);
 }
 
-.big {
-  font-size: 1.2rem;
-  font-weight: 600;
+
+/* ── Drawer (primary nav) ────────────────────────────────────────────── */
+
+.drawer {
+  position: sticky;
+  top: 0;
+  z-index: 11;
+  flex: 0 0 12rem;
+  align-self: flex-start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem;
+  background: var(--bg-alt);
+  border-right: 1px solid var(--border);
 }
 
-/* ── Top nav ─────────────────────────────────────────────────────────── */
+.drawer .brand {
+  font-weight: 700;
+  color: var(--text);
+  padding: 0.35rem 0.6rem;
+  margin-bottom: 0.75rem;
+  white-space: nowrap;
+}
 
-.topnav {
+.drawer .brand:hover {
+  text-decoration: none;
+}
+
+.drawer-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.drawer-link {
+  color: var(--text-muted);
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+
+.drawer-link:hover {
+  color: var(--text);
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.drawer-link.active {
+  color: var(--text);
+  background: rgba(79, 140, 255, 0.15);
+}
+
+/* Pinned to the bottom of the drawer: live daemon reachability, polled every
+   ~10s (see pages::nav). Deliberately separated from the group links — nav
+   *shape* is the startup capability snapshot, this dot is right now. */
+.drawer-footer {
+  margin-top: auto;
+  padding: 0.6rem 0.6rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.daemon-status {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* ── Sub-nav (pages of the active group) ─────────────────────────────── */
+
+.subnav {
   position: sticky;
   top: 0;
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
+  gap: 0.25rem;
+  padding: 0.6rem 1rem;
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
   white-space: nowrap;
 }
 
-/* Mobile nav affordance (#8): a right-edge fade gradient hints there are
-   more links to scroll to when the nav overflows its width — `.topnav`'s
-   own `position: sticky` already establishes the positioning context this
-   overlay pins to. `pointer-events: none` so it never blocks a tap on the
-   link underneath it. */
-.topnav::after {
+/* Narrow-viewport affordance (#8): a right-edge fade gradient hints there are
+   more tabs to scroll to when the bar overflows its width — `.subnav`'s own
+   `position: sticky` already establishes the positioning context this overlay
+   pins to. `pointer-events: none` so it never blocks a tap on the link
+   underneath it. */
+.subnav::after {
   content: "";
   position: absolute;
   top: 0;
@@ -123,39 +226,78 @@ a:hover {
   background: linear-gradient(to right, transparent, var(--bg-alt));
 }
 
-.topnav .brand {
-  font-weight: 700;
-  margin-right: 0.5rem;
-  color: var(--text);
-}
-
-.topnav a {
+.subnav a {
   color: var(--text-muted);
   padding: 0.35rem 0.6rem;
   border-radius: var(--radius);
 }
 
-.topnav a:hover {
+.subnav a:hover {
   color: var(--text);
   text-decoration: none;
   background: rgba(255, 255, 255, 0.05);
 }
 
-.topnav a.active {
+.subnav a.active {
   color: var(--text);
   background: rgba(79, 140, 255, 0.15);
 }
 
-.nav-spacer {
-  flex: 1 1 auto;
-}
+/* Narrow viewports: the drawer becomes a horizontal strip above the content
+   rather than a column beside it. No JavaScript — the panel has no build step,
+   and a hamburger would need one.
 
-.nav-daemon-status {
-  display: flex;
-  align-items: center;
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  white-space: nowrap;
+   The strip WRAPS rather than scrolling. An earlier revision scrolled it
+   (`overflow-x: auto`), which kept the page itself free of a horizontal
+   scrollbar but hid the last two groups and the daemon dot off the right edge
+   at 380px with no fade, chevron or scrollbar to say so — a nav level you
+   cannot see is a nav level you do not have. Wrapping costs a row of height
+   and hides nothing. The sub-nav below still scrolls: its tabs are one group's
+   pages, all reachable from the page you are already on, so a hidden tab is a
+   smaller loss than a hidden group. */
+@media (max-width: 700px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .drawer {
+    /* Not sticky here: the sub-nav below it is, and two bars pinned to
+       `top: 0` would stack on top of each other. The drawer scrolls away, the
+       sub-nav stays. */
+    position: static;
+    flex: 0 0 auto;
+    align-self: stretch;
+    height: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.5rem 0.75rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .drawer .brand {
+    margin-bottom: 0;
+    margin-right: 0.25rem;
+  }
+
+  .drawer-groups {
+    /* `1 1 auto` + wrap: the group links flow onto a second row rather than
+       being squashed or pushed out of sight. */
+    flex: 1 1 auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow-y: visible;
+  }
+
+  .drawer-footer {
+    margin-top: 0;
+    margin-left: auto;
+    padding: 0 0 0 0.6rem;
+    border-top: none;
+    border-left: 1px solid var(--border);
+  }
 }
 
 /* ── State dots ──────────────────────────────────────────────────────── */
@@ -185,6 +327,46 @@ a:hover {
   background: var(--text-muted);
 }
 
+/* A dot and the status word it colors are ONE unit of meaning (#6 — color is
+   never allowed to stand alone). The dot is an inline-block and the word is
+   ordinary text, so in a narrow column the line would otherwise break between
+   them and leave an orphan dot at the end of the previous line. Every dot+label
+   pair — Services table, Overview units tile, Dev unit chips — renders inside
+   one of these. */
+.unit-chip {
+  white-space: nowrap;
+}
+
+/* Why a unit is failed, under its state chip in the Services table. Wraps
+   (unlike the chip) — a systemd failure line is prose and clipping it would
+   hide the one thing the row is there to tell you. */
+.unit-failure {
+  margin-top: 0.2rem;
+  font-size: 0.85em;
+  color: var(--error);
+  white-space: normal;
+}
+
+/* The Services page's arbitrary-unit read result. Boxed so it is visibly a
+   response to the form above it rather than another table on the page. */
+.unit-inspect {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-alt);
+}
+
+.unit-inspect h3 {
+  margin-top: 0;
+}
+
+.unit-inspect th {
+  width: 9rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
 /* ── Tiles ───────────────────────────────────────────────────────────── */
 
 .tile-grid {
@@ -192,6 +374,22 @@ a:hover {
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 1rem;
   margin: 1rem 0;
+}
+
+/* Overview fills ONE grid from three htmx poll targets on three different
+   cadences. An htmx target has to be a real element, and a real element inside
+   a grid is a grid CELL — which is what used to put the separately-polled
+   Updates tile alone on its own row instead of flowing into the grid beside
+   its neighbours. `display: contents` makes the wrapper disappear from layout
+   so the tiles it swaps in become direct children of `.tile-grid`. */
+.tile-slot {
+  display: contents;
+}
+
+/* For the things inside the grid that are NOT tiles — the daemon-unreachable
+   banner — so they take the full row instead of one 220px column. */
+.tile-span {
+  grid-column: 1 / -1;
 }
 
 .tile,
@@ -217,6 +415,23 @@ a.tile:hover {
 
 .tile p {
   margin: 0.15rem 0;
+}
+
+/* A tile's ONE headline value — the daemon's status, the build version, the OS,
+   the CPU figure, the pending-update count. One class used the same way on
+   every tile that has a single leading value, so no tile's primary line renders
+   at a different weight or size from its neighbours' (the Input Daemon tile
+   used to, at 1.2rem/600 against everything else's plain body text, and wrapped
+   to two lines at 1440px because of it). Tiles whose body is a LIST rather than
+   one value — Temperatures, Storage, Controllers, Units — have no headline and
+   deliberately carry no `.tile-value`. */
+.tile-value {
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+  /* A tile is a fixed grid cell with `overflow: visible`, so an unbreakable
+     value (a long version string, a device name with no spaces) would run out
+     over the tile beside it rather than being clipped or scrolled. Break it. */
+  overflow-wrap: anywhere;
 }
 
 /* ── Banners ─────────────────────────────────────────────────────────── */
@@ -248,6 +463,22 @@ table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.9rem;
+}
+
+/* Below the drawer breakpoint a table scrolls WITHIN ITSELF rather than
+   pushing the page sideways. `display: block` makes the `<table>` element a
+   block scroll container while its rows and cells keep their internal table
+   display types (an anonymous table box is generated inside), so it still
+   renders as a table — it just clips to the viewport. Applied to the element
+   rather than a wrapper class so it covers the tables built in Rust
+   (`.tools-table` in pages::network / pages::launcher) as well as the ones in
+   templates. `#controllers-bindings table` has its own stacked-card reflow at
+   800px and wins on specificity, which is what we want. */
+@media (max-width: 700px) {
+  table {
+    display: block;
+    overflow-x: auto;
+  }
 }
 
 th,
@@ -393,20 +624,41 @@ th {
 pre {
   margin: 0;
   padding: 0.6rem;
-  background: #0e1013;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.82rem;
   white-space: pre;
   overflow-x: auto;
+  /* Long dumps (config.toml, the daemon-owned key subtrees, a controllerdb
+     status blob) scroll inside the block rather than pushing the rest of the
+     page down. */
   max-height: 60vh;
   overflow-y: auto;
+  /* …and they SAY they scroll. The two solid layers are `local`, so they
+     travel with the content and uncover an edge shadow only once that edge has
+     something past it; the two radial shadows are `scroll`, pinned to the
+     block. Net effect: a shadow at the top/bottom edge exactly when there is
+     more in that direction, and nothing at all when the content fits. Pure
+     CSS — the panel has no build step and this must work with JS off. */
+  background:
+    linear-gradient(#0e1013 30%, rgba(14, 16, 19, 0)) top / 100% 1.2rem no-repeat local,
+    linear-gradient(rgba(14, 16, 19, 0), #0e1013 70%) bottom / 100% 1.2rem no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0))
+      top / 100% 0.45rem no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0))
+      bottom / 100% 0.45rem no-repeat scroll,
+    #0e1013;
 }
 
 /* ── Forms / buttons ─────────────────────────────────────────────────── */
 
+/* Every free-text input type the panel actually uses. `url` was missing and
+   rendered with the browser's default white chrome next to a correctly dark
+   `text` field on the Add-web-app form — the only `type="url"` in the panel,
+   which is exactly how it went unnoticed. */
 input[type="text"],
+input[type="url"],
 input[type="number"] {
   background: var(--bg);
   color: var(--text);
@@ -637,7 +889,13 @@ textarea {
   line-height: 1;
 }
 
-/* ── Tools page ──────────────────────────────────────────────────────── */
+/* ── IPC console sections ─────────────────────────────────────────────
+   Shared by the pages the Tools console dissolved into (Devices ▸ Network,
+   Remote ▸ Navigation/Launcher, Dev ▸ Console) plus Shell ▸ Appearance and
+   Apps. The class name is kept as-is on purpose: renaming the four
+   synonymous section classes is a normalization pass of its own (see the
+   note below), and folding it into an IA phase would hide a behavioural
+   change inside a rename. */
 
 .tools-section {
   margin-bottom: 1.5rem;
@@ -650,10 +908,19 @@ textarea {
   margin-bottom: 0.75rem;
 }
 
+/* `flex-wrap: wrap` + `max-width: 100%` are what keep a multi-field row from
+   pushing the PAGE sideways on a phone. `.field-wide`'s `min-width: 12rem`
+   floors each field at ~192px, so two of them plus a button have a min-content
+   width around 610px — well past a 380px viewport, and an inline-flex row that
+   cannot wrap simply overflows its container. Wrapping costs a row of height;
+   overflowing costs a button you can only reach by scrolling the page
+   sideways, which is the failure this IA refresh set out to remove. */
 .inline-form {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
+  max-width: 100%;
   margin-bottom: 0.75rem;
 }
 
@@ -691,19 +958,24 @@ textarea {
   color: var(--warn);
 }
 
-/* ── Processes page ──────────────────────────────────────────────────── */
+/* ── System group: Services / Processes / Updates ─────────────────────
+   Section spacing, shared by the three pages the old Processes page split
+   into. The name is kept as-is on purpose: renaming the four synonymous
+   section classes (`.processes-section`, `.tools-section`, `.settings-group`,
+   `.controllers-section`) is a normalization pass of its own, and folding it
+   into an IA phase would hide a behavioural change inside a rename. */
 
 .processes-section {
   margin-bottom: 1.5rem;
 }
 
-/* ── Dev page screenshot ─────────────────────────────────────────────── */
+/* ── Dev ▸ Screenshot ────────────────────────────────────────────────── */
 
 .dev-screenshot {
   margin-top: 1.5rem;
 }
 
-/* ── Tools page: probe vs mutate button distinction (#10) ───────────────
+/* ── Probe vs mutate button distinction (#10) ──────────────────────────
    Read-only probe buttons (status/list/metrics reads) get an outline
    style; buttons that change daemon/system state get a tinted/filled
    style — so scanning the page communicates "safe to click" vs "this does
@@ -765,7 +1037,7 @@ button.btn-mutate:hover {
   margin-top: 0.5rem;
 }
 
-/* --- Media page: wallpaper grid ------------------------------------------
+/* --- Shell > Appearance: wallpaper grid ----------------------------------
    Fixed-ratio tiles so a mixed bag of aspect ratios still lines up, and the
    grid reflows to a single column on a phone (the panel's mobile target). */
 .wallpaper-grid {
@@ -826,7 +1098,7 @@ button.btn-mutate:hover {
   margin: 0;
 }
 
-/* Sign-in page (login.html) — a standalone surface with no topnav, so it
+/* Sign-in page (login.html) — a standalone surface with no drawer or sub-nav, so it
    centers its own narrow column instead of inheriting the app-shell layout. */
 .login-main {
   max-width: 26rem;

@@ -1,6 +1,23 @@
-//! `/dashboard` (also `/`) — the home page: daemon status, build identity,
+//! `/` (also `/overview`) — the home page: daemon status, build identity,
 //! system telemetry, storage, controllers, and systemd unit states. Degrades
 //! gracefully (never a 500) when the daemon's IPC socket is unreachable.
+//!
+//! **Read-only, entirely** (`docs/PANEL_IA.md` phase 6). Once every action
+//! moved into the group that owns its subject, Overview's job became *is
+//! everything healthy right now, and where do I go to fix what isn't* — so it
+//! renders tiles and nothing else. No form, no button, no `hx-post` on the
+//! page or in any of its partials; each tile is a whole-tile link to the page
+//! that owns its subject. `tests::overview_renders_no_mutating_control` pins it.
+//!
+//! Three poll targets, one grid. `dashboard.html` owns the `.tile-grid` and
+//! each fragment swaps bare tiles into a `display: contents` slot inside it,
+//! so three cadences still produce one grid rather than three stacked ones:
+//!
+//! | fragment | route | interval | why |
+//! |---|---|---|---|
+//! | [`tiles`] | `/overview/tiles` | 5s | IPC reads + 3 fixed `systemctl is-active` |
+//! | [`services_tile`] | `/overview/services-tile` | 30s | one `systemctl show` per configured unit |
+//! | [`updates_tile`] | `/overview/updates-tile` | 300s | `checkupdates` is expensive |
 
 use askama::Template;
 use axum::extract::State;
@@ -18,26 +35,48 @@ struct DashboardTemplate {
     chrome: Chrome,
 }
 
-/// `GET /` and `GET /dashboard` — the page shell. The tile region is filled
-/// in by an htmx poll against `/dashboard/tiles`.
+/// `GET /` and `GET /overview` — the page shell: one `.tile-grid` holding the
+/// three htmx poll targets that fill it (`/overview/tiles`,
+/// `/overview/services-tile`, `/overview/updates-tile`).
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(DashboardTemplate {
-        chrome: Chrome::new(&state.caps, "dashboard"),
+        chrome: Chrome::new(&state.caps, "overview"),
     })
 }
 
-/// `GET /dashboard/tiles` — the polled partial.
+/// `GET /overview/tiles` — the fast (5s) polled partial.
 pub async fn tiles(State(state): State<SharedState>) -> impl IntoResponse {
     Html(render_tiles(&state).await)
 }
 
-/// `GET /dashboard/updates-tile` — the Updates tile's own, much slower poll
+/// `GET /overview/updates-tile` — the Updates tile's own, much slower poll
 /// (`every 300s` — see `dashboard.html`), kept separate from the main
 /// `#tiles` 5s poll specifically so `checkupdates` never runs on that fast
 /// cadence. Uses the cached (≤5 min old) snapshot; a manual Refresh lives on
-/// the Processes page's System Updates section, not here.
+/// System ▸ Updates, not here — Overview mutates nothing.
 pub async fn updates_tile(State(state): State<SharedState>) -> impl IntoResponse {
     Html(render_updates_tile(&state).await)
+}
+
+/// `GET /overview/services-tile` — the system-services tile,
+/// `[panel].managed_units` at a glance (`docs/PANEL_IA.md` phase 6: "is sshd
+/// up" is the question that motivated System ▸ Services, so it belongs on the
+/// health screen).
+///
+/// **Its own 30s poll rather than the 5s `#tiles` one.** The tile costs one
+/// `systemctl show` *per configured unit*, and unlike the three built-in
+/// tv-shell units on the Units tile — a fixed cost of three cheap
+/// `is-active` calls — `managed_units` is operator-set and unbounded, so on
+/// the fast poll the panel's steady-state subprocess rate would be decided by
+/// a config file rather than by the panel. A ten-unit allowlist would mean
+/// two `systemctl show` spawns a second, forever, on an HTPC. 30s is well
+/// inside the window in which anyone would notice a service died, and the
+/// page you go to when it did (System ▸ Services) reads fresh on every load.
+/// Cheap and unbounded is still unbounded — same reasoning as the Updates
+/// tile's 300s, one cadence up because a dead `sshd` is more urgent than a
+/// pending package.
+pub async fn services_tile(State(state): State<SharedState>) -> impl IntoResponse {
+    Html(render_services_tile(&state).await)
 }
 
 #[derive(Template)]
@@ -55,6 +94,63 @@ async fn render_updates_tile(state: &AppState) -> String {
         reboot_needed: matches!(snap.reboot, crate::updates::RebootStatus::Needed),
         error: snap.error.unwrap_or_default(),
     };
+    tmpl.render()
+        .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
+}
+
+/// One `[panel].managed_units` row on the system-services tile: the operator's
+/// own key as the label, plus the shared dot/word pair.
+struct ManagedUnitView {
+    label: String,
+    dot_class: &'static str,
+    word: &'static str,
+    /// The raw `ActiveState`, rendered only when it differs from `word`.
+    raw: String,
+}
+
+#[derive(Template)]
+#[template(path = "dashboard_services_tile.html")]
+struct DashboardServicesTileTemplate {
+    units: Vec<ManagedUnitView>,
+}
+
+/// Read every configured managed unit's state. Daemon-independent by
+/// construction — `systemctl show` and nothing else — which is why this tile
+/// needs no reachable/degraded branch and keeps rendering when the daemon is
+/// down.
+///
+/// Each read degrades to an empty [`super::units::UnitStatus`] on any exec
+/// failure, so an unreadable unit shows as `unknown` rather than taking the
+/// tile down. Renders an explicit empty state (naming the config key) when
+/// nothing is configured, which is the default and every node's state today.
+pub async fn render_services_tile(state: &AppState) -> String {
+    let mut units = Vec::with_capacity(state.cfg.managed_units.len());
+    for target in &state.cfg.managed_units {
+        let status = match state
+            .recovery
+            .show_unit(target.scope(), target.unit())
+            .await
+        {
+            Ok(raw) => super::units::parse_show(&raw),
+            Err(_) => super::units::UnitStatus::default(),
+        };
+        let (dot_class, word) = super::units::unit_dot(&status.active_state);
+        // An unreadable unit answers with no `ActiveState` at all; render the
+        // word `unit_dot` already chose for it rather than an empty `()`.
+        let raw = if status.active_state.is_empty() {
+            word.to_string()
+        } else {
+            status.active_state
+        };
+        units.push(ManagedUnitView {
+            label: target.key().to_string(),
+            dot_class,
+            word,
+            raw,
+        });
+    }
+
+    let tmpl = DashboardServicesTileTemplate { units };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
 }
@@ -127,11 +223,8 @@ struct PadView {
 
 /// A systemd unit's state paired with a colored dot class + a short status
 /// word (#6 — color must always pair with explicit text, never a bare dot).
-/// `active` is the healthy state; `failed` is the one state that reads as
-/// an outright problem (red); everything else (`inactive`, `activating`,
-/// `deactivating`, `unknown`, ...) is a neutral "not running" state rather
-/// than an alarm — a stopped-but-not-failed unit isn't necessarily wrong
-/// (e.g. between restarts).
+/// The mapping itself is [`super::units::unit_dot`], shared with the Services
+/// page and the Dev page's chips; this is just its template-facing shape.
 struct UnitStateView {
     raw: String,
     dot_class: &'static str,
@@ -139,14 +232,7 @@ struct UnitStateView {
 }
 
 fn unit_state_view(raw: String) -> UnitStateView {
-    let (dot_class, word) = match raw.as_str() {
-        "active" => ("dot-ok", "active"),
-        "failed" => ("dot-error", "failed"),
-        "activating" => ("dot-warn", "activating"),
-        "deactivating" => ("dot-warn", "deactivating"),
-        "inactive" => ("dot-neutral", "inactive"),
-        _ => ("dot-neutral", "unknown"),
-    };
+    let (dot_class, word) = super::units::unit_dot(&raw);
     UnitStateView {
         raw,
         dot_class,
@@ -160,9 +246,10 @@ struct DashboardTilesTemplate {
     reachable: bool,
     /// The node's `controllers` capability, from the STARTUP snapshot — not
     /// `reachable`, which is this poll's live probe. The two tiles that link
-    /// to `/controllers` must follow registration, not reachability: a panel
-    /// that started while the daemon was down has no `/controllers` route even
-    /// after the daemon comes back and this probe starts succeeding.
+    /// to `/devices/controllers` must follow registration, not reachability: a
+    /// panel that started while the daemon was down has no
+    /// `/devices/controllers` route even after the daemon comes back and this
+    /// probe starts succeeding.
     controllers_enabled: bool,
     status_text: String,
     status_label: String,

@@ -83,12 +83,55 @@
 # commands is ROOT-EQUIVALENT (gated). When false these routes are NOT
 # registered at all (404) and their buttons are not rendered:
 #   POST /dev/deploy, /dev/build, /dev/reboot, /dev/suspend,
-#   /processes/updates/apply (sudo pacman -Syu),
+#   /system/updates/apply (sudo pacman -Syu),
 #   /tools/raw (the arbitrary-IPC console)
-# Every unit-restart route stays available — /processes/restart/{key},
-# /dev/restart-daemon, /dev/restart-shell and /cec/recover/restart-daemon all
+# Every unit-restart route stays available — /system/services/restart/{key},
+# /dev/restart-daemon, /dev/restart-shell and /devices/cec/recover/restart-daemon all
 # drive the same systemd units, and recovery is the reason the panel exists.
 #allow_dangerous = false
+
+# Units the panel's System ▸ Services page may RESTART, beyond the three
+# built-in tv-shell ones. Read by the PANEL binary only.
+#
+# READ AND RESTART ARE DELIBERATELY ASYMMETRIC. Reading any unit's status is
+# inert, so the Services page's "Inspect any unit" form takes any unit name in
+# either scope and needs no config at all. Restarting is not inert — restarting
+# sshd on a headless box can strand it, and restarting an ARBITRARY unit is a
+# general privilege-escalation primitive — so restart is allowlisted here.
+#
+# Each entry is resolved SERVER-SIDE: the browser only ever sends `key`, and
+# `POST /system/services/restart/{key}` looks it up in this table. A unit name
+# from the client never reaches systemctl on any path.
+#
+# The three tv-shell units (keys `daemon`, `shell`, `panel`) are built in and
+# must NOT be listed here — a key that collides with one of them is a startup
+# error, so a config typo can never cost you the recovery path. Anything else
+# malformed (empty/duplicate key, a `unit` that is not a plausible systemd unit
+# name, a `scope` that is not exactly "system" or "user") also aborts startup
+# rather than being silently dropped.
+#
+# scope = "user"   -> `systemctl --user restart <unit>`. No elevation; keeps
+#                     working with the daemon down.
+# scope = "system" -> `sudo -n systemctl restart <unit>`, which REQUIRES a
+#                     per-unit NOPASSWD sudoers line on this host, e.g.
+#
+#   tv-shell ALL=(root) NOPASSWD: /usr/bin/systemctl restart sshd.service, \
+#                                 /usr/bin/systemctl restart NetworkManager.service
+#
+#                     (substitute the panel's unit user and the real systemctl
+#                     path). Narrow per-unit entries, never blanket systemctl.
+#                     With no matching line, `sudo -n` refuses immediately and
+#                     the panel reports "NOT PERMITTED on this node" naming the
+#                     unit — it fails CLOSED, never a silent no-op. That is the
+#                     state of every node today: the ansible-side generation of
+#                     these sudoers lines (htpc_common role) has not landed, so
+#                     listing a system-scope unit here makes it readable and
+#                     visible, but not yet restartable.
+#managed_units = [
+#  { key = "sshd",      unit = "sshd.service",           scope = "system" },
+#  { key = "network",   unit = "NetworkManager.service", scope = "system" },
+#  { key = "bluetooth", unit = "bluetooth.service",      scope = "system" },
+#]
 
 # Remote SIDECAR nodes this panel serves over HTTP (docs/MULTI_NODE_PANEL.md
 # §4) — read by the PANEL binary only, never the daemon. One entry per sidecar

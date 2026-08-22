@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Navigation — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Navigation</h1>
+<p class="muted">
+  Drive the running shell from here — intents, overlays, settings deep-links and the D-pad.
+  Nothing on this page persists; each command changes what is on screen right now.
+</p>
+
+<div id="navigation-result"></div>
+
+<section class="tools-section">
+  <h2>Intent</h2>
+  <form hx-post="/remote/navigation/intent" hx-disabled-elt="find button" hx-target="#navigation-result" hx-swap="innerHTML" class="inline-form">
+    <input type="text" name="name" class="field-wide" placeholder="intent name (e.g. home, settings:audio, overlay:volume, app:firefox)" required>
+    <button class="btn-mutate" type="submit">Send intent</button>
+  </form>
+  <div class="button-row">
+    {% for n in intent_quick %}
+    <form hx-post="/remote/navigation/intent" hx-disabled-elt="find button" hx-target="#navigation-result" hx-swap="innerHTML" class="inline-form">
+      <input type="hidden" name="name" value="{{ n }}">
+      <button class="btn-mutate" type="submit">{{ n }}</button>
+    </form>
+    {% endfor %}
+    {% for n in overlay_quick %}
+    <form hx-post="/remote/navigation/intent" hx-disabled-elt="find button" hx-target="#navigation-result" hx-swap="innerHTML" class="inline-form">
+      <input type="hidden" name="name" value="{{ n }}">
+      <button class="btn-mutate" type="submit">{{ n }}</button>
+    </form>
+    {% endfor %}
+  </div>
+  <form hx-post="/remote/navigation/intent" hx-disabled-elt="find button" hx-target="#navigation-result" hx-swap="innerHTML" class="inline-form">
+    <label for="settings-slug">Open settings page</label>
+    <select id="settings-slug" name="name">
+      {% for slug in settings_slugs %}
+      <option value="settings:{{ slug }}">{{ slug }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn-mutate" type="submit">Open</button>
+  </form>
+</section>
+
+<section class="tools-section">
+  <h2>Key</h2>
+  <p class="muted">The six-name D-pad vocabulary, as if pressed on the pad.</p>
+  <div class="button-row">
+    {% for n in key_quick %}
+    <form hx-post="/remote/navigation/key" hx-disabled-elt="find button" hx-target="#navigation-result" hx-swap="innerHTML" class="inline-form">
+      <input type="hidden" name="name" value="{{ n }}">
+      <button class="btn-mutate" type="submit">{{ n }}</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

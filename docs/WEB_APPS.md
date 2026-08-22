@@ -1,7 +1,7 @@
 # Web Apps (PWAs)
 
 Let the user add **web apps** (YouTube, Plex, Spotify, …) from the **web control
-panel's Media page** (`/media`), persist them, and have them appear on the home
+panel's Apps page** (`/shell/apps`), persist them, and have them appear on the home
 rail and launch like any other local app — the same UX Plasma Bigscreen ships.
 The couch UI's **Settings ▸ Web Apps** page lists the registry read-only; adding
 lives on the panel because the TV has no on-screen keyboard yet (#20).
@@ -71,8 +71,8 @@ the settings schema) and never formats or writes it — the daemon owns
   `.desktop` writer with stable `--class` / `StartupWMClass` and per-app
   `--user-data-dir`. Shipped together with P1 on purpose: a registry whose
   entries launch nothing would be worse than the read-only P0 stub.
-- **P2 — Add flow UI (shipped, on the panel):** the **web control panel's Media
-  page** (`/media`) is the add/remove surface — name + URL entry, the registry
+- **P2 — Add flow UI (shipped, on the panel):** the **web control panel's Apps
+  page** (`/shell/apps`) is the add/remove surface — name + URL entry, the registry
   table, and removal. This is why P2 no longer blocks on the on-screen keyboard
   (#20): the panel has a real keyboard, and the couch UI stays read-only.
   Still deferred: curated presets (YouTube / Plex / Netflix / Spotify) for

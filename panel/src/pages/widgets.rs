@@ -1,4 +1,4 @@
-//! `/widgets` — per-widget `enabled`/`order`/`size`/`prefs` editors over the
+//! `/shell/widgets` — per-widget `enabled`/`order`/`size`/`prefs` editors over the
 //! `widgets.<id>` subtree of `settings.json`, via the daemon's `get-config`/
 //! `set-config` IPC commands.
 //!
@@ -279,7 +279,7 @@ fn build_card_view(m: &'static WidgetManifest, cur: &CurrentWidget) -> WidgetCar
 }
 
 fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
-    let chrome = Chrome::new(caps, "widgets");
+    let chrome = Chrome::new(caps, "shell.widgets");
     let mut current = resolve_current(cfg);
     sort_by_order(&mut current);
     let cards = current
@@ -297,7 +297,7 @@ fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
 }
 
 fn render_degraded(caps: &CapabilitySnapshot) -> String {
-    let chrome = Chrome::new(caps, "widgets");
+    let chrome = Chrome::new(caps, "shell.widgets");
     let tmpl = WidgetsTemplate {
         chrome,
         daemon_up: false,

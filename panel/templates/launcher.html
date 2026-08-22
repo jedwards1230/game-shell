@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Launcher — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Launcher</h1>
+<p class="muted">
+  What is installed on the box and what was played recently. Listing the apps renders a Launch
+  button per row. What <em>can</em> launch — the prewarm list and the web-app registry — is
+  Shell ▸ Apps.
+</p>
+
+<div id="launcher-result"></div>
+
+<section class="tools-section">
+  <div class="button-row">
+    <form hx-post="/remote/launcher/list" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+      <button class="btn-probe" type="submit">List apps</button>
+    </form>
+    <form hx-post="/remote/launcher/recents" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+      <button class="btn-probe" type="submit">Recents</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

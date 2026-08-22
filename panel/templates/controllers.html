@@ -18,14 +18,14 @@
     active; the shell itself re-grabs automatically on every exit path.
   </p>
   <div class="button-row">
-    <form hx-post="/controllers/grab" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+    <form hx-post="/devices/controllers/grab" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
       <button type="submit">Grab</button>
     </form>
-    <form hx-post="/controllers/release" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form"
+    <form hx-post="/devices/controllers/release" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Release exclusive gamepad access? Input will route through the game presenter's virtual twin.">
       <button class="warn-action" type="submit">Release</button>
     </form>
-    <form hx-post="/controllers/handoff" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form"
+    <form hx-post="/devices/controllers/handoff" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Hand the physical pads to a Moonlight stream and release EVIOCGRAB? Only do this if a stream is actually active.">
       <button class="warn-action" type="submit">Handoff</button>
     </form>
@@ -34,12 +34,43 @@
 
 {{ bindings_section_html|safe }}
 
+{% if settings_enabled %}
+<section class="controllers-section">
+  <h2>Input settings <span class="muted">(settings.json)</span></h2>
+  <p class="muted">
+    The two shell-side input toggles. Written through the daemon's <code>set-config</code>.
+  </p>
+  {% if settings_groups.is_empty() %}
+  <p class="degraded-msg">Daemon unreachable — these settings cannot be read or written.</p>
+  {% else %}
+  <form hx-post="/devices/controllers/settings/save" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML">
+    {# Scopes the save to the Input group. Without these the patch would carry
+       every Bool in the schema and clear the other settings pages' toggles —
+       see pages::settings::build_patch. #}
+    {% for group in settings_scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+    {% for group in settings_groups %}
+    <div class="settings-group">
+      {% for field in group.fields %}
+      <div class="field-row">
+        <label for="{{ field.key }}">{{ field.label }}</label>
+        {{ field.input_html|safe }}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <button type="submit">Save input settings</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="controllers-section">
   <h2>Per-game / per-player bindings <span class="muted">(read-only)</span></h2>
   <p class="muted">
     Additive override layers on top of the global bindings above (resolution order:
-    game → player → global → default). Editing is deferred to a future milestone — use the
-    <a href="/settings">Settings</a> raw JSON escape hatch to change them directly.
+    game → player → global → default). Editing is deferred to a future milestone — use
+    {% if settings_enabled %}<a href="/shell/advanced">Shell ▸ Advanced</a>'s{% else %}Shell ▸ Advanced's{% endif %}
+    raw JSON escape hatch to change them directly.
   </p>
   {% if config_error.is_empty() %}
   <h3>Per-game <span class="muted">(<code>perGameBindings</code>)</span></h3>
@@ -49,11 +80,11 @@
   {% else %}
   <p class="banner banner-error">Unavailable: {{ config_error }}</p>
   {% endif %}
-  <form hx-post="/controllers/active-game/set" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+  <form hx-post="/devices/controllers/active-game/set" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
     <input type="text" name="id" placeholder="game id (e.g. steam_12345)" required>
     <button type="submit">Set active game</button>
   </form>
-  <form hx-post="/controllers/active-game/clear" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+  <form hx-post="/devices/controllers/active-game/clear" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
     <button type="submit">Clear active game</button>
   </form>
 </section>
@@ -61,10 +92,10 @@
 <section class="controllers-section">
   <h2>Controller database</h2>
   <div class="button-row">
-    <form hx-post="/controllers/controllerdb/status" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+    <form hx-post="/devices/controllers/controllerdb/status" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
       <button type="submit">Status</button>
     </form>
-    <form hx-post="/controllers/controllerdb/refresh" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form"
+    <form hx-post="/devices/controllers/controllerdb/refresh" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Fetch the upstream GameControllerDB now?">
       <button class="warn-action" type="submit">Refresh DB</button>
     </form>
@@ -76,7 +107,7 @@
   <details>
     <summary>Diagnostics: list all input devices</summary>
     <p class="muted">Every controller-like device on the host, grabbed or not — distinct from the fleet above.</p>
-    <form hx-post="/controllers/input-devices" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+    <form hx-post="/devices/controllers/input-devices" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
       <button type="submit">List input devices</button>
     </form>
   </details>

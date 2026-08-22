@@ -1,15 +1,20 @@
-//! `/media` — operator management of the two content surfaces the couch UI
-//! can't manage itself:
+//! `/shell/appearance` — how the TV UI looks: the `Appearance` slice of
+//! `settings.json` (theme mode, the two auto-theme hours, reduce-motion, text
+//! scale), and the **wallpaper** surface that writes `wallpaperPath`.
 //!
-//! * **Wallpapers** — upload image files into `~/.config/tv-shell/wallpapers/`,
-//!   preview them, pick the active one (persisted as `wallpaperPath` via the
-//!   daemon's `set-config`), and delete. The shell's Settings ▸ Wallpaper page
-//!   is a read-only `FolderListModel` over that same directory, so it has no
-//!   way to get a file onto the box — this page is that missing half.
-//! * **Web apps** — add/remove entries in the daemon-owned registry
-//!   (`webapp-add`/`webapp-remove`/`webapp-list`, #187 P1+P3). `docs/WEB_APPS.md`
-//!   deferred the shell-side add flow because the couch UI has no on-screen
-//!   keyboard (#20); the panel has a real keyboard, so it owns the add flow.
+//! One of the five pages the Settings page dissolved into (`docs/PANEL_IA.md`
+//! phase 3); phase 4 folded the Media page's wallpaper half in here, which is
+//! where it always belonged — the picker and the theme it is picked to sit
+//! beside are one subject. Everything about the settings schema, the form
+//! rendering and the scoped patch lives in [`crate::pages::settings`].
+//!
+//! ## Wallpapers
+//!
+//! Upload image files into `~/.config/tv-shell/wallpapers/`, preview them,
+//! pick the active one (persisted as `wallpaperPath` via the daemon's
+//! `set-config`), and delete. The shell's Settings ▸ Wallpaper page is a
+//! read-only `FolderListModel` over that same directory, so it has no way to
+//! get a file onto the box — this page is that missing half.
 //!
 //! **This page writes files.** These routes are behind the panel's auth layer
 //! (`crate::auth`), but auth is opt-in via `[panel].token_file` and a loopback
@@ -17,12 +22,12 @@
 //! as an attack surface in its own right: extension allowlist, filename
 //! sanitization, a re-checked containment test against the wallpapers dir, a
 //! body-size cap, and magic-byte sniffing so a `.png` that isn't an image is
-//! rejected. Reads back out (`/media/wallpaper/file`) go through the exact same
-//! resolver, so there is no arbitrary-filesystem-read endpoint.
+//! rejected. Reads back out (`/shell/appearance/wallpaper/file`) go through
+//! the exact same resolver, so there is no arbitrary-filesystem-read endpoint.
 //!
-//! Degradation: the daemon owns the registry and `wallpaperPath`, so with the
-//! daemon down the page still renders (200 + honest banner) and the wallpaper
-//! *files* still list — only the daemon-backed actions are unavailable.
+//! Degradation: with the daemon unreachable the page still returns 200 with a
+//! clear banner and no form — never a 500. The wallpaper *files* still list;
+//! only the daemon-backed selection is unavailable.
 
 use askama::Template;
 use axum::extract::{Multipart, Query, State};
@@ -30,12 +35,23 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Form;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::capabilities::{Chrome, Gate};
+use crate::capabilities::{CapabilitySnapshot, Chrome};
+use crate::pages::settings::{self, GroupView};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
+
+/// The `SettingField::group`s this page owns — rendered as the form's
+/// `__group` companions AND enforced server-side in [`save`], so this route
+/// can only ever patch `Appearance`.
+///
+/// `wallpaperPath` is in this group as of phase 4 but is deliberately NOT a
+/// typed input ([`settings::CUSTOM_EDITOR_KEYS`]): the grid below the form is
+/// its editor. Being a `FieldKind::Str`, its absence from a patch leaves the
+/// stored value untouched by the daemon's shallow merge.
+const OWNED: &[&str] = &["Appearance"];
 
 /// Upload cap. Generous for a 4K wallpaper, far below anything that would
 /// wedge the box's memory.
@@ -159,7 +175,7 @@ pub fn list_wallpapers(dir: &Path) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// View models
+// The page
 // ---------------------------------------------------------------------------
 
 struct WallpaperView {
@@ -167,74 +183,34 @@ struct WallpaperView {
     selected: bool,
 }
 
-struct WebAppView {
-    id: String,
-    name: String,
-    url: String,
-    wm_class: String,
-}
-
 #[derive(Template)]
-#[template(path = "media.html")]
-struct MediaTemplate {
+#[template(path = "appearance.html")]
+struct AppearanceTemplate {
     chrome: Chrome,
     daemon_up: bool,
+    /// One hidden `__group` input per entry — see [`settings::build_patch`].
+    scope: Vec<&'static str>,
+    groups: Vec<GroupView>,
     wallpapers: Vec<WallpaperView>,
     wallpapers_dir: String,
     any_selected: bool,
-    webapps: Vec<WebAppView>,
-    webapps_error: String,
     max_upload_mb: usize,
-    /// The node's `settings_store` capability — `POST /media/wallpaper/select`
-    /// persists `wallpaperPath` through `set-config`, so it is registered only
-    /// behind that. The upload/delete/file routes are NOT: the panel serves
-    /// those out of its own filesystem, and `Feature::Wallpapers` is one the
-    /// daemon deliberately never emits.
-    select_enabled: bool,
-    /// The node's `web_apps` capability — the add/remove routes.
-    webapps_enabled: bool,
 }
-
-#[derive(Template)]
-#[template(path = "media_result.html")]
-struct MediaResultTemplate {
-    ok: bool,
-    message: String,
-}
-
-fn result_html(ok: bool, message: &str) -> String {
-    let tmpl = MediaResultTemplate {
-        ok,
-        message: message.to_string(),
-    };
-    tmpl.render()
-        .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
-}
-
-/// htmx result + an out-of-band refresh of whichever list the action changed,
-/// so a successful add/delete/select updates the page without a full reload.
-fn result_with_refresh(ok: bool, message: &str, refreshed: String) -> String {
-    format!("{}{}", result_html(ok, message), refreshed)
-}
-
-// ---------------------------------------------------------------------------
-// GET /media
-// ---------------------------------------------------------------------------
 
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     Html(render_page(&state).await)
 }
 
 pub async fn render_page(state: &AppState) -> String {
+    render(&state.caps, state.node.get_config().await.ok().as_ref())
+}
+
+fn render(caps: &CapabilitySnapshot, cfg: Option<&Value>) -> String {
     let dir = wallpapers_dir();
-    let cfg = state.node.get_config().await.ok();
-    let daemon_up = cfg.is_some();
     let selected = cfg
-        .as_ref()
         .and_then(|c| c.get("wallpaperPath").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
-
     let wallpapers: Vec<WallpaperView> = list_wallpapers(&dir)
         .into_iter()
         .map(|name| {
@@ -245,66 +221,66 @@ pub async fn render_page(state: &AppState) -> String {
             }
         })
         .collect();
-    let any_selected = wallpapers.iter().any(|w| w.selected);
 
-    let (webapps, webapps_error) = match state.node.command("webapp-list").await {
-        Ok(reply) => (parse_webapps(&reply), String::new()),
-        Err(e) => (Vec::new(), format!("Could not read the registry: {e}")),
-    };
-
-    let tmpl = MediaTemplate {
-        chrome: Chrome::new(&state.caps, "media"),
-        daemon_up,
+    let tmpl = AppearanceTemplate {
+        chrome: Chrome::new(caps, "shell.appearance"),
+        daemon_up: cfg.is_some(),
+        scope: OWNED.to_vec(),
+        groups: cfg
+            .map(|c| settings::build_groups(c, OWNED))
+            .unwrap_or_default(),
+        any_selected: wallpapers.iter().any(|w| w.selected),
         wallpapers,
         wallpapers_dir: dir.display().to_string(),
-        any_selected,
-        webapps,
-        webapps_error,
         max_upload_mb: MAX_UPLOAD_BYTES / (1024 * 1024),
-        select_enabled: state.caps.allows(Gate::SettingsStore),
-        webapps_enabled: state.caps.allows(Gate::WebApps),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
 }
 
-fn parse_webapps(reply: &str) -> Vec<WebAppView> {
-    serde_json::from_str::<serde_json::Value>(reply)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| WebAppView {
-            id: v
-                .get("id")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            name: v
-                .get("name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            url: v
-                .get("url")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            wm_class: v
-                .get("wmClass")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        })
-        .filter(|a| !a.id.is_empty())
-        .collect()
+/// `POST /shell/appearance/save` — the `Appearance` group only.
+///
+/// The extractor is a `Vec` of pairs rather than a map because the form emits
+/// one `__group` companion per group it owns and a map would collapse them.
+pub async fn save(
+    State(state): State<SharedState>,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> impl IntoResponse {
+    Html(render_save(&state, &pairs).await)
+}
+
+pub async fn render_save(state: &AppState, pairs: &[(String, String)]) -> String {
+    settings::render_save(state, OWNED, pairs).await
 }
 
 // ---------------------------------------------------------------------------
 // Wallpapers — upload / select / delete / serve
 // ---------------------------------------------------------------------------
 
-/// `POST /media/wallpaper/upload` — multipart upload of one or more images.
+#[derive(Template)]
+#[template(path = "action_result.html")]
+struct ActionResultTemplate {
+    ok: bool,
+    message: String,
+}
+
+fn result_html(ok: bool, message: &str) -> String {
+    let tmpl = ActionResultTemplate {
+        ok,
+        message: message.to_string(),
+    };
+    tmpl.render()
+        .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
+}
+
+/// htmx result + an out-of-band refresh of the wallpaper grid, so a successful
+/// upload/delete/select updates the page without a full reload.
+fn result_with_refresh(ok: bool, message: &str, refreshed: String) -> String {
+    format!("{}{}", result_html(ok, message), refreshed)
+}
+
+/// `POST /shell/appearance/wallpaper/upload` — multipart upload of one or
+/// more images.
 pub async fn upload(State(state): State<SharedState>, multipart: Multipart) -> impl IntoResponse {
     Html(render_upload(&state, multipart).await)
 }
@@ -396,8 +372,8 @@ pub struct NameForm {
     name: String,
 }
 
-/// `POST /media/wallpaper/select` — set `wallpaperPath`. An empty name selects
-/// "None" (clears the wallpaper).
+/// `POST /shell/appearance/wallpaper/select` — set `wallpaperPath`. An empty
+/// name selects "None" (clears the wallpaper).
 pub async fn select(
     State(state): State<SharedState>,
     Form(form): Form<NameForm>,
@@ -433,9 +409,9 @@ pub async fn render_select(state: &AppState, name: &str) -> String {
     }
 }
 
-/// `POST /media/wallpaper/delete` — remove a wallpaper file. If it was the
-/// selected one, `wallpaperPath` is cleared too so the shell doesn't point at a
-/// file that no longer exists.
+/// `POST /shell/appearance/wallpaper/delete` — remove a wallpaper file. If it
+/// was the selected one, `wallpaperPath` is cleared too so the shell doesn't
+/// point at a file that no longer exists.
 pub async fn delete(
     State(state): State<SharedState>,
     Form(form): Form<NameForm>,
@@ -483,9 +459,10 @@ pub struct FileQuery {
     name: String,
 }
 
-/// `GET /media/wallpaper/file?name=…` — serve a wallpaper's bytes for the
-/// preview thumbnails. Goes through the SAME resolver as every write path, and
-/// re-sniffs the content, so this can never become an arbitrary file read.
+/// `GET /shell/appearance/wallpaper/file?name=…` — serve a wallpaper's bytes
+/// for the preview thumbnails. Goes through the SAME resolver as every write
+/// path, and re-sniffs the content, so this can never become an arbitrary file
+/// read.
 pub async fn file(Query(q): Query<FileQuery>) -> Response {
     let dir = wallpapers_dir();
     let path = match resolve_in_dir(&dir, &q.name) {
@@ -511,10 +488,15 @@ pub async fn file(Query(q): Query<FileQuery>) -> Response {
 
 /// The wallpaper list as an out-of-band htmx swap, so actions refresh the grid
 /// in place.
-async fn render_wallpaper_list_oob(state: &AppState) -> String {
+///
+/// Re-renders THIS page and string-slices the list section out of it between
+/// the two HTML comment markers `appearance.html` carries — simpler and less
+/// drift-prone than maintaining a second template for the same markup, at the
+/// cost of a coupling to those markers that
+/// `crate::tests::wallpaper_oob_refresh_returns_the_list_fragment` pins.
+/// `pub` for that test: a silently-empty fragment is the exact failure mode.
+pub async fn render_wallpaper_list_oob(state: &AppState) -> String {
     let inner = render_page(state).await;
-    // Extract just the list section from the freshly-rendered page: simpler and
-    // less drift-prone than maintaining a second template for the same markup.
     match (
         inner.find("<!--wallpaper-list-start-->"),
         inner.find("<!--wallpaper-list-end-->"),
@@ -524,99 +506,6 @@ async fn render_wallpaper_list_oob(state: &AppState) -> String {
             &inner[a..b]
         ),
         _ => String::new(),
-    }
-}
-
-async fn render_webapp_list_oob(state: &AppState) -> String {
-    let inner = render_page(state).await;
-    match (
-        inner.find("<!--webapp-list-start-->"),
-        inner.find("<!--webapp-list-end-->"),
-    ) {
-        (Some(a), Some(b)) if b > a => format!(
-            r#"<div id="webapp-list" hx-swap-oob="innerHTML">{}</div>"#,
-            &inner[a..b]
-        ),
-        _ => String::new(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Web apps — add / remove
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct WebAppForm {
-    name: String,
-    url: String,
-}
-
-/// `POST /media/webapp/add` — the daemon validates, allocates the id/wmClass,
-/// writes the `.desktop`, and owns the registry; the panel just relays.
-pub async fn webapp_add(
-    State(state): State<SharedState>,
-    Form(form): Form<WebAppForm>,
-) -> impl IntoResponse {
-    Html(render_webapp_add(&state, &form.name, &form.url).await)
-}
-
-pub async fn render_webapp_add(state: &AppState, name: &str, url: &str) -> String {
-    let body = json!({ "name": name.trim(), "url": url.trim() });
-    let line = format!("webapp-add {body}");
-    match state.node.command(&line).await {
-        Ok(reply) => {
-            let added: Option<String> = serde_json::from_str::<serde_json::Value>(&reply)
-                .ok()
-                .and_then(|v| {
-                    v.get("wmClass")
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string)
-                });
-            let msg = match added {
-                Some(wm) => format!(
-                    "Added {}. It appears on the home Applications row as {wm} \
-                     (launcher written to ~/.local/share/applications).",
-                    name.trim()
-                ),
-                None => format!("Added {}.", name.trim()),
-            };
-            let refreshed = render_webapp_list_oob(state).await;
-            result_with_refresh(true, &msg, refreshed)
-        }
-        Err(e) => result_html(false, &format!("Could not add the web app: {e}")),
-    }
-}
-
-#[derive(Deserialize)]
-pub struct IdForm {
-    id: String,
-}
-
-/// `POST /media/webapp/remove` — drop a registry entry and its launcher.
-pub async fn webapp_remove(
-    State(state): State<SharedState>,
-    Form(form): Form<IdForm>,
-) -> impl IntoResponse {
-    Html(render_webapp_remove(&state, &form.id).await)
-}
-
-pub async fn render_webapp_remove(state: &AppState, id: &str) -> String {
-    match state
-        .node
-        .command(&format!("webapp-remove {}", id.trim()))
-        .await
-    {
-        Ok(_) => {
-            let refreshed = render_webapp_list_oob(state).await;
-            result_with_refresh(
-                true,
-                &format!(
-                    "Removed {id}. Its Chromium profile was kept, so re-adding restores logins."
-                ),
-                refreshed,
-            )
-        }
-        Err(e) => result_html(false, &format!("Could not remove the web app: {e}")),
     }
 }
 
@@ -683,7 +572,7 @@ mod tests {
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap();
-        let dir = base.join(format!("media-test-{tag}-{}", std::process::id()));
+        let dir = base.join(format!("wallpaper-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -717,17 +606,5 @@ mod tests {
         // A missing directory is an empty list, not an error.
         assert!(list_wallpapers(&dir.join("nope")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_webapps_is_lenient() {
-        let good = r#"[{"id":"yt","name":"YouTube","url":"https://y.tv","wmClass":"tvshell-yt"}]"#;
-        let apps = parse_webapps(good);
-        assert_eq!(apps.len(), 1);
-        assert_eq!(apps[0].wm_class, "tvshell-yt");
-        assert!(parse_webapps("not json").is_empty());
-        assert!(parse_webapps("{}").is_empty());
-        // Entries without an id are dropped rather than rendered blank.
-        assert!(parse_webapps(r#"[{"name":"x"}]"#).is_empty());
     }
 }

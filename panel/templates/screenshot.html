@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Screenshot — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Screenshot</h1>
+<p class="muted">
+  What the TV is showing right now, captured through the daemon's HTTP bridge. Each capture
+  carries the provenance of the build that drew it.
+</p>
+{% if !bridge_configured %}
+<p class="banner banner-warn">
+  The daemon HTTP bridge is <strong>not configured</strong> on this panel
+  (<code>[http].bind</code> in <code>config.toml</code>), so a capture will report an error.
+  The node declared the <code>screenshot</code> capability — that is the node's statement about
+  itself, and an MCP-only node declares it without giving this panel a bridge to call.
+</p>
+{% endif %}
+
+<div class="dev-screenshot">
+  <button hx-post="/dev/screenshot/capture" hx-disabled-elt="this" hx-target="#dev-screenshot-result" hx-swap="innerHTML">Load screenshot</button>
+  <div id="dev-screenshot-result"></div>
+</div>
+{% endblock %}

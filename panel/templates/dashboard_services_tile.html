@@ -1,0 +1,22 @@
+{# Overview's system-services tile (30s poll) — one bare tile, no
+   `.tile-grid` wrapper: the grid lives in `dashboard.html` and this swaps
+   into a `display: contents` slot inside it.
+
+   Read-only, like everything on Overview. Restarting is System ▸ Services'
+   job and this tile is the whole-tile link to it. The state comes straight
+   from `systemctl show`, so this renders identically with the daemon down —
+   which is exactly when "is sshd up" is the question. #}
+<a class="tile" href="/system/services">
+  <h3>System services</h3>
+  {% if units.is_empty() %}
+  {# The honest empty state: no units are CONFIGURED, which is not the same as
+     none being up, and naming the config key is the difference between a card
+     that looks broken and one that tells you what to do. #}
+  <p class="tile-value muted">none configured</p>
+  <p class="muted">No <code>[panel].managed_units</code> in <code>config.toml</code> — add entries there to watch units like <code>sshd.service</code> from here.</p>
+  {% else %}
+  {% for u in units %}
+  <p><span class="unit-chip"><span class="dot {{ u.dot_class }}"></span>{{ u.label }}: {{ u.word }}</span>{% if u.raw != u.word %} <span class="muted">({{ u.raw }})</span>{% endif %}</p>
+  {% endfor %}
+  {% endif %}
+</a>

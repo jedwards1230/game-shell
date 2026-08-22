@@ -1,4 +1,4 @@
-//! `/logs` — shell log (via the daemon HTTP bridge) and daemon log (via
+//! `/system/logs` — shell log (via the daemon HTTP bridge) and daemon log (via
 //! `journalctl`, direct exec) side by side. Never 500s on a data-source
 //! failure — each panel degrades inline.
 
@@ -24,7 +24,7 @@ struct LogsTemplate {
 /// `GET /logs` — the page shell.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     super::render(LogsTemplate {
-        chrome: Chrome::new(&state.caps, "logs"),
+        chrome: Chrome::new(&state.caps, "system.logs"),
     })
 }
 

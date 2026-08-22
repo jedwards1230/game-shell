@@ -1,7 +1,18 @@
-//! `/cec` — HDMI-CEC topology (`cec-scan`/`cec-device`), input switching
-//! (`cec-active-source`, per-device `cec-power-on`/`-off`), and the
-//! transmit-wedge health/recovery flow (`cec-health`/`cec-test` plus an
-//! escalating "Recover CEC" ladder: test → restart daemon → full reboot).
+//! `/devices/cec` — HDMI-CEC topology (`cec-scan`/`cec-device`), input switching
+//! (`cec-active-source`, per-device `cec-power-on`/`-off`), the transmit-wedge
+//! health/recovery flow (`cec-health`/`cec-test` plus an escalating "Recover
+//! CEC" ladder: test → restart daemon → full reboot), and — since
+//! `docs/PANEL_IA.md` phase 3 — the `CEC` slice of `settings.json`, so config
+//! and actions finally share a page.
+//!
+//! **Two config surfaces, deliberately distinct.** `[cec].osd_name` is the
+//! panel's one `config.toml` write (via `toml_edit`, `POST
+//! /devices/cec/osd-name`); the session-lifecycle settings below it are
+//! `settings.json` keys written through `set-config` (`POST
+//! /devices/cec/config`). The latter route is registered in the
+//! `Gate::SettingsStore` block while this page is in the `Gate::Cec` one — a
+//! block condition cannot AND two capabilities — so the form is rendered only
+//! when `caps.allows(Gate::SettingsStore)`.
 //!
 //! **Feature-gated.** CEC is Linux-only and requires the daemon to be built
 //! `--features cec`; on a default build every `cec-*` command replies
@@ -24,9 +35,14 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bridge::BridgeError;
-use crate::capabilities::Chrome;
+use crate::capabilities::{Chrome, Gate};
+use crate::pages::settings::{self, GroupView};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
+
+/// The `SettingField::group`s this page's settings form owns — rendered as its
+/// `__group` companions AND enforced server-side in [`save_config`].
+const OWNED: &[&str] = &["CEC"];
 
 // ---------------------------------------------------------------------------
 // Shared small helpers (own copy per page — see `pages::controllers`'s doc
@@ -876,6 +892,14 @@ struct CecTemplate {
     osd_source: &'static str,
     /// Current override value (input prefill; empty when hostname-defaulted).
     osd_configured: String,
+    /// `POST /devices/cec/config` is registered — never render the form that
+    /// posts to it otherwise.
+    settings_enabled: bool,
+    /// `get-config` answered, so the typed CEC form has real values to show.
+    settings_up: bool,
+    /// One hidden `__group` input per entry — see `settings::build_patch`.
+    settings_scope: Vec<&'static str>,
+    settings_groups: Vec<GroupView>,
 }
 
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
@@ -884,6 +908,14 @@ pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
 
 pub async fn render_page(state: &AppState) -> String {
     let health_section_html = render_health_section(state).await;
+    let settings_enabled = state.caps.allows(Gate::SettingsStore);
+    // Only fetch the settings document when the form that would show it is
+    // actually going to render — a gated-off page must not add an IPC call.
+    let cfg = if settings_enabled {
+        state.node.get_config().await.ok()
+    } else {
+        None
+    };
     let configured = read_osd_override();
     let (osd_effective, osd_source) = match &configured {
         Some(name) => (name.clone(), "config.toml [cec].osd_name override"),
@@ -896,14 +928,38 @@ pub async fn render_page(state: &AppState) -> String {
         },
     };
     let tmpl = CecTemplate {
-        chrome: Chrome::new(&state.caps, "cec"),
+        chrome: Chrome::new(&state.caps, "devices.cec"),
         health_section_html,
         osd_effective,
         osd_source,
         osd_configured: configured.unwrap_or_default(),
+        settings_enabled,
+        settings_up: cfg.is_some(),
+        settings_scope: OWNED.to_vec(),
+        settings_groups: cfg
+            .as_ref()
+            .map(|c| settings::build_groups(c, OWNED))
+            .unwrap_or_default(),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
+}
+
+// ---------------------------------------------------------------------------
+// POST /devices/cec/config — the CEC settings group
+// ---------------------------------------------------------------------------
+
+/// `POST /devices/cec/config` — the `CEC` group of `settings.json` and nothing
+/// else. Distinct from [`save_osd_name`], which writes `config.toml`.
+///
+/// Registered in `main.rs`'s `Gate::SettingsStore` block, not the `Gate::Cec`
+/// one that carries this page: a block condition may name only one capability,
+/// and `set-config` is the capability this route actually needs.
+pub async fn save_config(
+    State(state): State<SharedState>,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> impl IntoResponse {
+    Html(settings::render_save(&state, OWNED, &pairs).await)
 }
 
 #[cfg(test)]

@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Apps — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Apps</h1>
+<p class="muted">What can launch on this box: the apps the shell keeps warm at login, and the web apps on the home Applications row.</p>
+<p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
+  {% if daemon_up %}
+    Daemon: up — these settings can be read and written
+  {% else %}
+    Daemon unreachable — neither the prewarm list nor the web-app registry can be read or written.
+    See the <a href="/dev/recovery">Recovery</a> page.
+  {% endif %}
+</p>
+
+<div id="settings-result"></div>
+
+<section class="tools-section">
+  <h2>Prewarm at login</h2>
+  <p class="muted">One <code>StartupWMClass</code> per line; an emptied box clears the list.</p>
+  {% if daemon_up %}
+  <form hx-post="/shell/apps/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
+    {# Scopes the save to this page's schema groups — see
+       pages::settings::build_patch. #}
+    {% for group in scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+    {% for group in groups %}
+    <section class="settings-group">
+      {% for field in group.fields %}
+      <div class="field-row">
+        <label for="{{ field.key }}">{{ field.label }}</label>
+        {{ field.input_html|safe }}
+      </div>
+      {% endfor %}
+    </section>
+    {% endfor %}
+    <button type="submit">Save apps</button>
+  </form>
+  {% else %}
+  <p class="degraded-msg">The apps form is unavailable while the daemon is unreachable — it is the only writer of <code>settings.json</code>.</p>
+  {% endif %}
+</section>
+
+<section class="tools-section">
+  <h2>Web apps</h2>
+  <p class="muted">
+    Each web app becomes a Chromium <code>--app</code> launcher on the home Applications row,
+    with its own browser profile so logins stay separate. The daemon owns the registry and
+    writes the <code>.desktop</code> file; removing one keeps its profile, so re-adding
+    restores the session.
+  </p>
+
+  {% if !webapps_error.is_empty() %}
+  <p class="banner banner-warn">{{ webapps_error }}</p>
+  {% endif %}
+
+  <div id="webapp-result"></div>
+
+  {% if webapps_enabled %}
+  <form hx-post="/shell/apps/webapp/add" hx-disabled-elt="find button"
+        hx-target="#webapp-result" hx-swap="innerHTML" class="inline-form">
+    <input type="text" name="name" placeholder="Name (e.g. YouTube)" maxlength="64" required
+           style="width:14rem;">
+    <input type="url" name="url" placeholder="https://youtube.com/tv" required style="width:22rem;">
+    <button type="submit">Add web app</button>
+  </form>
+  {% else %}
+  <p class="banner">This node did not declare the <code>web_apps</code> capability, so the
+  registry is read-only here.</p>
+  {% endif %}
+
+  {# The two markers below delimit the fragment pages::apps::
+     render_webapp_list_oob slices out of a re-render of this page for its
+     out-of-band swap. Moving or renaming either one silently empties every
+     post-action table refresh — see that function's doc comment. #}
+  <div id="webapp-list">
+    <!--webapp-list-start-->
+    {% if webapps.is_empty() %}
+    <p class="muted">No web apps yet.</p>
+    {% else %}
+    <table>
+      <thead>
+        <tr><th>Name</th><th>URL</th><th>Window class</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for a in webapps %}
+        <tr>
+          <td>{{ a.name }}</td>
+          <td class="muted">{{ a.url }}</td>
+          <td><code>{{ a.wm_class }}</code></td>
+          <td>
+            {% if webapps_enabled %}
+            <form hx-post="/shell/apps/webapp/remove" hx-disabled-elt="find button"
+                  hx-target="#webapp-result" hx-swap="innerHTML" class="inline-form"
+                  hx-confirm="Remove {{ a.name }}? This deletes its launcher (the browser profile is kept).">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button class="danger" type="submit">Remove</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <!--webapp-list-end-->
+  </div>
+</section>
+{% endblock %}

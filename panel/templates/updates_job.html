@@ -1,11 +1,11 @@
-<div id="update-job-status" hx-get="/processes/updates/job" hx-trigger="every 2s [this.dataset.running=='1']" hx-swap="outerHTML" data-running="{% if running %}1{% else %}0{% endif %}">
+<div id="update-job-status" hx-get="/system/updates/job" hx-trigger="every 2s [this.dataset.running=='1']" hx-swap="outerHTML" data-running="{% if running %}1{% else %}0{% endif %}">
   {% if running %}
   <p class="banner banner-warn">Update running&hellip; ({{ elapsed }}s elapsed)</p>
   {% else if done %}
   <p class="banner {% if success %}banner-ok{% else %}banner-error{% endif %}">
     {% if success %}Update completed successfully{% else %}Update failed{% endif %} ({{ elapsed }}s ago).
     {% if !last_error_line.is_empty() %}<br><code>{{ last_error_line }}</code>{% endif %}
-    {% if reboot_needed %}<br><strong>Reboot needed</strong> to boot the new kernel &mdash; <a href="/dev">go to Dev &rarr; Reboot</a>.{% endif %}
+    {% if reboot_needed %}<br><strong>Reboot needed</strong> to boot the new kernel &mdash; <a href="/dev/recovery">go to Dev &rarr; Reboot</a>.{% endif %}
   </p>
   {% else %}
   <p class="muted">No update job has run yet.</p>

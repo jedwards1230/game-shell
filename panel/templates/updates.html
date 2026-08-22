@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Updates — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Updates</h1>
+
+<section class="processes-section">
+  <h2>System Updates</h2>
+  <p class="muted">pacman, read unprivileged via <code>checkupdates</code>. The panel owns this independently of the daemon.</p>
+  {{ updates_check_html|safe }}
+  {{ update_job_html|safe }}
+</section>
+{% endblock %}

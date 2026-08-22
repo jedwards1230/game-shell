@@ -1,13 +1,29 @@
 {% extends "base.html" %}
-{% block title %}Dashboard — tv-shell panel{% endblock %}
+{% block title %}Overview — tv-shell panel{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
-<div id="tiles" hx-get="/dashboard/tiles" hx-trigger="load, every 5s" hx-swap="innerHTML">
-  <p class="muted">Loading…</p>
-</div>
-<!-- Own, much slower poll (checkupdates shouldn't run on the 5s #tiles
-     cadence) — see pages::dashboard::updates_tile. -->
-<div id="updates-tile" hx-get="/dashboard/updates-tile" hx-trigger="load, every 300s" hx-swap="innerHTML">
-  <p class="muted">Loading…</p>
+<h1>Overview</h1>
+{# ONE grid, three poll targets.
+   Each fragment refreshes on its own cadence but they all render tiles into
+   the SAME `.tile-grid`, so the Updates tile flows into the grid instead of
+   landing alone on a row below it (which is what a per-fragment grid did).
+   The wrappers carry `display: contents` (`.tile-slot`), so the tiles a
+   fragment swaps in become direct children of the grid — an htmx target has
+   to be a real element, and this is the only way to have one without it also
+   being a grid cell. #}
+<div class="tile-grid">
+  <div id="tiles" class="tile-slot" hx-get="/overview/tiles" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    <div class="tile"><p class="muted">Loading…</p></div>
+  </div>
+  {# Its own 30s poll rather than the 5s one above: this fragment costs one
+     `systemctl show` per configured unit and `[panel].managed_units` is
+     operator-set and unbounded — see pages::dashboard::services_tile. #}
+  <div id="services-tile" class="tile-slot" hx-get="/overview/services-tile" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    <div class="tile"><p class="muted">Loading…</p></div>
+  </div>
+  {# Own, much slower poll (checkupdates shouldn't run on the 5s #tiles
+     cadence) — see pages::dashboard::updates_tile. #}
+  <div id="updates-tile" class="tile-slot" hx-get="/overview/updates-tile" hx-trigger="load, every 300s" hx-swap="innerHTML">
+    <div class="tile"><p class="muted">Loading…</p></div>
+  </div>
 </div>
 {% endblock %}
