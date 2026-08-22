@@ -185,7 +185,9 @@ Server-rendered HTML + HTMX (vendored, no CDN, no build step), bound `127.0.0.1:
 
 Auth: browsers exchange the panel token for an `HttpOnly`/`SameSite=Strict` session cookie; scripts send a bearer. **The cookie value is the token** — there is no session store, so revocation means rotating the file and restarting. Exactly four routes are public: login (GET/POST) and the two static assets. A non-loopback bind requires a token or the panel refuses to start.
 
-Routes register in four tiers — **Recovery** (always: overview, processes/services, updates, media and wallpaper files, logs, dev page, unit restarts, login, assets), **Node** (handshake succeeded: the tools console), **Capability** (one gate per declared `Feature`), and **Danger** (`[panel].allow_dangerous`, intersected with a capability where a route is both: deploy, build, reboot, suspend, apply-updates, raw IPC console). The rule that separates them: *restarting a unit is recovery; changing what code runs, powering the box, or running arbitrary commands is root-equivalent.*
+The UI is six subject groups behind a drawer — **Overview**, **System** (services, processes, updates, logs), **Shell** (appearance, widgets, apps, advanced), **Devices** (controllers, display & audio, CEC, network), **Remote** (navigation, launcher) and **Dev** (recovery, screenshot, console).
+
+Routes register in four tiers. **Recovery** is always registered and is what survives a failed handshake — **Overview, System and Dev remain; Shell, Devices and Remote disappear entirely**, because those three depend on a node that is answering. **Node** requires a successful handshake, **Capability** requires the node to have declared the matching `Feature`, and **Danger** requires `[panel].allow_dangerous`, intersected with a capability where a route is both. The rule that separates recovery from danger: *restarting a unit is recovery; changing what code runs, powering the box, or running arbitrary commands is root-equivalent.*
 
 Remote sidecar nodes are declared as `[[panel.nodes]]` with `id`, `base_url` and `sidecar_token_file` — never `token_file`, because a panel may hold credentials only for sidecar nodes it serves, never another shell node's own token.
 
@@ -305,7 +307,7 @@ User preferences live separately in `settings.json`, written only by the daemon:
 | Current MCP spec | Track the 2026-07-28 spec | not started — blocked on an upstream stable release and an MSRV bump | jedwards1230/tv-shell#379 |
 | Screenshot fidelity | A capture under fullscreen HDR is current and 10-bit | partial — triggers done, capture engine returns stale/flattened frames | jedwards1230/tv-shell#284 |
 | Web control panel | Capability-gated, recovery-first operator surface | shipped | — |
-| Panel information architecture | Six grouped areas, dangerous actions in one place | partial — landing now | jedwards1230/tv-shell#409 |
+| Panel information architecture | Six grouped areas behind a drawer, dangerous actions in one place | shipped — jedwards1230/tv-shell#412 merged 2026-08-22; the Services allowlist needs a sudoers rule per node | jedwards1230/tv-shell#409 |
 | Fleet console | One panel serves N nodes behind a node switcher; every shell node keeps a local recovery panel | partial — transport and node config landed, nothing serves a second node | jedwards1230/tv-shell#409 and MULTI_NODE_PANEL.md step 6 |
 | On-screen keyboard | A narrow OSK for stranding flows only (Wi-Fi password, stream target) | not started | jedwards1230/tv-shell#20 |
 | Web apps | Add from the couch or the panel; presets and icons | partial — panel add flow shipped; presets, icons, on-TV flow deferred | jedwards1230/tv-shell#187 |
