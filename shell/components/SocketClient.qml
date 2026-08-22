@@ -88,9 +88,28 @@ Item {
         // close as intentional so the disconnect handler does NOT report it as a
         // failure for this new request (it would otherwise emit a spurious
         // requestFailed() before the reconnect sends _pendingCommand).
+        //
+        // The reopen MUST be deferred rather than done synchronously here. Writing
+        // `connected = false` immediately followed by `connected = true` in the same
+        // event-loop turn can collapse into no observed transition at all: the
+        // property ends where it started, onConnectionStateChanged never fires, and
+        // _pendingCommand is therefore never written. The socket then sits "connected"
+        // against a peer that is gone, and because every later request() takes this
+        // same branch, the client is wedged FOREVER.
+        //
+        // That is exactly what a daemon restart does to the request/response clients:
+        // the peer vanishes, the socket keeps reporting connected (only a
+        // QLocalSocket::PeerClosedError is logged), and shell.qml's 3s shell-focus /
+        // shell-state heartbeat silently stops reaching the daemon for the rest of the
+        // session -- leaving the daemon stranded on its shell_focus=true startup default
+        // with the gamepad grabbed into keyboard emulation (#402). Subscribe-mode
+        // clients never hit this because they reopen from reconnectTimer, i.e. always
+        // on a LATER turn; request mode was the odd one out.
         if (sock.connected) {
             client._reconnecting = true;
             sock.connected = false;
+            reopenTimer.restart();
+            return;
         }
         sock.connected = true;
     }
@@ -135,9 +154,13 @@ Item {
                     if (client._running)
                         reconnectTimer.restart();
                 } else if (client._reconnecting) {
-                    // Intentional close to replace an in-flight request — the
-                    // immediately-following reconnect will send the new command.
+                    // Intentional close to replace an in-flight request. Now that the
+                    // close has actually been observed, reopen on the next turn to send
+                    // _pendingCommand (reopenTimer is idempotent -- restart()ing an
+                    // already-pending timer just re-arms it).
                     client._reconnecting = false;
+                    if (client._pendingCommand !== "")
+                        reopenTimer.restart();
                 } else if (!client._gotResponse) {
                     // Request socket closed before any reply line.
                     client.requestFailed();
@@ -167,6 +190,27 @@ Item {
         onTriggered: {
             if (client.subscribe && client._running)
                 sock.connected = true;
+        }
+    }
+
+    // Deferred reopen for request/response clients. Fires on a later event-loop turn
+    // so the close above is actually observed as a transition before we reconnect --
+    // see the long comment in request(). Only reopens when a command is still queued,
+    // so a completed request never leaves a stray socket open.
+    Timer {
+        id: reopenTimer
+        interval: 0
+        repeat: false
+        onTriggered: {
+            if (client.subscribe || client._pendingCommand === "")
+                return;
+            if (sock.connected) {
+                // Still not actually closed -- re-arm rather than assume. Without this
+                // the request would be dropped silently on a slow close.
+                reopenTimer.restart();
+                return;
+            }
+            sock.connected = true;
         }
     }
 }
