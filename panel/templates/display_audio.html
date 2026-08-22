@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Display &amp; Audio — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Display &amp; Audio</h1>
+<p class="muted">Picture, night light, sleep/wake and sound sinks — the four <code>settings.json</code> groups that describe what comes out of the box.</p>
+<p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
+  {% if daemon_up %}
+    Daemon: up — these settings can be read and written
+  {% else %}
+    Daemon unreachable — these settings cannot be read or written
+  {% endif %}
+</p>
+
+<div id="settings-result"></div>
+
+{% if daemon_up %}
+<form hx-post="/devices/display-audio/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
+  {# One companion per group this form renders. Four of them here — this is the
+     page that makes the field repeatable rather than a single value; see
+     pages::settings::build_patch. #}
+  {% for group in scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+  {% for group in groups %}
+  <section class="settings-group">
+    <h3>{{ group.name }}</h3>
+    {% for field in group.fields %}
+    <div class="field-row">
+      <label for="{{ field.key }}">{{ field.label }}</label>
+      {{ field.input_html|safe }}
+    </div>
+    {% endfor %}
+  </section>
+  {% endfor %}
+  <button type="submit">Save display &amp; audio</button>
+</form>
+{% else %}
+<p class="degraded-msg">These forms are unavailable while the daemon is unreachable — it is the only writer of <code>settings.json</code>.</p>
+{% endif %}
+{% endblock %}

@@ -106,22 +106,29 @@ page.
 
 | Page | From | Notes |
 |---|---|---|
-| **Appearance** | Settings (Appearance group) + Media (Wallpapers) | Theme/text-scale/reduce-motion sit next to the wallpaper picker that they visually combine with |
+| **Appearance** | Settings (Appearance group) + Media (Wallpapers) | ✅ the settings half landed in phase 3 at `/shell/appearance`; the wallpaper picker joins it in phase 4 |
 | **Widgets** | Widgets | Unchanged |
-| **Apps** | Settings (`prewarmApps`) + Media (Web apps) | Both are "what can launch on this box" |
-| **Advanced** | Settings (daemon-owned keys, read-only `config.toml`, raw-JSON hatch) | All three escape hatches quarantined behind one deliberate click |
+| **Apps** | Settings (`prewarmApps`) + Media (Web apps) | ✅ the `prewarmApps` half landed in phase 3 at `/shell/apps`; the web-app registry joins it in phase 4. Both are "what can launch on this box" |
+| **Advanced** | Settings (daemon-owned keys, read-only `config.toml`, raw-JSON hatch) | ✅ landed in phase 3 — all three escape hatches quarantined behind one deliberate click |
 
 Quarantining the escape hatches is the single biggest win here: the raw-JSON
 textarea can write *any* key including the daemon-owned binding layers, and it
-currently sits directly below ordinary typed toggles on the same scroll.
+used to sit directly below ordinary typed toggles on the same scroll.
+
+Splitting one form into five made the save patch's scope load-bearing: the
+builder writes every checkbox in scope as an explicit `true`/`false`, so an
+unscoped save from one page would have cleared the other four pages' toggles.
+Each form now declares the schema groups it owns and the patch is restricted to
+them, fail-closed when nothing is declared — see PANEL.md's
+[Scoped settings saves](PANEL.md#scoped-settings-saves).
 
 ### Devices
 
 | Page | From | Notes |
 |---|---|---|
-| **Controllers** | Controllers | Unchanged — already single-subject |
-| **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | |
-| **CEC** | CEC + Settings (CEC group) | Config and actions finally on one page |
+| **Controllers** | Controllers | Already single-subject; phase 3 added Settings' `Input` group (`controllerDebug`, `rumbleEnabled`), which is the same subject |
+| **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | ✅ landed in phase 3 at `/devices/display-audio` |
+| **CEC** | CEC + Settings (CEC group) | ✅ landed in phase 3 — config and actions on one page. The `settings.json` group stays visibly distinct from the `[cec].osd_name` `config.toml` editor beneath it |
 | **Network** | Tools (Network, Bluetooth) | |
 
 ### Remote
@@ -145,7 +152,9 @@ Moving the raw console here consolidates the danger surface: after this, every
 ### Dissolved pages
 
 **Settings**, **Media**, and **Tools** cease to exist. Each was a container for
-"things that didn't fit elsewhere" rather than a subject.
+"things that didn't fit elsewhere" rather than a subject. **Settings** is gone as
+of phase 3 — `/settings` now forwards to `/shell/appearance`; Media and Tools go
+in phase 4.
 
 ## Services (new)
 
@@ -242,7 +251,7 @@ Each phase ships independently and leaves the panel working.
 |---|---|---|---|
 | **1** ✅ landed | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — | #405 |
 | **2** ✅ landed | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
-| **3** | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC. | 1 | #407 |
+| **3** ✅ landed | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC — plus the `Input` group onto Devices/Controllers. Saves are now scoped to the groups the submitting form rendered. | 1 | #407 |
 | **4** | Dissolve **Media** and **Tools** → Shell/*, Devices/Network, Remote/*, Dev/Console. | 1, 3 | #408 |
 | **5** | Services: read any unit; `managed_units` config; sudoers generation in the ansible role; danger-tier confirms. | 2 | #409 |
 | **6** | Overview rebuilt as pure read-only tiles with deep links. | 2-5 | #410 |

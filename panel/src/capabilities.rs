@@ -368,10 +368,11 @@ fn group_of(page_key: &str) -> &str {
 /// `crate::tests::nav_items_agree_with_the_route_table_they_link_to` can pin
 /// the two together.
 ///
-/// This is the phase-2 shape of `docs/PANEL_IA.md`: the groups are final and
-/// System is at its final four pages, but three pages (Shell ▸ Media,
-/// Remote ▸ Tools, and Shell ▸ Settings) are still the pre-split grab-bags,
-/// and dissolve in phases 3-4.
+/// This is the phase-3 shape of `docs/PANEL_IA.md`: the groups are final,
+/// System and Shell are at their final pages apart from Shell ▸ Media, and
+/// Devices is one page short of its final four. Media and Remote ▸ Tools are
+/// still the pre-split grab-bags and dissolve in phase 4, which also brings
+/// Devices ▸ Network and Dev ▸ Console/Screenshot.
 pub const NAV: &[NavGroup] = &[
     NavGroup {
         label: "Overview",
@@ -418,9 +419,9 @@ pub const NAV: &[NavGroup] = &[
         key: "shell",
         pages: &[
             NavPage {
-                href: "/shell/settings",
-                label: "Settings",
-                key: "shell.settings",
+                href: "/shell/appearance",
+                label: "Appearance",
+                key: "shell.appearance",
                 gate: Gate::SettingsStore,
             },
             NavPage {
@@ -429,6 +430,21 @@ pub const NAV: &[NavGroup] = &[
                 key: "shell.widgets",
                 gate: Gate::Widgets,
             },
+            NavPage {
+                href: "/shell/apps",
+                label: "Apps",
+                key: "shell.apps",
+                gate: Gate::SettingsStore,
+            },
+            NavPage {
+                href: "/shell/advanced",
+                label: "Advanced",
+                key: "shell.advanced",
+                gate: Gate::SettingsStore,
+            },
+            // Last on purpose: Media is the pre-IA grab-bag (wallpapers + web
+            // apps) and phase 4 dissolves it into Appearance and Apps above,
+            // at which point this entry and its page go away.
             NavPage {
                 href: "/shell/media",
                 label: "Media",
@@ -448,11 +464,18 @@ pub const NAV: &[NavGroup] = &[
                 gate: Gate::Controllers,
             },
             NavPage {
+                href: "/devices/display-audio",
+                label: "Display & Audio",
+                key: "devices.display-audio",
+                gate: Gate::SettingsStore,
+            },
+            NavPage {
                 href: "/devices/cec",
                 label: "CEC",
                 key: "devices.cec",
                 gate: Gate::Cec,
             },
+            // Network arrives in phase 4, out of the Tools page.
         ],
     },
     NavGroup {
@@ -983,7 +1006,13 @@ mod tests {
         let shell_all = Chrome::new(&CapabilitySnapshot::fully_capable(), "shell.widgets");
         assert_eq!(
             shell_all.subnav.iter().map(|p| p.href).collect::<Vec<_>>(),
-            vec!["/shell/settings", "/shell/widgets", "/shell/media"],
+            vec![
+                "/shell/appearance",
+                "/shell/widgets",
+                "/shell/apps",
+                "/shell/advanced",
+                "/shell/media",
+            ],
             "with every gate open the whole group is its own sub-nav"
         );
     }

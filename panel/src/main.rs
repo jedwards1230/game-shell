@@ -393,10 +393,35 @@ fn build_router(state: SharedState) -> Router {
     //
     // The upload route raises the body limit past axum's 2 MB default;
     // `MAX_UPLOAD_BYTES` is still enforced per-file in the handler.
+    // Two routes here belong to pages registered in OTHER blocks: the CEC
+    // settings group (`/devices/cec/config`, whose page is in the `Gate::Cec`
+    // block) and the Input settings group
+    // (`/devices/controllers/settings/save`, whose page is in the
+    // `Gate::Controllers` block). A block condition may name exactly one
+    // capability — there is no two-capability AND — and `set-config` is the
+    // capability these two actually need, so they sit here. The consequence is
+    // that each can exist with no page in front of it, which is harmless and
+    // already precedented by `/tools/raw`; the inverse — a page rendering a
+    // form that posts to an unregistered route — is NOT harmless, so both
+    // pages render their settings form only under
+    // `caps.allows(Gate::SettingsStore)`.
     let app = if caps.allows(Gate::SettingsStore) {
-        app.route("/shell/settings", get(pages::settings::page))
-            .route("/settings/save", post(pages::settings::save))
-            .route("/settings/raw", post(pages::settings::save_raw))
+        app.route("/shell/appearance", get(pages::appearance::page))
+            .route("/shell/appearance/save", post(pages::appearance::save))
+            .route("/shell/apps", get(pages::apps::page))
+            .route("/shell/apps/save", post(pages::apps::save))
+            .route("/shell/advanced", get(pages::advanced::page))
+            .route("/shell/advanced/raw", post(pages::advanced::save_raw))
+            .route("/devices/display-audio", get(pages::display_audio::page))
+            .route(
+                "/devices/display-audio/save",
+                post(pages::display_audio::save),
+            )
+            .route("/devices/cec/config", post(pages::cec::save_config))
+            .route(
+                "/devices/controllers/settings/save",
+                post(pages::controllers::save_settings),
+            )
             .route("/shell/media", get(pages::media::page))
             .route(
                 "/media/wallpaper/upload",

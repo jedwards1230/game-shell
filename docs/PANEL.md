@@ -118,14 +118,43 @@ partials moved without redirects — they are poll targets, not bookmarks.
 | Services | `/system/services` | the three tv-shell systemd **user** units (daemon/shell/panel) with a per-unit Restart (color-coded dot + status word, not just text). `POST /system/services/restart/{key}` matches `key` against that fixed three-key set and resolves it to a real unit name **server-side** — an arbitrary client-supplied unit name never reaches `systemctl`. The panel's own unit carries a distinct confirm saying the restart will disconnect the page you are looking at. Reading arbitrary units and the configurable `managed_units` restart allowlist are phase 5 (#409) |
 | Processes | `/system/processes` | **read-only observation, no actions at all**: Hyprland active window/clients (styled table)/monitors via IPC, and a top-processes table (`ps`, CPU-sorted, no kill action in v1) |
 | Updates | `/system/updates` | the pacman System Updates section — pending-package table, cache-bypassing Refresh, the background full-update job and its self-terminating status poll (see [System updates](#system-updates-pacman) below) |
-| Settings | `/shell/settings` | grouped typed forms over `settings.json` via `get-config`/`set-config` (shallow merge — unmentioned keys, notably the daemon-owned `keyBindings`/`perGameBindings`/`perPlayerBindings`/`webApps`, are left untouched); covers the QML-owned scalars plus `wallpaperPath` and a line-per-entry `prewarmApps` list editor; the daemon-owned keys (binding layers + the `webApps` registry, `docs/WEB_APPS.md`) are shown read-only here (`keyBindings` is also editable via the Controllers page's bindings editor; the per-game/per-player layers are read-only there too — full editors are deferred; web-app **management** now lives on the Media page); read-only `config.toml` view (a general edit path is deferred — editing still requires a manual edit + daemon/panel restart via the Dev page; the one targeted exception is the CEC page's `[cec].osd_name` input-name editor); raw JSON escape hatch with an explicit shallow-merge/`null`-deletes warning for keys not modeled as typed fields (e.g. `widgets`, `cecDeviceNames`) |
+| Appearance | `/shell/appearance` | the `Appearance` slice of `settings.json` — theme mode, the two auto-theme hours, reduce-motion, text scale — as typed fields over `get-config`/`set-config` (shallow merge; unmentioned keys are left untouched). Phase 4 (#408) folds the Media page's wallpaper picker in beside it |
 | Widgets | `/shell/widgets` | per-widget enabled/order/size/prefs editors (`widgets.<id>` subtree) |
+| Apps | `/shell/apps` | the `prewarmApps` list editor (one `StartupWMClass` per line; an emptied box clears the list to `[]`). Phase 4 folds the Media page's web-app registry in here |
+| Advanced | `/shell/advanced` | the three escape hatches, quarantined behind one deliberate click: the daemon-owned keys (binding layers + the `webApps` registry, `docs/WEB_APPS.md`) **read-only** — `keyBindings` is editable via the Controllers page's bindings editor, the per-game/per-player layers are read-only there too; a **read-only** `config.toml` view (a general edit path is deferred — editing still requires a manual edit + daemon/panel restart via the Dev page; the one targeted exception anywhere is the CEC page's `[cec].osd_name` editor); and the raw-JSON hatch with its explicit shallow-merge/`null`-deletes warning, which can write *any* key including ones no typed form models (`widgets`, `cecDeviceNames`) and the daemon-owned layers. Client-side JSON-object validation for immediate feedback, with the server-side object check as the authoritative gate |
+| Display &amp; Audio | `/devices/display-audio` | the `Display`, `Night Light`, `Power` and `Audio` slices of `settings.json` on one form — HDR, overscan, auto-dim, `wallpaperPath`, night-light schedule/temperature, sleep timer, wake-on-controller, default sink and card profile. Phase 4 (#408) adds the Tools page's power probes |
 | Media | `/shell/media` | **Wallpapers**: upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one (persisted as `wallpaperPath` via `set-config`) or clear it, and delete — this is the only way to get an image onto the box without SSH. Upload is treated as an attack surface in its own right (the route is authenticated, but auth is opt-in and a loopback panel may run without it): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. **Web apps**: list/add/remove the daemon-owned registry (`webapp-list`/`-add`/`-remove`, #187 P1+P3) — the panel is the add surface because the couch UI has no on-screen keyboard (#20) |
 | Tools | `/remote/tools` | IPC console grouped by domain — Navigation (intent/key), Apps (list/launch/recents), Bluetooth (power/scan/list/connect-disconnect-pair-trust), Network (status/wifi/throughput/ping), Power (can-suspend/battery), System (sys-status/sys-metrics/storage-status/build-info/controllerdb); plus a raw-line escape hatch with a warning on commands owned by another page's guarded flow. CEC and controller/pads/bindings commands live on their own Controllers/CEC pages (below) instead. |
-| Controllers | `/devices/controllers` | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Settings raw JSON hatch); controller-DB status/refresh |
-| CEC | `/devices/cec` | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides from Settings); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname) — **the panel's one config.toml write**, done format-preservingly via `toml_edit`, applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
+| Controllers | `/devices/controllers` | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Advanced page's raw JSON hatch); the `Input` slice of `settings.json` (`controllerDebug`, `rumbleEnabled`), rendered only when the node declares `settings_store` because its save route lives in that block; controller-DB status/refresh |
+| CEC | `/devices/cec` | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; the `CEC` slice of `settings.json` (claim active source on startup/wake, auto-switch on device power-on, default input) so config and actions finally share a page, rendered only when the node declares `settings_store` because its save route lives in that block; and — distinct from all of the above — an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname), **the panel's one config.toml write**, done format-preservingly via `toml_edit` and applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
 | Dev | `/dev/recovery` | restart daemon/restart shell (always available — unit restart is recovery) plus reboot/suspend behind `allow_dangerous` and deploy/build behind `allow_dangerous` **and** the node's `dev_deploy` capability, all with tier labels + confirms; screenshot viewer (provenance sha/branch/version/captured-at, proxied via `/dev/screenshot`, gated on the node's `screenshot` capability) |
 | Logs | `/system/logs` | shell + daemon log tails (ANSI-stripped — including "bare" ESC-dropped residue like `[33m`/`[0m` — and wrapped rather than clipped), free-text filter plus one-click "Errors only"/"Hide icon noise" presets, and a Focus Shell/Focus Daemon toggle to expand one pane to full width (state lives on `#log-panels` itself, so it survives every htmx refresh of the panes inside it) |
+
+### Scoped settings saves
+
+`settings.json` is edited from five forms across five pages (Appearance, Apps,
+Display & Audio, CEC, Controllers). They share one schema and one patch builder
+in `pages::settings`, and the patch is **scoped to the groups the submitting
+form actually rendered**.
+
+That scoping is load-bearing, not tidiness. The builder writes every `Bool` in
+scope as an explicit `true`/`false` — which is correct, because an unchecked box
+is not absent, it is `false` — so an unscoped patch from one page would clear
+the 10 checkboxes belonging to the other four. The mechanism:
+
+- each form emits one `<input type="hidden" name="__group" value="…">` per
+  `SettingField::group` it renders (Display & Audio emits four);
+- the extractor is an ordered `Vec<(String, String)>` rather than a map, so the
+  repeated companions survive;
+- `build_patch` skips every schema entry whose group was not declared;
+- **no `__group` is an error, not a default.** Falling back to "all groups"
+  would be exactly the bug;
+- a `__group` value unknown to the schema is an error, and so is one outside the
+  route's own group list — that list is a server-side constant per page, so a
+  hand-rolled POST cannot borrow one page's save route to write another's group.
+
+`widgets` and `cecDeviceNames` are `FieldKind::Complex`: never rendered as a
+typed field, never in a typed patch, editable only from Advanced's raw hatch.
 
 ### Navigation
 
@@ -326,8 +355,19 @@ tiers — `panel/src/capabilities.rs`:
 |---|---|---|
 | **Recovery** | always | Overview, Services (+ unit restarts), Processes, Updates, Logs, Dev (+ unit restarts), login, assets |
 | **Node** | the handshake succeeded | Tools console |
-| **Capability** | the node declared that `Feature` | Settings **and the whole Media page incl. the wallpaper files** (`settings_store`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the Dev screenshot pair (`screenshot`) |
+| **Capability** | the node declared that `Feature` | Appearance, Apps, Advanced, Display & Audio, **the whole Media page incl. the wallpaper files**, and the CEC/Input groups' save routes (`settings_store`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the Dev screenshot pair (`screenshot`) |
 | **Danger** | `[panel].allow_dangerous`, intersected with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy` |
+
+**Two save routes sit in a block their page does not.** A registration block's
+condition may name exactly one capability — `crate::tests`'s `main.rs` parser
+accepts `allow_dangerous`, `caps.allows(Gate::X)`, or those two ANDed, and
+nothing else — so `POST /devices/cec/config` and `POST
+/devices/controllers/settings/save` are registered under `settings_store` while
+the CEC and Controllers *pages* stay under `cec`/`controllers`. `set-config` is
+the capability those two routes actually need. The harmless direction (a route
+with no page in front of it) is already precedented by `/tools/raw`; the harmful
+one — a page rendering a form that posts to an unregistered route — is closed by
+rendering each of those forms only under `caps.allows(Gate::SettingsStore)`.
 
 **A gated-off route 404s — it does not exist.** Non-registration, not a 403 from
 a handler: honest, and it leaks nothing about what the node can do. Both nav

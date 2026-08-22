@@ -34,12 +34,43 @@
 
 {{ bindings_section_html|safe }}
 
+{% if settings_enabled %}
+<section class="controllers-section">
+  <h2>Input settings <span class="muted">(settings.json)</span></h2>
+  <p class="muted">
+    The two shell-side input toggles. Written through the daemon's <code>set-config</code>.
+  </p>
+  {% if settings_groups.is_empty() %}
+  <p class="degraded-msg">Daemon unreachable — these settings cannot be read or written.</p>
+  {% else %}
+  <form hx-post="/devices/controllers/settings/save" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML">
+    {# Scopes the save to the Input group. Without these the patch would carry
+       every Bool in the schema and clear the other settings pages' toggles —
+       see pages::settings::build_patch. #}
+    {% for group in settings_scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+    {% for group in settings_groups %}
+    <div class="settings-group">
+      {% for field in group.fields %}
+      <div class="field-row">
+        <label for="{{ field.key }}">{{ field.label }}</label>
+        {{ field.input_html|safe }}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <button type="submit">Save input settings</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="controllers-section">
   <h2>Per-game / per-player bindings <span class="muted">(read-only)</span></h2>
   <p class="muted">
     Additive override layers on top of the global bindings above (resolution order:
-    game → player → global → default). Editing is deferred to a future milestone — use the
-    <a href="/shell/settings">Settings</a> raw JSON escape hatch to change them directly.
+    game → player → global → default). Editing is deferred to a future milestone — use
+    {% if settings_enabled %}<a href="/shell/advanced">Shell ▸ Advanced</a>'s{% else %}Shell ▸ Advanced's{% endif %}
+    raw JSON escape hatch to change them directly.
   </p>
   {% if config_error.is_empty() %}
   <h3>Per-game <span class="muted">(<code>perGameBindings</code>)</span></h3>

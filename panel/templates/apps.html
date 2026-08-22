@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Apps — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Apps</h1>
+<p class="muted">What the shell keeps warm at login. One <code>StartupWMClass</code> per line; an emptied box clears the list.</p>
+<p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
+  {% if daemon_up %}
+    Daemon: up — these settings can be read and written
+  {% else %}
+    Daemon unreachable — these settings cannot be read or written
+  {% endif %}
+</p>
+
+<div id="settings-result"></div>
+
+{% if daemon_up %}
+<form hx-post="/shell/apps/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
+  {# Scopes the save to this page's schema groups — see
+     pages::settings::build_patch. #}
+  {% for group in scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+  {% for group in groups %}
+  <section class="settings-group">
+    {% for field in group.fields %}
+    <div class="field-row">
+      <label for="{{ field.key }}">{{ field.label }}</label>
+      {{ field.input_html|safe }}
+    </div>
+    {% endfor %}
+  </section>
+  {% endfor %}
+  <button type="submit">Save apps</button>
+</form>
+{% else %}
+<p class="degraded-msg">The apps form is unavailable while the daemon is unreachable — it is the only writer of <code>settings.json</code>.</p>
+{% endif %}
+{% endblock %}

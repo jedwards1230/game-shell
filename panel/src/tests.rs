@@ -346,107 +346,345 @@ fn state_for_socket_with_caps(sock: std::path::PathBuf, caps: CapabilitySnapshot
     })
 }
 
-#[tokio::test]
-async fn settings_page_renders_current_config() {
-    let (sock, _received) = spawn_config_daemon(
-        "settings-page",
-        r#"{"themeMode":"light","rumbleEnabled":false}"#,
-    );
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let state = state_for_socket(sock);
-    let html = pages::settings::render_page(&state).await;
-    assert!(!html.is_empty());
-    assert!(
-        html.contains("light"),
-        "settings page must render the current themeMode value: {html}"
-    );
+/// Form fields as a browser posts them — an ordered list of pairs, so the
+/// repeated `__group` companions survive (a map would keep only the last).
+fn form(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
 }
 
-#[tokio::test]
-async fn settings_save_sends_expected_patch() {
-    let (sock, received) = spawn_config_daemon("settings-save", "{}");
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let state = state_for_socket(sock);
-
-    let mut form: HashMap<String, String> = HashMap::new();
-    form.insert("themeMode".to_string(), "light".to_string());
-    form.insert("rumbleEnabled".to_string(), "on".to_string()); // checked
-    form.insert("wallpaperPath".to_string(), "/home/u/wall.png".to_string());
-    // StrList textarea: blank + padded lines must be dropped, order kept.
-    form.insert(
-        "prewarmApps".to_string(),
-        "tv.plex.PlexHTPC\r\n\r\n  com.spotify.Client  \n".to_string(),
-    );
-    // controllerDebug intentionally absent from the form -> must become
-    // explicit `false`, not be omitted.
-
-    let html = pages::settings::render_save(&state, &form).await;
-    assert!(
-        html.to_lowercase().contains("saved"),
-        "expected ok result: {html}"
-    );
-
+/// The one `set-config` line a save is expected to have produced, parsed.
+fn only_patch(received: &Arc<std::sync::Mutex<Vec<String>>>) -> serde_json::Value {
     let sent = received.lock().unwrap().clone();
     assert_eq!(
         sent.len(),
         1,
         "expected exactly one set-config call: {sent:?}"
     );
-    let patch: serde_json::Value = serde_json::from_str(&sent[0]).unwrap();
+    serde_json::from_str(&sent[0]).unwrap()
+}
+
+#[tokio::test]
+async fn appearance_page_renders_current_config() {
+    let (sock, _received) = spawn_config_daemon(
+        "appearance-page",
+        r#"{"themeMode":"light","rumbleEnabled":false}"#,
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+    let html = pages::appearance::render_page(&state).await;
+    assert!(!html.is_empty());
+    assert!(
+        html.contains("light"),
+        "the Appearance page must render the current themeMode value: {html}"
+    );
+    assert!(
+        html.contains(r#"name="__group" value="Appearance""#),
+        "the form must declare the schema group it owns, or its save would \
+         patch every group: {html}"
+    );
+    assert!(
+        !html.contains(r#"name="hdrEnabled""#),
+        "hdrEnabled belongs to Display & Audio and must not render here: {html}"
+    );
+}
+
+/// **The scoped-save property, and the reason it exists.** Splitting one form
+/// into five means an unscoped patch would write `false` to every `Bool` the
+/// submitting page does not even render — silent data loss across four other
+/// pages. A save must touch only the groups its form declared.
+#[tokio::test]
+async fn appearance_save_patches_only_the_appearance_group() {
+    let (sock, received) = spawn_config_daemon("appearance-save", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    // `reduceMotion` is deliberately absent: an unchecked box WITHIN the
+    // submitted group must still be written as explicit `false`.
+    let pairs = form(&[
+        ("__group", "Appearance"),
+        ("themeMode", "light"),
+        ("autoThemeDarkStart", "21"),
+        ("textScale", "1.25"),
+    ]);
+    let html = pages::appearance::render_save(&state, &pairs).await;
+    assert!(
+        html.to_lowercase().contains("saved"),
+        "expected ok result: {html}"
+    );
+
+    let patch = only_patch(&received);
     assert_eq!(patch["themeMode"], "light");
-    assert_eq!(patch["rumbleEnabled"], true);
-    assert_eq!(patch["controllerDebug"], false);
-    assert_eq!(patch["wallpaperPath"], "/home/u/wall.png");
+    assert_eq!(patch["autoThemeDarkStart"], 21);
+    assert_eq!(
+        patch["reduceMotion"], false,
+        "an unchecked box inside the submitted group is still an explicit \
+         false — that behaviour predates the split and must survive: {patch}"
+    );
+    for other in [
+        "hdrEnabled",        // Display
+        "nightLightEnabled", // Night Light
+        "wakeOnController",  // Power
+        "defaultSink",       // Audio
+        "controllerDebug",   // Input
+        "rumbleEnabled",     // Input
+        "cecFocusOnWake",    // CEC
+        "prewarmApps",       // Apps
+    ] {
+        assert!(
+            patch.get(other).is_none(),
+            "{other} belongs to another page's group and must be ABSENT from an \
+             Appearance patch, not written false: {patch}"
+        );
+    }
+    // The daemon-owned layers and the Complex keys stay out, as before.
+    for never in [
+        "webApps",
+        "keyBindings",
+        "perGameBindings",
+        "perPlayerBindings",
+        "widgets",
+    ] {
+        assert!(
+            patch.get(never).is_none(),
+            "{never} must never appear in a typed save patch: {patch}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apps_save_patches_only_the_apps_group() {
+    let (sock, received) = spawn_config_daemon("apps-save", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    // StrList textarea: blank + padded lines dropped, order kept.
+    let pairs = form(&[
+        ("__group", "Apps"),
+        (
+            "prewarmApps",
+            "tv.plex.PlexHTPC\r\n\r\n  com.spotify.Client  \n",
+        ),
+    ]);
+    let html = pages::apps::render_save(&state, &pairs).await;
+    assert!(
+        html.to_lowercase().contains("saved"),
+        "expected ok result: {html}"
+    );
+
+    let patch = only_patch(&received);
     assert_eq!(
         patch["prewarmApps"],
         serde_json::json!(["tv.plex.PlexHTPC", "com.spotify.Client"])
     );
-    assert!(
-        patch.get("webApps").is_none(),
-        "webApps is daemon-owned and must never appear in a Settings save patch: {patch}"
-    );
-    assert!(
-        patch.get("keyBindings").is_none(),
-        "keyBindings must never appear in a Settings save patch: {patch}"
-    );
-    assert!(
-        patch.get("perGameBindings").is_none(),
-        "perGameBindings must never appear in a Settings save patch: {patch}"
-    );
-    assert!(
-        patch.get("perPlayerBindings").is_none(),
-        "perPlayerBindings must never appear in a Settings save patch: {patch}"
-    );
-    assert!(
-        patch.get("widgets").is_none(),
-        "widgets must never appear in a Settings save patch: {patch}"
+    assert_eq!(
+        patch.as_object().unwrap().len(),
+        1,
+        "the Apps group is one key — nothing else may ride along: {patch}"
     );
 }
 
 #[tokio::test]
-async fn settings_page_renders_pretty_printed_raw_json() {
+async fn display_audio_page_declares_all_four_of_its_groups() {
+    let (sock, _received) = spawn_config_daemon("display-audio-page", r#"{"overscan":3}"#);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+    let html = pages::display_audio::render_page(&state).await;
+    for group in ["Display", "Night Light", "Power", "Audio"] {
+        assert!(
+            html.contains(&format!(r#"name="__group" value="{group}""#)),
+            "a form owning four groups must emit a companion for each — {group} \
+             is missing, so its fields would be dropped from the patch: {html}"
+        );
+    }
+    assert!(
+        html.contains(r#"value="3""#),
+        "the page must prefill from the current document: {html}"
+    );
+    assert!(
+        !html.contains(r#"name="themeMode""#),
+        "themeMode belongs to Appearance and must not render here: {html}"
+    );
+}
+
+#[tokio::test]
+async fn display_audio_save_patches_its_four_groups_and_no_others() {
+    let (sock, received) = spawn_config_daemon("display-audio-save", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let pairs = form(&[
+        ("__group", "Display"),
+        ("__group", "Night Light"),
+        ("__group", "Power"),
+        ("__group", "Audio"),
+        ("hdrEnabled", "on"),
+        ("overscan", "2"),
+        ("wallpaperPath", "/home/u/wall.png"),
+        ("nightLightTemp", "3800"),
+        ("sleepTimerMinutes", "30"),
+        ("defaultSink", "hdmi"),
+    ]);
+    let html = pages::display_audio::render_save(&state, &pairs).await;
+    assert!(
+        html.to_lowercase().contains("saved"),
+        "expected ok result: {html}"
+    );
+
+    let patch = only_patch(&received);
+    assert_eq!(patch["hdrEnabled"], true);
+    assert_eq!(patch["overscan"], 2);
+    assert_eq!(patch["wallpaperPath"], "/home/u/wall.png");
+    assert_eq!(patch["nightLightTemp"], 3800);
+    assert_eq!(patch["sleepTimerMinutes"], 30);
+    assert_eq!(patch["defaultSink"], "hdmi");
+    // Unchecked boxes across all four submitted groups: explicit false.
+    assert_eq!(patch["autoDimEnabled"], false);
+    assert_eq!(patch["nightLightEnabled"], false);
+    assert_eq!(patch["wakeOnController"], false);
+    for other in [
+        "themeMode",
+        "reduceMotion",
+        "controllerDebug",
+        "cecFocusOnWake",
+    ] {
+        assert!(
+            patch.get(other).is_none(),
+            "{other} is another page's group: {patch}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cec_config_save_patches_only_the_cec_group() {
+    let (sock, received) = spawn_config_daemon("cec-config-save", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let pairs = form(&[
+        ("__group", "CEC"),
+        ("cecFocusOnWake", "on"),
+        ("cecDefaultInput", "4"),
+    ]);
+    let html = pages::settings::render_save(&state, &["CEC"], &pairs).await;
+    assert!(
+        html.to_lowercase().contains("saved"),
+        "expected ok result: {html}"
+    );
+
+    let patch = only_patch(&received);
+    assert_eq!(patch["cecFocusOnWake"], true);
+    assert_eq!(patch["cecDefaultInput"], 4);
+    assert_eq!(patch["cecFocusOnStartup"], false);
+    assert_eq!(patch["cecAutoSwitchOnPowerOn"], false);
+    assert!(
+        patch.get("cecDeviceNames").is_none(),
+        "cecDeviceNames is FieldKind::Complex — raw-JSON only: {patch}"
+    );
+    for other in ["themeMode", "rumbleEnabled", "hdrEnabled"] {
+        assert!(
+            patch.get(other).is_none(),
+            "{other} is another page's group: {patch}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn controllers_settings_save_patches_only_the_input_group() {
+    let (sock, received) = spawn_config_daemon("controllers-settings-save", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let pairs = form(&[("__group", "Input"), ("rumbleEnabled", "on")]);
+    let html = pages::settings::render_save(&state, &["Input"], &pairs).await;
+    assert!(
+        html.to_lowercase().contains("saved"),
+        "expected ok result: {html}"
+    );
+
+    let patch = only_patch(&received);
+    assert_eq!(patch["rumbleEnabled"], true);
+    assert_eq!(patch["controllerDebug"], false);
+    assert_eq!(
+        patch.as_object().unwrap().len(),
+        2,
+        "the Input group is exactly two keys: {patch}"
+    );
+}
+
+/// **Fail closed on a form that declares nothing.** Defaulting to "all groups"
+/// is precisely the data-loss bug the `__group` companions exist to prevent,
+/// so a submission without one is an error and reaches no daemon at all.
+#[tokio::test]
+async fn a_settings_save_with_no_group_is_refused() {
+    let (sock, received) = spawn_config_daemon("settings-no-group", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let pairs = form(&[("themeMode", "light")]);
+    let html = pages::appearance::render_save(&state, &pairs).await;
+    assert!(
+        html.contains("__group"),
+        "the error must name the missing field: {html}"
+    );
+    assert!(
+        !html.to_lowercase().contains("settings saved"),
+        "nothing may be reported as saved: {html}"
+    );
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "a scope-less submission must not reach set-config at all"
+    );
+}
+
+#[test]
+fn an_unknown_settings_group_is_refused() {
+    let pairs = form(&[("__group", "Appearanc"), ("themeMode", "light")]);
+    let err = pages::settings::build_patch(&["Appearance"], &pairs)
+        .expect_err("a typo'd group must not silently skip every field");
+    assert!(err.contains("unknown settings group"), "{err}");
+}
+
+/// A route's group list is a server-side constant, so a hand-rolled POST
+/// cannot borrow one page's save route to write another page's group.
+#[test]
+fn a_form_cannot_declare_a_group_its_route_does_not_own() {
+    let pairs = form(&[("__group", "Display"), ("hdrEnabled", "on")]);
+    let err = pages::settings::build_patch(&["Appearance"], &pairs)
+        .expect_err("Appearance's route must refuse to patch Display");
+    assert!(err.contains("not owned"), "{err}");
+}
+
+#[tokio::test]
+async fn advanced_page_renders_pretty_printed_raw_json() {
     let (sock, _received) = spawn_config_daemon(
-        "settings-raw-pretty-render",
+        "advanced-raw-pretty-render",
         r#"{"themeMode":"dark","rumbleEnabled":true}"#,
     );
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
-    let html = pages::settings::render_page(&state).await;
+    let html = pages::advanced::render_page(&state).await;
     assert!(
         html.contains("{\n"),
         "expected the raw JSON escape hatch to be pretty-printed (multi-line): {html}"
     );
+    assert!(
+        html.contains("shallow merge") && html.contains("<code>null</code>"),
+        "the hatch must keep its shallow-merge / null-deletes warning: {html}"
+    );
 }
 
 #[tokio::test]
-async fn settings_raw_pretty_input_is_sent_compact() {
+async fn advanced_raw_pretty_input_is_sent_compact() {
     // The textarea round-trips a pretty-printed, multi-line document — the
     // set-config call it triggers must still be a single compact line.
-    let (sock, received) = spawn_config_daemon("settings-raw-compact", "{}");
+    let (sock, received) = spawn_config_daemon("advanced-raw-compact", "{}");
     tokio::time::sleep(Duration::from_millis(20)).await;
     let state = state_for_socket(sock);
     let pretty = "{\n  \"themeMode\": \"light\"\n}";
-    let html = pages::settings::render_save_raw(&state, pretty).await;
+    let html = pages::advanced::render_save_raw(&state, pretty).await;
     assert!(
         html.to_lowercase().contains("merged"),
         "expected an ok result: {html}"
@@ -464,10 +702,10 @@ async fn settings_raw_pretty_input_is_sent_compact() {
 }
 
 #[tokio::test]
-async fn settings_raw_rejects_malformed_json() {
+async fn advanced_raw_rejects_malformed_json() {
     // No daemon needed: malformed JSON must be rejected before any IPC call.
     let state = hermetic_state();
-    let html = pages::settings::render_save_raw(&state, "not json").await;
+    let html = pages::advanced::render_save_raw(&state, "not json").await;
     assert!(!html.is_empty());
     assert!(
         html.to_lowercase().contains("invalid"),
@@ -476,23 +714,85 @@ async fn settings_raw_rejects_malformed_json() {
 }
 
 #[tokio::test]
-async fn settings_raw_rejects_non_object_json() {
+async fn advanced_raw_rejects_non_object_json() {
     let state = hermetic_state();
-    let html = pages::settings::render_save_raw(&state, "[1,2,3]").await;
+    let html = pages::advanced::render_save_raw(&state, "[1,2,3]").await;
     assert!(
         html.to_lowercase().contains("invalid") || html.to_lowercase().contains("object"),
         "expected an error marker for a non-object JSON body: {html}"
     );
 }
 
+/// Every page the Settings page dissolved into degrades the same way it did:
+/// still 200, an honest note, no form — and Advanced still shows the
+/// `config.toml` view it owns, which needs no daemon.
 #[tokio::test]
-async fn settings_page_degrades_when_daemon_unreachable() {
+async fn the_settings_pages_degrade_when_the_daemon_is_unreachable() {
     let state = hermetic_state();
-    let html = pages::settings::render_page(&state).await;
-    assert!(!html.is_empty());
+    for (name, html) in [
+        ("appearance", pages::appearance::render_page(&state).await),
+        ("apps", pages::apps::render_page(&state).await),
+        ("advanced", pages::advanced::render_page(&state).await),
+        (
+            "display-audio",
+            pages::display_audio::render_page(&state).await,
+        ),
+    ] {
+        assert!(!html.is_empty(), "{name} rendered nothing");
+        assert!(
+            html.to_lowercase().contains("unreachable"),
+            "{name} must show an unreachable marker when the daemon is down: {html}"
+        );
+        assert!(
+            !html.contains(r#"name="__group""#),
+            "{name} must not render a settings form it cannot submit: {html}"
+        );
+    }
+    let advanced = pages::advanced::render_page(&state).await;
     assert!(
-        html.to_lowercase().contains("unreachable"),
-        "settings page must show an unreachable marker when the daemon is down: {html}"
+        advanced.contains("config.toml"),
+        "Advanced owns the config.toml view, which reads the panel's own \
+         filesystem and survives a dead daemon: {advanced}"
+    );
+    assert!(
+        !advanced.contains("raw_json"),
+        "the raw hatch writes through the daemon — it must not render with the \
+         daemon down: {advanced}"
+    );
+}
+
+/// The two settings forms that live on a page in a DIFFERENT `build_router`
+/// block: their save routes are registered under `Gate::SettingsStore`, so the
+/// form must not render when that gate is closed — the panel never draws a
+/// control for a route that was not registered.
+#[tokio::test]
+async fn a_settings_form_is_absent_when_its_save_route_is_not_registered() {
+    let (sock, _received) = spawn_config_daemon("settings-form-gating", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let without = state_for_socket_with_caps(sock.clone(), caps_with(BTreeSet::new()));
+    let controllers = pages::controllers::render_page(&without).await;
+    assert!(
+        !controllers.contains("/devices/controllers/settings/save"),
+        "the Input form posts to a SettingsStore route: {controllers}"
+    );
+    let cec = pages::cec::render_page(&without).await;
+    assert!(
+        !cec.contains("/devices/cec/config"),
+        "the CEC settings form posts to a SettingsStore route: {cec}"
+    );
+
+    let with = state_for_socket(sock);
+    let controllers = pages::controllers::render_page(&with).await;
+    assert!(
+        controllers.contains("/devices/controllers/settings/save")
+            && controllers.contains(r#"name="__group" value="Input""#),
+        "with the gate open the Input form renders, scoped: {controllers}"
+    );
+    let cec = pages::cec::render_page(&with).await;
+    assert!(
+        cec.contains("/devices/cec/config") && cec.contains(r#"name="__group" value="CEC""#),
+        "with the gate open the CEC settings form renders, scoped: {cec}"
     );
 }
 
@@ -1769,9 +2069,52 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend(on(
         Gate::SettingsStore,
         vec![
-            r("/shell/settings", "/shell/settings", Get, Authenticated),
-            r("/settings/save", "/settings/save", Post, Authenticated),
-            r("/settings/raw", "/settings/raw", Post, Authenticated),
+            // The five pages the Settings page dissolved into (phase 3), plus
+            // the two save routes whose PAGES sit in another block: a block
+            // condition may name only one capability, and `set-config` is the
+            // one these need. Each renders its form only under
+            // `Gate::SettingsStore`, so neither is a control pointing at an
+            // unregistered route.
+            r("/shell/appearance", "/shell/appearance", Get, Authenticated),
+            r(
+                "/shell/appearance/save",
+                "/shell/appearance/save",
+                Post,
+                Authenticated,
+            ),
+            r("/shell/apps", "/shell/apps", Get, Authenticated),
+            r("/shell/apps/save", "/shell/apps/save", Post, Authenticated),
+            r("/shell/advanced", "/shell/advanced", Get, Authenticated),
+            r(
+                "/shell/advanced/raw",
+                "/shell/advanced/raw",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio",
+                "/devices/display-audio",
+                Get,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio/save",
+                "/devices/display-audio/save",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/cec/config",
+                "/devices/cec/config",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/controllers/settings/save",
+                "/devices/controllers/settings/save",
+                Post,
+                Authenticated,
+            ),
             // The whole wallpaper surface moved here from the recovery tier
             // (`docs/PANEL_IA.md` phase 1): selecting one always needed
             // `set-config`, and gating the rest with it is what lets the Shell
@@ -2239,10 +2582,12 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        102,
+        109,
         "expected 90 pre-IA routes + the 10 phase-1 redirects + the 2 net-new \
          phase-2 pages (Services, Updates — the other five phase-2 routes moved \
-         rather than being added) (docs/PANEL_IA.md)"
+         rather than being added), then phase 3: the Settings page's 3 routes \
+         out, and 10 in (four new pages with a save each, plus the CEC and \
+         Input groups' scoped saves) (docs/PANEL_IA.md)"
     );
 }
 
@@ -2849,7 +3194,9 @@ async fn desktop_2_sidecar_registers_the_node_tier_and_no_capability_route() {
         "/devices/cec",
         "/devices/controllers",
         "/shell/widgets",
-        "/shell/settings",
+        "/shell/appearance",
+        "/shell/advanced",
+        "/devices/display-audio",
     ] {
         let status = c
             .get(format!("{base}{path}"))
@@ -3186,7 +3533,7 @@ async fn the_pre_ia_paths_redirect_when_their_target_is_registered() {
         ("/dashboard", "/"),
         ("/processes", "/system/processes"),
         ("/logs", "/system/logs"),
-        ("/settings", "/shell/settings"),
+        ("/settings", "/shell/appearance"),
         ("/widgets", "/shell/widgets"),
         ("/media", "/shell/media"),
         ("/tools", "/remote/tools"),

@@ -1,70 +1,55 @@
 {% extends "base.html" %}
-{% block title %}Settings — tv-shell panel{% endblock %}
+{% block title %}Advanced — tv-shell panel{% endblock %}
 {% block content %}
-<h1>Settings</h1>
+<h1>Advanced</h1>
+<p class="muted">
+  The escape hatches, deliberately off the ordinary settings pages: two read-only views of
+  state the panel does not own, and one write path that bypasses every typed field in the panel.
+</p>
 <p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
   {% if daemon_up %}
-    Daemon: up — settings can be read and written
+    Daemon: up — settings.json can be read and written
   {% else %}
-    Daemon unreachable — settings cannot be read or written
+    Daemon unreachable — settings.json cannot be read or written; the config.toml view below still works
   {% endif %}
 </p>
 
 <div id="settings-result"></div>
 
 {% if daemon_up %}
-
-<form hx-post="/settings/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
-  {% for group in groups %}
-  <section class="settings-group">
-    <h3>{{ group.name }}</h3>
-    {% for field in group.fields %}
-    <div class="field-row">
-      <label for="{{ field.key }}">{{ field.label }}</label>
-      {{ field.input_html|safe }}
-    </div>
-    {% endfor %}
-  </section>
-  {% endfor %}
-  <button type="submit">Save settings</button>
-</form>
-
-<p class="muted">
-  The following settings are structured objects and are not edited as typed
-  fields above — use the raw JSON escape hatch below to change them:
-  {{ complex_notes_html|safe }}.
-</p>
-
 <h2>Daemon-owned keys <span class="muted">(read-only; empty = built-in defaults)</span></h2>
 <p class="muted">
   Raw subtrees as stored in settings.json, managed by the input daemon — binding
   overrides plus the web-app registry (<code>webApps</code>) — often empty if nothing
   has been customized. See the <a href="/devices/controllers">Controllers</a> page for the resolved,
-  currently-active bindings.
+  currently-active bindings and their editor.
 </p>
 <pre>{{ daemon_owned_json }}</pre>
+{% endif %}
 
 <h2>config.toml <span class="muted">(read-only)</span></h2>
 <p class="muted">
-  Read-only. Editing requires a daemon restart (Dev page). Owned by config.toml,
-  not settings.json. Path: <code>{{ config_toml_path }}</code>
+  Read-only. Editing requires a manual edit plus a daemon restart (Dev page). Owned by
+  config.toml, not settings.json. The one targeted exception anywhere in the panel is the
+  CEC page's input-name editor. Path: <code>{{ config_toml_path }}</code>
 </p>
 <pre>{{ config_toml }}</pre>
 
+{% if daemon_up %}
 <h2>Raw JSON escape hatch</h2>
 <p class="muted">
   Advanced: post a raw JSON object directly. The daemon performs a
   <strong>shallow merge</strong> into settings.json — keys you omit are left
   untouched; set a key's value to <code>null</code> to delete it. This can
-  write any key, including ones not shown above (e.g. <code>widgets</code>,
-  <code>cecDeviceNames</code>, or the daemon-owned binding keys).
+  write any key, including ones no typed form models
+  ({{ complex_notes_html|safe }}) and the daemon-owned binding keys above.
 </p>
-<form id="raw-form" hx-post="/settings/raw" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML"
+<form id="raw-form" hx-post="/shell/advanced/raw" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML"
       onsubmit="return tvShellValidateRawSettings(event)">
   <textarea id="raw_json" name="raw_json" rows="15" style="width:100%;">{{ raw_json }}</textarea>
   <p class="muted">Formatted for editing; sent compact.</p>
   <div id="raw-json-warning" class="muted" style="display:none;color:var(--error);"></div>
-  <button type="submit">Save raw JSON</button>
+  <button class="warn-action" type="submit">Save raw JSON</button>
 </form>
 <script>
 function tvShellValidateRawSettings(evt) {
@@ -88,17 +73,5 @@ function tvShellValidateRawSettings(evt) {
   return true;
 }
 </script>
-
-{% else %}
-
-<p class="muted">Settings forms are unavailable while the daemon is unreachable. The read-only config.toml view below still works.</p>
-
-<h2>config.toml <span class="muted">(read-only)</span></h2>
-<p class="muted">
-  Read-only. Editing requires a daemon restart (Dev page). Owned by config.toml,
-  not settings.json. Path: <code>{{ config_toml_path }}</code>
-</p>
-<pre>{{ config_toml }}</pre>
-
 {% endif %}
 {% endblock %}

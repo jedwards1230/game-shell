@@ -1,17 +1,24 @@
 //! Page handlers. Every page is fully implemented: `dashboard`, `logs`,
-//! `dev`, `settings`, `widgets`, `tools`, `processes` (M1-M3), `controllers`
-//! and `cec` (M4), plus `services` and `updates` — the two halves the
-//! Processes page was split into in `docs/PANEL_IA.md` phase 2.
+//! `dev`, `widgets`, `tools`, `processes` (M1-M3), `controllers` and `cec`
+//! (M4), plus `services` and `updates` — the two halves the Processes page was
+//! split into in `docs/PANEL_IA.md` phase 2 — and `appearance`, `apps`,
+//! `advanced` and `display_audio`, the four the Settings page dissolved into
+//! in phase 3.
 //!
-//! Two modules here are not pages: `redirects` holds the forwarding addresses
-//! from the pre-IA paths (`docs/PANEL_IA.md` phase 1), and `units` holds the
-//! single systemd-unit-state presentation helper `dashboard`, `dev` and
-//! `services` all render.
+//! Three modules here are not pages: `redirects` holds the forwarding
+//! addresses from the pre-IA paths (`docs/PANEL_IA.md` phase 1), `units` holds
+//! the single systemd-unit-state presentation helper `dashboard`, `dev` and
+//! `services` all render, and `settings` holds the `settings.json` schema plus
+//! the scoped save-patch builder the five settings forms share.
 
+pub mod advanced;
+pub mod appearance;
+pub mod apps;
 pub mod cec;
 pub mod controllers;
 pub mod dashboard;
 pub mod dev;
+pub mod display_audio;
 pub mod login;
 pub mod logs;
 pub mod media;

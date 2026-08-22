@@ -77,9 +77,28 @@ h1 {
   margin: 0 0 1rem;
 }
 
+/* The top margin is load-bearing, not decoration. `pre` has no bottom margin
+   (it is usually the last thing in a section), so with `margin-top: 0` a
+   heading that FOLLOWED a code block sat flush against it and read as part of
+   it — on the old Settings page both "config.toml" and "Raw JSON escape hatch"
+   collided that way, and the second was easy to miss entirely. This is a
+   margin rather than padding so it collapses with the previous element's own
+   bottom margin: after a `<p>` the gap is max(1em, 1.25rem), never the sum. */
 h2 {
   font-size: 1.1rem;
-  margin: 0 0 0.5rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+/* …but only when there is something above to separate FROM. A heading that
+   opens its container has nothing, and inside a padded box (`.log-panel`) the
+   margin cannot collapse through the padding edge, so it would stack on top of
+   it as a double gap. Section headings (`.controllers-section`,
+   `.tools-section`, `.processes-section`) are all first-child too, so they keep
+   exactly the spacing they had; giving those four section classes a shared
+   rhythm is the normalization pass this file's later comment defers, not
+   something to smuggle in here. */
+h2:first-child {
+  margin-top: 0;
 }
 
 h3 {
@@ -530,15 +549,31 @@ th {
 pre {
   margin: 0;
   padding: 0.6rem;
-  background: #0e1013;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.82rem;
   white-space: pre;
   overflow-x: auto;
+  /* Long dumps (config.toml, the daemon-owned key subtrees, a controllerdb
+     status blob) scroll inside the block rather than pushing the rest of the
+     page down. */
   max-height: 60vh;
   overflow-y: auto;
+  /* …and they SAY they scroll. The two solid layers are `local`, so they
+     travel with the content and uncover an edge shadow only once that edge has
+     something past it; the two radial shadows are `scroll`, pinned to the
+     block. Net effect: a shadow at the top/bottom edge exactly when there is
+     more in that direction, and nothing at all when the content fits. Pure
+     CSS — the panel has no build step and this must work with JS off. */
+  background:
+    linear-gradient(#0e1013 30%, rgba(14, 16, 19, 0)) top / 100% 1.2rem no-repeat local,
+    linear-gradient(rgba(14, 16, 19, 0), #0e1013 70%) bottom / 100% 1.2rem no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0))
+      top / 100% 0.45rem no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0))
+      bottom / 100% 0.45rem no-repeat scroll,
+    #0e1013;
 }
 
 /* ── Forms / buttons ─────────────────────────────────────────────────── */

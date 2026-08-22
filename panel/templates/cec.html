@@ -3,8 +3,9 @@
 {% block content %}
 <h1>CEC</h1>
 <p class="muted">
-  HDMI-CEC topology, input switching, and transmit-wedge health/recovery. The daemon owns one
-  persistent in-process libcec connection — every command below reuses that connection.
+  HDMI-CEC topology, input switching, transmit-wedge health/recovery, and the session-lifecycle
+  settings that drive them. The daemon owns one persistent in-process libcec connection — every
+  command below reuses that connection.
 </p>
 
 {{ health_section_html|safe }}
@@ -52,13 +53,46 @@
   </div>
 </section>
 
+{% if settings_enabled %}
 <section class="controllers-section">
-  <h2>Input name</h2>
+  <h2>Session settings <span class="muted">(settings.json)</span></h2>
+  <p class="muted">
+    When the shell claims the CEC bus and which input it switches to. Written through the
+    daemon's <code>set-config</code>, unlike the input name below which is a
+    <code>config.toml</code> key. The <code>cecDeviceNames</code> friendly-name overrides are a
+    nested object and have no typed field — edit them from Shell ▸ Advanced's raw JSON hatch.
+  </p>
+  {% if settings_up %}
+  <form hx-post="/devices/cec/config" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML">
+    {# Scopes the save to the CEC group. Without these the patch would carry
+       every Bool in the schema and clear the other settings pages' toggles —
+       see pages::settings::build_patch. #}
+    {% for group in settings_scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+    {% for group in settings_groups %}
+    <div class="settings-group">
+      {% for field in group.fields %}
+      <div class="field-row">
+        <label for="{{ field.key }}">{{ field.label }}</label>
+        {{ field.input_html|safe }}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <button type="submit">Save CEC settings</button>
+  </form>
+  {% else %}
+  <p class="degraded-msg">Daemon unreachable — these settings cannot be read or written.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="controllers-section">
+  <h2>Input name <span class="muted">(config.toml)</span></h2>
   <p class="muted">
     The OSD device name this box announces on the CEC bus — the input label TVs/AVRs display.
     Currently <strong>{{ osd_effective }}</strong> <span class="muted">({{ osd_source }})</span>.
     Empty = use the hostname. Max 13 ASCII characters (libcec limit). Saving writes
-    <code>[cec].osd_name</code> in config.toml; restart <code>tv-shell-input</code> (Processes
+    <code>[cec].osd_name</code> in config.toml; restart <code>tv-shell-input</code> (Services
     page) to announce the new name. Note: other CEC-capable apps that grab the adapter
     (e.g. Plex HTPC with CEC enabled) announce their own name — keep CEC disabled in apps so
     the daemon stays the single CEC owner.

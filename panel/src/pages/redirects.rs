@@ -38,9 +38,12 @@ pub async fn logs() -> Redirect {
     Redirect::to("/system/logs")
 }
 
-/// `GET /settings` → `/shell/settings`.
+/// `GET /settings` → `/shell/appearance`.
+///
+/// The Settings page dissolved into five in phase 3; Appearance is the Shell
+/// group's first page, so the old bookmark lands where the drawer would.
 pub async fn settings() -> Redirect {
-    Redirect::to("/shell/settings")
+    Redirect::to("/shell/appearance")
 }
 
 /// `GET /widgets` → `/shell/widgets`.
