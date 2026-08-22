@@ -98,7 +98,7 @@ page constructs one from a live node — that is the node switcher,
 
 ## Pages
 
-> **The [PANEL_IA.md](PANEL_IA.md) redesign is landing in phases.** Phase 1
+> **The [PANEL_IA.md](PANEL_IA.md) redesign has landed.** Phase 1
 > (#405) shipped the navigation shell — a left drawer for six subject groups
 > with a horizontal sub-nav inside each — and moved every page onto its new
 > path, with page *contents* unchanged. Phase 2 (#406) split the Processes
@@ -107,17 +107,19 @@ page constructs one from a live node — that is the node switcher,
 > grab-bags, **Media** and **Tools** — so every page below has one subject and
 > every group is at its final page set. Phase 5 (#409) gave Services its
 > read/restart asymmetry: read any unit, restart only an allowlist (see
-> [Restartable units](#restartable-units-panelmanaged_units)). Phase 6 rebuilds
-> Overview as pure tiles. The table below is what is built today.
+> [Restartable units](#restartable-units-panelmanaged_units)) — its
+> ansible-side sudoers half is still open. Phase 6 (#410) rebuilt the landing
+> page as **Overview**: read-only tiles with deep links, no mutating control
+> anywhere on it. The table below is what is built today.
 
 Every page keeps a forwarding address: the pre-IA path 303s to the new one
 (`pages::redirects`), registered in the same capability block as its target so a
-redirect can never outlive the page it points at. The two Dashboard htmx
+redirect can never outlive the page it points at. Overview's htmx tile
 partials moved without redirects — they are poll targets, not bookmarks.
 
 | Page | Path | Contents |
 |---|---|---|
-| Dashboard | `/` (Overview) | unit status, build info, system/storage tiles, pad fleet, quick actions, an Updates tile (own slow poll — see [System updates](#system-updates-pacman) below) |
+| Overview | `/` (also `/overview`) | **the panel's one purely read-only surface** — tiles only, no form, no button, no `hx-post` anywhere on the page or in its partials (`tests::overview_renders_no_mutating_control`), because every action now lives in the group that owns its subject. Nine tiles, each a whole-tile link to that owner: Input daemon and Controllers → `/devices/controllers`, Build → `/dev/recovery`, System / Resources / Temperatures / Storage → `/system/processes`, Units and System services → `/system/services`, Updates → `/system/updates`. The **System services** tile is `[panel].managed_units` at a glance (`sshd` and friends — see [Restartable units](#restartable-units-panelmanaged_units)); with none configured, which is every node's state today, it says so and names the config key rather than rendering a blank card. Three htmx poll targets fill **one** `.tile-grid` declared on the page — `/overview/tiles` (5s: IPC reads + the three built-in units), `/overview/services-tile` (30s: one `systemctl show` per configured unit, and that list is operator-set and unbounded), `/overview/updates-tile` (300s: `checkupdates` is expensive, see [System updates](#system-updates-pacman) below) — each swapping bare tiles into a `display: contents` slot so three cadences still produce one grid. With the daemon down, the IPC tiles collapse to a full-width banner plus the unit state read straight from `systemd`; the System services tile is exec-only and is unaffected, which is why Overview stays in the recovery-mode drawer |
 | Services | `/system/services` | **read any unit, restart an allowlist.** Two restart tables — the three built-in tv-shell **user** units (daemon/shell/panel) and whatever `[panel].managed_units` names — each row showing a color-coded dot + status word, enabled-state, active-since and, when failed, systemd's reason. `POST /system/services/restart/{key}` resolves `key` against that server-side table and refuses an unknown one before any exec; an arbitrary client-supplied unit name never reaches a mutating `systemctl` on any path (the exec API takes a `config::RestartTarget`, which only the table constructs). Below them, an **Inspect any unit** form: any unit, either scope, validated by `config::UnitName::parse` and passed only to `systemctl show`. See [Restartable units](#restartable-units-panelmanaged_units). The panel's own unit carries a distinct confirm saying the restart will disconnect the page you are looking at |
 | Processes | `/system/processes` | **read-only observation, no actions at all**: Hyprland active window/clients (styled table)/monitors via IPC, and a top-processes table (`ps`, CPU-sorted, no kill action in v1) |
 | Updates | `/system/updates` | the pacman System Updates section — pending-package table, cache-bypassing Refresh, the background full-update job and its self-terminating status poll (see [System updates](#system-updates-pacman) below) |
@@ -205,15 +207,15 @@ startup snapshot. They answer different questions on purpose.
 ## System updates (pacman)
 
 `panel/src/updates.rs` owns pacman system-update state independently of the
-daemon — the Dashboard Updates tile and the System ▸ Updates page
+daemon — Overview's Updates tile and the System ▸ Updates page
 (`/system/updates`) both read it.
 
 - **Read** (unprivileged): `checkupdates` (pacman-contrib) parsed into
   `{name, old_version, new_version}` rows. Exit code `2` ("no updates
   available") is an OK-empty result, not an error; exit `1` (or a spawn
   failure/timeout) surfaces as an honest error banner. Cached in `AppState`
-  (`UpdatesState`) with a 5-minute TTL — `checkupdates` never runs on the
-  Dashboard's fast 5s tile poll (the Updates tile polls on its own, much
+  (`UpdatesState`) with a 5-minute TTL — `checkupdates` never runs on
+  Overview's fast 5s tile poll (the Updates tile polls on its own, much
   slower 300s interval instead); the Updates page's Refresh button
   bypasses the cache.
 - **Reboot-needed detection**: compares `uname -r` against the installed
@@ -263,7 +265,7 @@ Updates page's failure banner shows the last non-empty log line inline
 (`last_error_line` in `pages::updates`) rather than a bare "Update failed",
 and the log-tail `<details>` auto-expands on a failed run instead of staying
 collapsed — so the real cause is visible without an extra click. The
-Dashboard Updates tile is unaffected either way, since it only reflects the
+Overview's Updates tile is unaffected either way, since it only reflects the
 unprivileged `checkupdates` read.
 
 ## Restartable units (`[panel].managed_units`)
@@ -665,7 +667,7 @@ or `cargo run -p tv-shell-panel` for a dev loop. It reads `[panel]` from
   - [x] CEC page (topology, switching, health + escalating wedge recovery)
 - [x] UI-polish pass (post-M4, live-audit fixups; branch `panel-staging-ui-polish`)
   - [x] Raw `<connection>:<grab>` IPC tokens humanized into plain language + a
-        colored state dot (Dashboard tile, Controllers fleet), raw token kept
+        colored state dot (Overview tile, Controllers fleet), raw token kept
         as a muted suffix (`panel/src/humanize.rs`)
   - [x] Log panes ANSI-stripped server-side (`panel/src/text.rs`), wrapped
         instead of clipped, plus "Errors only"/"Hide icon noise" preset filters

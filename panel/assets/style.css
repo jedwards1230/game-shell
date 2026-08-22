@@ -122,10 +122,6 @@ a:hover {
   color: var(--text-muted);
 }
 
-.big {
-  font-size: 1.2rem;
-  font-weight: 600;
-}
 
 /* ── Drawer (primary nav) ────────────────────────────────────────────── */
 
@@ -380,6 +376,22 @@ a:hover {
   margin: 1rem 0;
 }
 
+/* Overview fills ONE grid from three htmx poll targets on three different
+   cadences. An htmx target has to be a real element, and a real element inside
+   a grid is a grid CELL — which is what used to put the separately-polled
+   Updates tile alone on its own row instead of flowing into the grid beside
+   its neighbours. `display: contents` makes the wrapper disappear from layout
+   so the tiles it swaps in become direct children of `.tile-grid`. */
+.tile-slot {
+  display: contents;
+}
+
+/* For the things inside the grid that are NOT tiles — the daemon-unreachable
+   banner — so they take the full row instead of one 220px column. */
+.tile-span {
+  grid-column: 1 / -1;
+}
+
 .tile,
 a.tile {
   display: block;
@@ -403,6 +415,19 @@ a.tile:hover {
 
 .tile p {
   margin: 0.15rem 0;
+}
+
+/* A tile's ONE headline value — the daemon's status, the build version, the OS,
+   the CPU figure, the pending-update count. One class used the same way on
+   every tile that has a single leading value, so no tile's primary line renders
+   at a different weight or size from its neighbours' (the Input Daemon tile
+   used to, at 1.2rem/600 against everything else's plain body text, and wrapped
+   to two lines at 1440px because of it). Tiles whose body is a LIST rather than
+   one value — Temperatures, Storage, Controllers, Units — have no headline and
+   deliberately carry no `.tile-value`. */
+.tile-value {
+  margin-bottom: 0.35rem;
+  font-weight: 600;
 }
 
 /* ── Banners ─────────────────────────────────────────────────────────── */

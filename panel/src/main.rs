@@ -174,6 +174,13 @@ fn build_router(state: SharedState) -> Router {
             "/overview/updates-tile",
             get(pages::dashboard::updates_tile),
         ) // htmx poll partial, own slower interval
+        // htmx poll partial, own 30s interval: one `systemctl show` per
+        // `[panel].managed_units` entry, and that list is unbounded — see
+        // `pages::dashboard::services_tile`.
+        .route(
+            "/overview/services-tile",
+            get(pages::dashboard::services_tile),
+        )
         .route("/system/services", get(pages::services::page))
         // A READ: `systemctl show` for any unit, either scope. A GET because
         // it mutates nothing — the asymmetry with the restart route below is

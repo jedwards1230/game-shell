@@ -1,10 +1,23 @@
 # Panel Information Architecture — Redesign
 
-Status: **proposed**. This is the target structure for the panel's navigation and
-page boundaries. [PANEL.md](PANEL.md) remains the living doc for what is
-*currently* built; this document is what we are moving toward and why. When a
-phase lands, its rows move into PANEL.md's Pages table and the corresponding
-section here is struck through.
+Status: **landed** (all six phases, #405–#410 — with one carve-out: phase 5's
+ansible-side sudoers generation has not shipped, see [Phasing](#phasing)). This
+document is now a **record of what was built and why**, not a proposal.
+[PANEL.md](PANEL.md) remains the living doc for what the panel *does*; this one
+keeps the reasoning, and — deliberately — the places where building it proved
+the plan wrong. Those corrections are left visible in situ (struck-through
+claim, then what actually shipped) rather than tidied away, because the
+reasoning that was wrong is the part worth keeping. Three are load-bearing:
+
+- **Recovery mode leaves three groups, not two.** The drawer collapses to
+  **Overview + System + Dev**; this document and #405 originally said System
+  and Dev. See [Capability gating](#capability-gating).
+- **Five of the six `allow_dangerous` controls are in Dev, not all six.**
+  `POST /system/updates/apply` is the exception and stays under System ▸
+  Updates. See [Dev](#dev).
+- **`scope = "system"` restarts fail closed on every node today.** The
+  `htpc_common` sudoers generation is ansible-side work that has not landed.
+  See [Privilege](#privilege) and [Phasing](#phasing).
 
 ## The problem
 
@@ -12,14 +25,15 @@ The panel grew a page per *subsystem the daemon exposes*, not a page per *job th
 operator is doing*. Ten flat top-nav tabs, and most of them accreted unrelated
 sections until the page stopped having a single subject.
 
-Concretely, measured against the deployed build (2026-08-22):
+Concretely, measured against the build deployed when this was written
+(2026-08-22, before phase 1). Every row is struck because every row is fixed:
 
 | Symptom | Where |
 |---|---|
-| One page, four unrelated jobs | **Processes** = unit control + system updates + Hyprland window state + top-processes table |
-| One page, 3133px tall at 1440px wide | **Settings** = eight typed form groups + read-only daemon-owned keys + read-only `config.toml` dump + raw-JSON escape hatch |
-| Same action on two pages | Unit restart on **Processes** *and* **Dev** |
-| One subject split across two pages | CEC *config* on **Settings**, CEC *actions* on **CEC** |
+| ~~One page, four unrelated jobs~~ | ~~**Processes** = unit control + system updates + Hyprland window state + top-processes table~~ — split three ways in phase 2 |
+| ~~One page, 3133px tall at 1440px wide~~ | ~~**Settings** = eight typed form groups + read-only daemon-owned keys + read-only `config.toml` dump + raw-JSON escape hatch~~ — dissolved in phase 3, escape hatches quarantined on Shell ▸ Advanced |
+| ~~Same action on two pages~~ | ~~Unit restart on **Processes** *and* **Dev**~~ — one restart table, on System ▸ Services, since phase 2; Dev ▸ Recovery keeps only the daemon/shell restarts it needs to recover with |
+| ~~One subject split across two pages~~ | ~~CEC *config* on **Settings**, CEC *actions* on **CEC**~~ — one page since phase 3 |
 | ~~Page is a grab-bag by input method~~ | ~~**Media** = wallpapers + web apps, related only in that both need a keyboard the couch UI lacks~~ — dissolved in phase 4 |
 | ~~Overlaps two other pages~~ | ~~**Tools** power/network duplicates **Settings** groups and **Dashboard** tiles~~ — dissolved in phase 4; the duplicated `sys-*` probes were deleted rather than moved |
 
@@ -50,16 +64,16 @@ pages each — small enough that neither level needs scrolling at 1440px.
 
 | Group | Pages | Subject |
 |---|---|---|
-| **Overview** | *(none)* | Is everything healthy right now? |
+| **Overview** | *(none)* | Is everything healthy right now — and where do I go to fix what isn't? |
 | **System** | Services · Processes · Updates · Logs | The machine underneath the shell |
 | **Shell** | Appearance · Widgets · Apps · Advanced | The TV UI's own configuration |
 | **Devices** | Controllers · Display & Audio · CEC · Network | Hardware attached to the box |
 | **Remote** | Navigation · Launcher | Driving the TV from here |
 | **Dev** | Recovery · Screenshot · Console | Breaking glass |
 
-The daemon-reachability dot moves from the top nav to the drawer footer. It is
-live reachability and stays orthogonal to nav *shape*, which remains the startup
-capability snapshot — see PANEL.md's [Capability gating](PANEL.md#capability-gating).
+The daemon-reachability dot moved from the top nav to the drawer footer in
+phase 1. It is live reachability and stays orthogonal to nav *shape*, which
+remains the startup capability snapshot — see PANEL.md's [Capability gating](PANEL.md#capability-gating).
 
 ### Why these six
 
@@ -74,24 +88,61 @@ distinction that already exists in the codebase and is therefore stable:
   (pads, CEC bus, display/audio sinks, NetworkManager/bluez).
 - **Remote** — owned by the running shell: transient commands that change what
   is on screen right now and persist nothing.
-- **Dev** — owned by whoever is recovering the box. Unified danger surface.
+- **Dev** — owned by whoever is recovering the box. Danger surface, with the
+  one documented exception under [Dev](#dev).
 
 **Overview has no sub-nav on purpose.** It is the only read-only group, it is the
 landing page, and giving it tabs would imply there is somewhere else to go for
-status. Every tile deep-links into the page that owns that thing.
+status. Every tile deep-links into the page that owns that thing. It needed no
+special case in the end: rule 4 under [Capability gating](#capability-gating)
+drops the sub-nav bar for any group with fewer than two registered pages, and
+Overview has one.
 
 ## Page-by-page mapping
 
-Every current section lands somewhere; nothing is dropped.
+Every section of the old panel landed somewhere. Six routes were deleted
+outright — all six were duplicates of something that already existed
+elsewhere (see [Dissolved pages](#dissolved-pages)); nothing else was dropped.
 
 ### Overview
 
-Tiles only, all read-only, each linking to its owning page. Drops the current
-Dashboard's quick-action links (they became ambiguous once actions moved).
+✅ **Landed in phase 6** at `/` (also `/overview`). Tiles only, all read-only,
+each a whole-tile link to its owning page. The quick-action links are gone —
+they became ambiguous once actions moved into groups — and so is every other
+mutating control: no form, no button, no `hx-post` on the page or in any of its
+partials, on either the reachable or the daemon-down branch. That absence is
+pinned by `tests::overview_renders_no_mutating_control` rather than asserted
+here, because the failure mode is additive.
 
-Keeps: units, build, system, resources, temperatures, storage, controllers,
-updates-available. Gains: an **sshd/system-services** tile from the new Services
-page.
+Kept: units, build, system, resources, temperatures, storage, controllers,
+updates-available. Gained: the **system-services** tile — `[panel].managed_units`
+at a glance, since "is sshd up" is the question that motivated the Services page
+and belongs on the health screen. With nothing configured (the default, and
+every node's state today) it says so and names the config key rather than
+rendering a blank card or hiding itself.
+
+| Tile | Owns its subject |
+|---|---|
+| Input daemon, Controllers | `/devices/controllers` |
+| Build | `/dev/recovery` |
+| System, Resources, Temperatures, Storage | `/system/processes` |
+| Units, System services | `/system/services` |
+| Updates | `/system/updates` |
+
+Three poll targets, **one** grid. `/overview/tiles` keeps its 5s cadence and
+`/overview/updates-tile` its 300s one; the system-services tile got its own
+30s target rather than joining the fast poll, because it costs one `systemctl
+show` per configured unit and `managed_units` is operator-set and unbounded —
+on the 5s poll the panel's steady-state subprocess rate would be decided by a
+config file. The grid itself is declared once on the page and each fragment
+swaps bare tiles into a `display: contents` slot inside it, so three cadences
+produce one grid instead of three stacked ones (which is what used to strand
+the Updates tile alone on a row of its own).
+
+The daemon-down branch survives and gained the services tile: the IPC tiles
+collapse to a full-width banner, unit state still comes straight from
+`systemd`, and the system-services tile is exec-only so it is unaffected —
+which is precisely when you want to know whether `sshd` is up.
 
 ### System
 
@@ -100,14 +151,14 @@ page.
 | **Services** | *new*, plus Processes' unit table | ✅ landed at `/system/services` — the three built-in units in phase 2, arbitrary-unit reads and the `managed_units` restart allowlist in phase 5. See [Services](#services-new) below; the sudoers half of phase 5 is still open |
 | **Processes** | Processes (top-processes table, Hyprland active window/clients/monitors) | ✅ landed in phase 2 — purely read-only observation, no action affordance at all |
 | **Updates** | Processes (System Updates section) | ✅ landed in phase 2 at `/system/updates` — it has its own slow poll, its own background job, and the most dangerous button on the page it used to share |
-| **Logs** | Logs | Unchanged |
+| **Logs** | Logs | ✅ landed at `/system/logs` in phase 1 — a path move only; contents unchanged |
 
 ### Shell
 
 | Page | From | Notes |
 |---|---|---|
 | **Appearance** | Settings (Appearance group) + Media (Wallpapers) | ✅ landed — the settings half in phase 3, the wallpaper picker in phase 4. `wallpaperPath` moved into the `Appearance` schema group with it and is no longer rendered as a typed path field: the grid is its editor |
-| **Widgets** | Widgets | Unchanged |
+| **Widgets** | Widgets | ✅ landed at `/shell/widgets` in phase 1 — a path move only; contents unchanged |
 | **Apps** | Settings (`prewarmApps`) + Media (Web apps) | ✅ landed — `prewarmApps` in phase 3, the web-app registry in phase 4. Both are "what can launch on this box" |
 | **Advanced** | Settings (daemon-owned keys, read-only `config.toml`, raw-JSON hatch) | ✅ landed in phase 3 — all three escape hatches quarantined behind one deliberate click |
 
@@ -126,7 +177,7 @@ them, fail-closed when nothing is declared — see PANEL.md's
 
 | Page | From | Notes |
 |---|---|---|
-| **Controllers** | Controllers | Already single-subject; phase 3 added Settings' `Input` group (`controllerDebug`, `rumbleEnabled`), which is the same subject |
+| **Controllers** | Controllers | ✅ landed at `/devices/controllers` in phase 1 — already single-subject; phase 3 added Settings' `Input` group (`controllerDebug`, `rumbleEnabled`), which is the same subject |
 | **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | ✅ landed in phase 3 at `/devices/display-audio`; phase 4 added Tools' two power probes beside the `Power` group |
 | **CEC** | CEC + Settings (CEC group) | ✅ landed in phase 3 — config and actions on one page. The `settings.json` group stays visibly distinct from the `[cec].osd_name` `config.toml` editor beneath it |
 | **Network** | Tools (Network, Bluetooth) | ✅ landed in phase 4 at `/devices/network`. Node tier: these commands map to no declared `Feature` |
@@ -142,7 +193,7 @@ them, fail-closed when nothing is declared — see PANEL.md's
 
 | Page | From | Notes |
 |---|---|---|
-| **Recovery** | Dev (restart daemon/shell, reboot, suspend, deploy, build) | Unit restart *links to* Services rather than duplicating it |
+| **Recovery** | Dev (restart daemon/shell, reboot, suspend, deploy, build) | ✅ landed at `/dev/recovery` in phase 1. The general unit restart *links to* System ▸ Services rather than duplicating it; the daemon/shell restarts stay here because they are the recovery path itself |
 | **Screenshot** | Dev (screenshot viewer) | ✅ landed in phase 4 at `/dev/screenshot`. The PNG proxy that used to own that path is now `/dev/screenshot/image` |
 | **Console** | Tools (raw IPC line console) | ✅ landed in phase 4 at `/dev/console`. Belongs with the other `allow_dangerous` surfaces, not under a general-purpose tab |
 
@@ -160,7 +211,7 @@ apply"** — a *second* exception fails the suite. See PANEL.md's
 
 ### Dissolved pages
 
-**Settings**, **Media**, and **Tools** cease to exist. Each was a container for
+**Settings**, **Media**, and **Tools** no longer exist. Each was a container for
 "things that didn't fit elsewhere" rather than a subject. All three are gone:
 Settings in phase 3, Media and Tools in phase 4. The old paths keep forwarding
 addresses — `/settings` and `/media` → `/shell/appearance`, `/tools` →
@@ -257,10 +308,11 @@ restart may end remote access entirely.
 
 ## Capability gating
 
-The drawer is rendered from the same startup snapshot as today's top nav, so a
-group whose pages all gated off must not render an empty shell. Rules:
+The drawer renders from the same startup capability snapshot the old top nav
+used, so a group whose pages all gated off must not render an empty shell.
+Rules, all four built:
 
-1. A **page** gates exactly as now — not registered, 404, absent from sub-nav.
+1. A **page** gates exactly as it did before — not registered, 404, absent from sub-nav.
 2. A **group** renders iff at least one of its pages registered.
 3. A group's drawer link targets its first *registered* page, not a fixed default.
 4. A group with fewer than two registered pages renders **no sub-nav bar** —
@@ -277,7 +329,9 @@ Shell, Devices and Remote do all vanish, per rule 2. See PANEL.md's
 
 ## Phasing
 
-Each phase ships independently and leaves the panel working.
+Each phase shipped independently and left the panel working. All six have
+landed; the one piece of phase 5 that did not is called out below and is
+tracked on #409, not on this table.
 
 | Phase | Scope | Depends on | Issue |
 |---|---|---|---|
@@ -286,7 +340,7 @@ Each phase ships independently and leaves the panel working.
 | **3** ✅ landed | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC — plus the `Input` group onto Devices/Controllers. Saves are now scoped to the groups the submitting form rendered. | 1 | #407 |
 | **4** ✅ landed | Dissolve **Media** and **Tools** → Shell/Appearance + Shell/Apps, Devices/Network, Devices/Display & Audio, Remote/Navigation + Remote/Launcher, Dev/Screenshot + Dev/Console. Six duplicate routes deleted rather than moved. | 1, 3 | #408 |
 | **5** ⚠️ partly landed | Services: read any unit; `managed_units` config; danger-tier confirms. **The ansible-side sudoers generation did NOT land** — see below. | 2 | #409 |
-| **6** | Overview rebuilt as pure read-only tiles with deep links. | 2-5 | #410 |
+| **6** ✅ landed | Overview rebuilt as pure read-only tiles with deep links. Gained a system-services tile on its own 30s poll; the three poll targets now fill one grid. | 2-5 | #410 |
 
 Phase 1 is deliberately mechanical — it changes navigation without changing any
 page's content, so it can be reviewed as a routing change and reverted cleanly if

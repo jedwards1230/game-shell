@@ -1,91 +1,95 @@
+{# Overview's fast (5s) tile fragment. Emits BARE tiles — the `.tile-grid`
+   lives in `dashboard.html` so all three poll targets share one grid. Nothing
+   here may mutate anything: Overview is the panel's one read-only surface
+   (`docs/PANEL_IA.md` phase 6), so no form, no button, no `hx-post`. Every
+   tile is a whole-tile link to the page that owns its subject. #}
 {% if reachable %}
-<div class="tile-grid">
-  {# Links follow ROUTE REGISTRATION (the startup snapshot), not `reachable`
-     (this poll's live probe). With `controllers` undeclared the tile still
-     carries useful state, so it degrades to a plain div rather than vanishing
-     — unlike the Controllers tile below, which has nothing else to say. #}
-  {% if controllers_enabled %}
-  <a class="tile" href="/devices/controllers">
-    <h3>Input daemon</h3>
-    <p class="big"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
-    <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
-  </a>
-  {% else %}
-  <div class="tile">
-    <h3>Input daemon</h3>
-    <p class="big"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
-    <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
-  </div>
-  {% endif %}
-  <a class="tile" href="/dev/recovery">
-    <h3>Build</h3>
-    <p>{{ version }}</p>
-    <p class="muted">{{ sha }} · {{ branch }}</p>
-  </a>
-  <a class="tile" href="/system/processes">
-    <h3>System</h3>
-    <p>{{ os }}</p>
-    <p class="muted">kernel {{ kernel }}</p>
-    <p class="muted">host {{ hostname }}</p>
-    <p class="muted">up {{ uptime }}</p>
-  </a>
-  <a class="tile" href="/system/processes">
-    <h3>Resources</h3>
-    <p>CPU {{ cpu_pct }}%</p>
-    <p>Mem {{ mem_used }} / {{ mem_total }} ({{ mem_pct }}%)</p>
-    <p>Load1 {{ load1 }}</p>
-  </a>
-  <a class="tile" href="/system/processes">
-    <h3>Temperatures</h3>
-    {% if temps.is_empty() %}
-    <p class="muted">none reported</p>
-    {% else %}
-    {% for t in temps %}<p>{{ t.label }}: {{ t.celsius }}&deg;C</p>{% endfor %}
-    {% endif %}
-  </a>
-  <a class="tile" href="/system/processes">
-    <h3>Storage</h3>
-    {% if mounts.is_empty() %}
-    <p class="muted">no mounts reported</p>
-    {% else %}
-    <table>
-      <tr><th>Mount</th><th>Used</th><th>Size</th><th>%</th></tr>
-      {% for m in mounts %}
-      <tr><td>{{ m.mount }}</td><td>{{ m.used }}</td><td>{{ m.size }}</td><td>{{ m.pct }}%</td></tr>
-      {% endfor %}
-    </table>
-    {% endif %}
-  </a>
-  {% if controllers_enabled %}
-  <a class="tile" href="/devices/controllers">
-    <h3>Controllers</h3>
-    {% if pads.is_empty() %}
-    <p class="muted">none connected</p>
-    {% else %}
-    {% for p in pads %}
-    <p>#{{ p.index }} {{ p.name }} — {% if p.grabbed %}grabbed{% else %}released{% endif %}</p>
-    {% endfor %}
-    {% endif %}
-  </a>
-  {% endif %}
-  <a class="tile" href="/system/services">
-    <h3>Units</h3>
-    <p><span class="unit-chip"><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }}</span>{% if daemon_unit.raw != daemon_unit.word %} <span class="muted">({{ daemon_unit.raw }})</span>{% endif %}</p>
-    <p><span class="unit-chip"><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }}</span>{% if shell_unit.raw != shell_unit.word %} <span class="muted">({{ shell_unit.raw }})</span>{% endif %}</p>
-    <p><span class="unit-chip"><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }}</span>{% if panel_unit.raw != panel_unit.word %} <span class="muted">({{ panel_unit.raw }})</span>{% endif %}</p>
-  </a>
-</div>
+{# Links follow ROUTE REGISTRATION (the startup snapshot), not `reachable`
+   (this poll's live probe). With `controllers` undeclared the tile still
+   carries useful state, so it degrades to a plain div rather than vanishing
+   — unlike the Controllers tile below, which has nothing else to say. #}
+{% if controllers_enabled %}
+<a class="tile" href="/devices/controllers">
+  <h3>Input daemon</h3>
+  <p class="tile-value"><span class="unit-chip"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</span></p>
+  <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
+</a>
 {% else %}
-<div class="degraded">
-  <p class="banner banner-error">Daemon unreachable — {{ status_text }}</p>
-  <div class="tile-grid">
-    <div class="tile">
-      <h3>Units (via systemd)</h3>
-      <p><span class="unit-chip"><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }}</span>{% if daemon_unit.raw != daemon_unit.word %} <span class="muted">({{ daemon_unit.raw }})</span>{% endif %}</p>
-      <p><span class="unit-chip"><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }}</span>{% if shell_unit.raw != shell_unit.word %} <span class="muted">({{ shell_unit.raw }})</span>{% endif %}</p>
-      <p><span class="unit-chip"><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }}</span>{% if panel_unit.raw != panel_unit.word %} <span class="muted">({{ panel_unit.raw }})</span>{% endif %}</p>
-    </div>
-  </div>
-  <p><a href="/dev/recovery">Go to the Dev page for recovery actions →</a></p>
+<div class="tile">
+  <h3>Input daemon</h3>
+  <p class="tile-value"><span class="unit-chip"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</span></p>
+  <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
+</div>
+{% endif %}
+<a class="tile" href="/dev/recovery">
+  <h3>Build</h3>
+  <p class="tile-value">{{ version }}</p>
+  <p class="muted">{{ sha }} · {{ branch }}</p>
+</a>
+<a class="tile" href="/system/processes">
+  <h3>System</h3>
+  <p class="tile-value">{{ os }}</p>
+  <p class="muted">kernel {{ kernel }}</p>
+  <p class="muted">host {{ hostname }}</p>
+  <p class="muted">up {{ uptime }}</p>
+</a>
+<a class="tile" href="/system/processes">
+  <h3>Resources</h3>
+  <p class="tile-value">CPU {{ cpu_pct }}%</p>
+  <p>Mem {{ mem_used }} / {{ mem_total }} ({{ mem_pct }}%)</p>
+  <p>Load1 {{ load1 }}</p>
+</a>
+<a class="tile" href="/system/processes">
+  <h3>Temperatures</h3>
+  {% if temps.is_empty() %}
+  <p class="muted">none reported</p>
+  {% else %}
+  {% for t in temps %}<p>{{ t.label }}: {{ t.celsius }}&deg;C</p>{% endfor %}
+  {% endif %}
+</a>
+<a class="tile" href="/system/processes">
+  <h3>Storage</h3>
+  {% if mounts.is_empty() %}
+  <p class="muted">no mounts reported</p>
+  {% else %}
+  <table>
+    <tr><th>Mount</th><th>Used</th><th>Size</th><th>%</th></tr>
+    {% for m in mounts %}
+    <tr><td>{{ m.mount }}</td><td>{{ m.used }}</td><td>{{ m.size }}</td><td>{{ m.pct }}%</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</a>
+{% if controllers_enabled %}
+<a class="tile" href="/devices/controllers">
+  <h3>Controllers</h3>
+  {% if pads.is_empty() %}
+  <p class="muted">none connected</p>
+  {% else %}
+  {% for p in pads %}
+  <p>#{{ p.index }} {{ p.name }} — {% if p.grabbed %}grabbed{% else %}released{% endif %}</p>
+  {% endfor %}
+  {% endif %}
+</a>
+{% endif %}
+<a class="tile" href="/system/services">
+  <h3>Units</h3>
+  <p><span class="unit-chip"><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }}</span>{% if daemon_unit.raw != daemon_unit.word %} <span class="muted">({{ daemon_unit.raw }})</span>{% endif %}</p>
+  <p><span class="unit-chip"><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }}</span>{% if shell_unit.raw != shell_unit.word %} <span class="muted">({{ shell_unit.raw }})</span>{% endif %}</p>
+  <p><span class="unit-chip"><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }}</span>{% if panel_unit.raw != panel_unit.word %} <span class="muted">({{ panel_unit.raw }})</span>{% endif %}</p>
+</a>
+{% else %}
+{# Daemon down. Everything above needs IPC; unit state does not — it comes
+   straight from systemd, which is exactly when you most want it. The
+   system-services tile is a separate fragment and is daemon-independent by
+   construction, so it keeps rendering beside this one with no branch here. #}
+{# The banner spans the whole grid and carries the recovery link itself — a
+   separate full-width paragraph after the tile would split the grid in two. #}
+<p class="banner banner-error tile-span">Daemon unreachable — {{ status_text }} · <a href="/dev/recovery">go to Dev ▸ Recovery →</a></p>
+<div class="tile">
+  <h3>Units (via systemd)</h3>
+  <p><span class="unit-chip"><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }}</span>{% if daemon_unit.raw != daemon_unit.word %} <span class="muted">({{ daemon_unit.raw }})</span>{% endif %}</p>
+  <p><span class="unit-chip"><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }}</span>{% if shell_unit.raw != shell_unit.word %} <span class="muted">({{ shell_unit.raw }})</span>{% endif %}</p>
+  <p><span class="unit-chip"><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }}</span>{% if panel_unit.raw != panel_unit.word %} <span class="muted">({{ panel_unit.raw }})</span>{% endif %}</p>
 </div>
 {% endif %}

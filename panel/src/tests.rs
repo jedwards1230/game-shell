@@ -2192,6 +2192,12 @@ fn route_table() -> Vec<RouteSpec> {
             Get,
             Authenticated,
         ),
+        r(
+            "/overview/services-tile",
+            "/overview/services-tile",
+            Get,
+            Authenticated,
+        ),
         r("/system/services", "/system/services", Get, Authenticated),
         // Read-only (`systemctl show`), and probed with no query at all, so
         // the handler renders the empty prompt without spawning anything.
@@ -3097,13 +3103,16 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        107,
+        108,
         "expected the 109 routes phase 3 left, then phase 4: 6 deleted outright \
          (the four `/tools/sys/*` probes, already on the Overview tiles, and the \
          two `controllerdb-*` duplicates of the Controllers page's own), the \
          Media and Tools page GETs gone, and `/dev/screenshot/image` net-new \
          (the PNG proxy renamed to free `/dev/screenshot` for the page) — then \
-         phase 5's single net-new route, `GET /system/services/inspect`. \
+         phase 5's single net-new route, `GET /system/services/inspect`, and \
+         phase 6's single net-new route, `GET /overview/services-tile` (the \
+         system-services tile's own poll target — Overview ADDED no mutating \
+         route, and removed none, because its actions had already moved). \
          Everything else moved rather than being added (docs/PANEL_IA.md)"
     );
 }
@@ -3972,6 +3981,291 @@ fn replies_for_tiles() -> std::collections::HashMap<&'static str, &'static str> 
             r#"[{"id":"a","index":0,"name":"Pad","grabbed":true}]"#,
         ),
     ])
+}
+
+// ── phase 6: Overview is read-only tiles with deep links ───────────────────
+
+/// The four routes that make up Overview: the page shell and its three
+/// independently-polled tile fragments.
+const OVERVIEW_ROUTES: [&str; 4] = [
+    "/",
+    "/overview/tiles",
+    "/overview/services-tile",
+    "/overview/updates-tile",
+];
+
+/// **#410's headline claim.** With every action redistributed into the group
+/// that owns its subject, Overview is the panel's one purely read-only
+/// surface: *is everything healthy right now, and where do I go to fix what
+/// isn't*. So it renders links and nothing else — not a form, not a button,
+/// not an `hx-post`.
+///
+/// Pinned as an absence over the real router rather than restated in prose,
+/// because the failure mode is additive: the next person who wants "just a
+/// Restart button, it's right there" has to delete this test to get it, and
+/// deleting a test is a visible decision in a way that adding a button is not.
+async fn assert_overview_renders_no_mutating_control(base: &str, label: &str) {
+    let c = client();
+    for path in OVERVIEW_ROUTES {
+        let resp = c.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "[{label}] {path} must render — Overview is recovery tier"
+        );
+        let body = resp.text().await.unwrap().to_lowercase();
+        for mutating in ["hx-post", "<form", "<button"] {
+            assert!(
+                !body.contains(mutating),
+                "[{label}] {path} renders {mutating}, and Overview mutates nothing — \
+                 the control belongs on the page that owns its subject: {body}"
+            );
+        }
+    }
+}
+
+/// The reachable branch: the daemon answers, every tile has real content.
+#[tokio::test]
+async fn overview_renders_no_mutating_control() {
+    let sock = spawn_canned_daemon("overview-readonly", replies_for_tiles());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let base = spawn_panel(state_for_socket_with_caps(
+        sock,
+        CapabilitySnapshot::fully_capable(),
+    ))
+    .await;
+    assert_overview_renders_no_mutating_control(&base, "daemon reachable").await;
+}
+
+/// The degraded branch: no daemon at all, so Overview falls back to the unit
+/// states it reads straight from systemd. That is the branch that makes
+/// Overview honest in recovery mode — and it is also the branch most tempting
+/// to hang a restart button off, since the daemon being down is exactly when
+/// you want one. It goes on Dev ▸ Recovery and System ▸ Services instead.
+#[tokio::test]
+async fn overview_renders_no_mutating_control_with_the_daemon_down() {
+    let base = spawn_panel(state_for_socket_with_caps(
+        std::path::PathBuf::from("/tmp/tvshp-no-such-socket.sock"),
+        CapabilitySnapshot::unreachable(),
+    ))
+    .await;
+    assert_overview_renders_no_mutating_control(&base, "daemon down, recovery mode").await;
+}
+
+/// Every tile is a whole-tile link to the page that now OWNS its subject —
+/// the point of the tiles, and the thing that quietly rots when a page moves.
+/// Pins the map itself, and re-checks each target against `route_table()`:
+/// `no_page_renders_an_unregistered_target_*` already does that for the
+/// degraded and bare-node renders but cannot reach here, because those
+/// harnesses have no daemon and so only ever see the degraded branch.
+#[tokio::test]
+async fn overview_tiles_link_to_the_page_that_owns_each_subject() {
+    let sock = spawn_canned_daemon("overview-deep-links", replies_for_tiles());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket_with_caps(sock, CapabilitySnapshot::fully_capable());
+
+    let mut html = pages::dashboard::render_tiles(&state).await;
+    html.push_str(&pages::dashboard::render_services_tile(&state).await);
+
+    // Tile subject -> the page that owns it after the IA move. The Updates
+    // tile is the one fragment not in `html`: it polls on its own 300s
+    // cadence, so its link is listed here and checked against the table below
+    // with the rest of the map.
+    let owners = [
+        ("Input daemon", "/devices/controllers"),
+        ("Build", "/dev/recovery"),
+        ("System", "/system/processes"),
+        ("Resources", "/system/processes"),
+        ("Temperatures", "/system/processes"),
+        ("Storage", "/system/processes"),
+        ("Controllers", "/devices/controllers"),
+        ("Units", "/system/services"),
+        ("System services", "/system/services"),
+        ("Updates", "/system/updates"),
+    ];
+    for (tile, owner) in owners {
+        if tile != "Updates" {
+            assert!(
+                html.contains(&format!("<a class=\"tile\" href=\"{owner}\"")),
+                "the {tile} tile must deep-link to {owner}: {html}"
+            );
+        }
+        let table = route_table();
+        let row = declaring_row(&table, owner).unwrap_or_else(|| {
+            panic!("the {tile} tile links to {owner}, which is not a route at all")
+        });
+        assert!(
+            !row.dangerous,
+            "a read-only Overview must not deep-link into the dangerous set: {owner}"
+        );
+    }
+
+    // The reverse direction: nothing on Overview links anywhere else. A tile
+    // pointing at a pre-IA path would otherwise pass the loop above unnoticed.
+    let expected: BTreeSet<String> = owners.iter().map(|(_, o)| o.to_string()).collect();
+    for target in link_targets(&html) {
+        assert!(
+            expected.contains(&target),
+            "Overview renders a link to {target}, which owns no tile's subject — \
+             every tile link is the page that owns it: {html}"
+        );
+    }
+}
+
+/// The empty state — `[panel].managed_units` is the default (empty) on every
+/// node today, so this is what the tile actually shows in production. An empty
+/// card would read as "no services", which is a different and false claim; the
+/// tile says nothing is *configured* and names the key that fills it.
+#[tokio::test]
+async fn overview_system_services_tile_explains_an_empty_allowlist() {
+    let state = hermetic_state();
+    let html = pages::dashboard::render_services_tile(&state).await;
+    assert!(
+        html.contains("none configured"),
+        "the empty state must say nothing is configured, not render blank: {html}"
+    );
+    assert!(
+        html.contains("[panel].managed_units"),
+        "and must name the config key that fills it: {html}"
+    );
+    assert!(
+        html.contains(r#"href="/system/services""#),
+        "the tile is still a link to the page that owns the subject: {html}"
+    );
+}
+
+/// A row per configured unit, labelled by the operator's own key. The unit's
+/// *state* is whatever this machine says — what is pinned is that every
+/// configured unit gets a row with a status dot, since a silently-dropped unit
+/// on a health screen is worse than no health screen.
+#[tokio::test]
+async fn overview_system_services_tile_renders_a_row_per_managed_unit() {
+    let state = state_with(managed(&[
+        ("sshd", "sshd.service", "system"),
+        ("network", "NetworkManager.service", "system"),
+        ("pipewire", "pipewire.service", "user"),
+    ]));
+    let html = pages::dashboard::render_services_tile(&state).await;
+    for key in ["sshd", "network", "pipewire"] {
+        assert!(
+            html.contains(&format!("</span>{key}: ")),
+            "expected a status row for the configured {key}: {html}"
+        );
+    }
+    assert_eq!(
+        html.matches(r#"<span class="dot "#).count(),
+        3,
+        "one dot per configured unit, each paired with its status word: {html}"
+    );
+    assert!(
+        !html.contains("none configured"),
+        "the empty state must not render alongside real rows: {html}"
+    );
+}
+
+/// With no daemon, Overview still answers the two questions systemd alone can
+/// answer: are the tv-shell units up, and are the managed units up. Both
+/// fragments are exec-only, which is why the group stays in the recovery-mode
+/// drawer at all (`docs/PANEL_IA.md` § Capability gating).
+#[tokio::test]
+async fn overview_still_reports_unit_state_with_the_daemon_down() {
+    let state = state_with_caps(
+        managed(&[("sshd", "sshd.service", "system")]),
+        CapabilitySnapshot::unreachable(),
+    );
+
+    let tiles = pages::dashboard::render_tiles(&state).await;
+    assert!(
+        tiles.to_lowercase().contains("unreachable"),
+        "the degraded branch must say so: {tiles}"
+    );
+    assert!(
+        tiles.contains("Units (via systemd)") && tiles.contains("daemon:"),
+        "the degraded branch reads unit state straight from systemd: {tiles}"
+    );
+
+    let services = pages::dashboard::render_services_tile(&state).await;
+    assert!(
+        services.contains("</span>sshd: "),
+        "the system-services tile is exec-only and unaffected by the daemon: {services}"
+    );
+}
+
+/// The three fragments render into ONE grid. The grid is declared once, on the
+/// page; each fragment emits bare tiles into a `display: contents` slot. While
+/// each fragment carried a `.tile-grid` of its own, the separately-polled
+/// Updates tile landed alone on a row instead of flowing in beside its
+/// neighbours.
+#[tokio::test]
+async fn the_overview_tile_fragments_share_one_grid() {
+    let sock = spawn_canned_daemon("overview-one-grid", replies_for_tiles());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let base = spawn_panel(state_for_socket_with_caps(
+        sock,
+        CapabilitySnapshot::fully_capable(),
+    ))
+    .await;
+    let c = client();
+
+    let page = c
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        page.matches(r#"class="tile-grid""#).count(),
+        1,
+        "the page declares exactly one grid: {page}"
+    );
+    assert_eq!(
+        page.matches("tile-slot").count(),
+        3,
+        "one `display: contents` slot per poll target: {page}"
+    );
+
+    for path in OVERVIEW_ROUTES.iter().skip(1) {
+        let body = c
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !body.contains("tile-grid"),
+            "{path} must emit bare tiles — a grid of its own is what put the \
+             Updates tile on a row by itself: {body}"
+        );
+    }
+}
+
+/// One class for a tile's headline value, used the same way everywhere. The
+/// Input Daemon tile used to carry `.big` (1.2rem/600) while the equivalent
+/// line on Build/System/Resources was plain body text, so it rendered bold and
+/// much larger than its neighbours and wrapped to two lines at 1440px.
+#[tokio::test]
+async fn every_overview_tile_headline_uses_the_same_class() {
+    let sock = spawn_canned_daemon("overview-typography", replies_for_tiles());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket_with_caps(sock, CapabilitySnapshot::fully_capable());
+    let html = pages::dashboard::render_tiles(&state).await;
+
+    assert!(
+        !html.contains(r#"class="big""#),
+        "`.big` was the one-off that made Input Daemon's line an outlier: {html}"
+    );
+    // Input daemon, Build, System, Resources — the four tiles whose body leads
+    // with a single value. Temperatures/Storage/Controllers/Units are lists and
+    // deliberately have no headline.
+    assert_eq!(
+        html.matches(r#"class="tile-value""#).count(),
+        4,
+        "each single-value tile has exactly one headline line: {html}"
+    );
 }
 
 /// The recovery banner must give the RIGHT advice for each failure mode.
