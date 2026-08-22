@@ -78,6 +78,13 @@ pub struct PanelConfig {
     /// Pinned from the daemon side by
     /// `daemon_config::tests::panel_nodes_parse_and_are_ignored_by_daemon`.
     pub nodes: Vec<RawRemoteNode>,
+    /// `[panel].managed_units` — the units System ▸ Services may RESTART,
+    /// beyond the three built-in tv-shell ones. Read is unrestricted; restart
+    /// is not (`docs/PANEL_IA.md` § Services). Resolved and validated at load
+    /// into [`AppConfig::managed_units`]; a malformed entry aborts startup
+    /// rather than silently dropping a unit the operator believes is
+    /// restartable.
+    pub managed_units: Vec<RawManagedUnit>,
 }
 
 impl Default for PanelConfig {
@@ -88,6 +95,7 @@ impl Default for PanelConfig {
             token_file: None,
             allow_dangerous: false,
             nodes: Vec::new(),
+            managed_units: Vec::new(),
         }
     }
 }
@@ -107,6 +115,327 @@ pub struct DevSection {
 pub struct HttpSection {
     pub bind: Option<String>,
     pub token_file: Option<String>,
+}
+
+// ── systemd units the Services page may read and restart ──────────────────
+
+/// The three tv-shell unit keys that are **built in** rather than configured.
+///
+/// They stay hardcoded so a typo in `[panel].managed_units` can never cost the
+/// recovery path (`docs/PANEL_IA.md` § Services). A `managed_units` entry
+/// whose key collides with one of these is a load error, not a shadow — see
+/// [`resolve_managed_units`].
+pub const BUILT_IN_UNIT_KEYS: [&str; 3] = ["daemon", "shell", "panel"];
+
+/// systemd's own unit-name length ceiling (`UNIT_NAME_MAX`, 256 including the
+/// NUL). Anything longer is not a unit name, it is a payload.
+const MAX_UNIT_NAME_LEN: usize = 255;
+
+/// The unit-type suffixes a name may carry. A name with no `.` at all is
+/// accepted too — `systemctl` appends `.service` itself — but a name ending in
+/// an unknown suffix (`foo.sh`, `foo.`) is rejected: it is far more likely to
+/// be a mistyped path than a unit.
+const UNIT_SUFFIXES: [&str; 11] = [
+    "service",
+    "socket",
+    "target",
+    "timer",
+    "mount",
+    "automount",
+    "path",
+    "slice",
+    "scope",
+    "swap",
+    "device",
+];
+
+/// Which systemd manager a unit lives under.
+///
+/// Load-bearing for privilege, not decoration: a `User` unit is restarted with
+/// `systemctl --user` and needs no elevation (so it keeps working with the
+/// daemon down, which is what makes Services a recovery surface); a `System`
+/// unit goes through `sudo -n` and fails closed without a per-unit sudoers
+/// line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitScope {
+    System,
+    User,
+}
+
+impl UnitScope {
+    /// Parse the `scope = "..."` field. Exactly two spellings are accepted —
+    /// anything else is a load error rather than a silent default, because
+    /// defaulting either way is wrong: guessing `user` breaks a working
+    /// restart, guessing `system` quietly routes a user unit through `sudo`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "system" => Ok(UnitScope::System),
+            "user" => Ok(UnitScope::User),
+            other => Err(format!(
+                "scope {other:?} is not valid; it must be exactly \"system\" or \"user\""
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnitScope::System => "system",
+            UnitScope::User => "user",
+        }
+    }
+
+    pub fn is_user(self) -> bool {
+        matches!(self, UnitScope::User)
+    }
+}
+
+impl std::fmt::Display for UnitScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A **syntactically validated** systemd unit name.
+///
+/// The only way to get one is [`UnitName::parse`], and every `systemctl`
+/// invocation in [`crate::exec`] takes either string literals or one of these
+/// — so an operator-typed name (System ▸ Services' "inspect any unit" form)
+/// cannot reach `systemctl` unvalidated, on the read path or any other.
+///
+/// The accepted alphabet is deliberately narrower than systemd's own. Nothing
+/// here is ever handed to a shell (`tokio::process::Command` takes an argv
+/// array), so a metacharacter could not execute anything anyway; the alphabet
+/// is narrow so the strings that reach an exec, a log line and an HTML
+/// attribute cannot be *mistaken* for syntax by any of them. The two rules
+/// that are load-bearing rather than tidy are the leading-`-` rejection —
+/// `systemctl` would parse `--foo` as an option, the one real injection this
+/// interface has — and the length cap.
+///
+/// Known narrowing: escaped names (`dev-disk-by\x2duuid-….device`) carry a
+/// backslash and so are not addressable from the panel. Mount and device units
+/// are not what this surface is for, and admitting `\` to buy them back is not
+/// a trade worth making.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitName(String);
+
+impl UnitName {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let t = raw.trim();
+        if t.is_empty() {
+            return Err("unit name must not be empty".to_string());
+        }
+        if t.len() > MAX_UNIT_NAME_LEN {
+            return Err(format!(
+                "unit name is {} bytes; systemd's own limit is {MAX_UNIT_NAME_LEN}",
+                t.len()
+            ));
+        }
+        if t.starts_with('-') {
+            return Err(format!(
+                "unit name {t:?} must not start with '-' — systemctl would read it as an option"
+            ));
+        }
+        if t.starts_with('.') {
+            return Err(format!("unit name {t:?} must not start with '.'"));
+        }
+        if t.contains("..") {
+            return Err(format!("unit name {t:?} must not contain '..'"));
+        }
+        if let Some(bad) = t
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | ':')))
+        {
+            return Err(format!(
+                "unit name {t:?} contains {bad:?}; only ASCII letters, digits and - _ . @ : \
+                 are accepted"
+            ));
+        }
+        if let Some((_, suffix)) = t.rsplit_once('.') {
+            if !UNIT_SUFFIXES.contains(&suffix) {
+                return Err(format!(
+                    "unit name {t:?} ends in .{suffix}, which is not a systemd unit type ({})",
+                    UNIT_SUFFIXES.join(", ")
+                ));
+            }
+        }
+        Ok(UnitName(t.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UnitName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A unit the panel is permitted to **restart**, with the scope it must be
+/// restarted in.
+///
+/// The fields are private and this module exposes exactly three constructors —
+/// [`builtin_target`], [`resolve_managed_units`] and
+/// [`AppConfig::restart_target`] — every one of which resolves a *key* against
+/// a server-side table. There is no `From<&str>`, no public field and no
+/// `Deserialize`, so a client-supplied unit name has no path into this type,
+/// and [`crate::exec::Recovery::restart`] accepts nothing else. That is
+/// `docs/PANEL_IA.md`'s no-arbitrary-unit property, held by the type system
+/// rather than by a `match` a later edit could widen.
+#[derive(Debug, Clone)]
+pub struct RestartTarget {
+    key: String,
+    unit: UnitName,
+    scope: UnitScope,
+}
+
+impl RestartTarget {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn unit(&self) -> &UnitName {
+        &self.unit
+    }
+
+    pub fn scope(&self) -> UnitScope {
+        self.scope
+    }
+
+    /// Whether losing this unit can end the operator's remaining path to the
+    /// box — what earns the extra sentence in the restart confirm.
+    ///
+    /// Derived from a small explicit set rather than from the unit's runtime
+    /// properties, because systemd exposes nothing that honestly answers "is
+    /// this how I am connected right now": `WantedBy=network.target` is true
+    /// of plenty of units whose failure costs nothing. The membership
+    /// criterion is narrow and checkable by eye: **system-scope units that
+    /// either serve the remote login session or own the network link it runs
+    /// over.** A user-scope unit can never qualify.
+    pub fn is_remote_access_critical(&self) -> bool {
+        if self.scope.is_user() {
+            return false;
+        }
+        let name = self.unit.as_str();
+        let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
+        REMOTE_ACCESS_UNITS.contains(&stem.to_ascii_lowercase().as_str())
+    }
+}
+
+/// See [`RestartTarget::is_remote_access_critical`]. Lowercased unit stems
+/// (suffix removed), so `NetworkManager.service` and `NetworkManager.socket`
+/// both match.
+const REMOTE_ACCESS_UNITS: [&str; 10] = [
+    // the remote login server itself, under each distro's spelling
+    "sshd",
+    "ssh",
+    "dropbear",
+    // whatever owns the link that login arrives over
+    "networkmanager",
+    "systemd-networkd",
+    "networking",
+    "iwd",
+    "wpa_supplicant",
+    "dhcpcd",
+    "tailscaled",
+];
+
+/// One `[panel].managed_units` entry, as written in `config.toml`.
+///
+/// ```toml
+/// [panel]
+/// managed_units = [
+///   { key = "sshd", unit = "sshd.service", scope = "system" },
+/// ]
+/// ```
+///
+/// Nested under `[panel]` for the same reason [`PanelConfig::nodes`] is: the
+/// daemon shares this file and would reject an unknown top-level table.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawManagedUnit {
+    /// The token the client sends to `POST /system/services/restart/{key}`.
+    /// An **index into this table**, never a unit name.
+    pub key: String,
+    /// The real unit name, resolved server-side.
+    pub unit: String,
+    /// `"system"` or `"user"` — see [`UnitScope`].
+    pub scope: String,
+}
+
+/// Resolve `[panel].managed_units` into restart targets, or abort startup.
+///
+/// Every failure here is loud and specific on purpose: this list is a
+/// privilege boundary, and the failure mode of a quietly-dropped entry is an
+/// operator who believes a unit is restartable from the panel and finds out
+/// otherwise while the box is already broken.
+pub fn resolve_managed_units(raw: &[RawManagedUnit]) -> anyhow::Result<Vec<RestartTarget>> {
+    let mut out: Vec<RestartTarget> = Vec::with_capacity(raw.len());
+    for (i, entry) in raw.iter().enumerate() {
+        let key = entry.key.trim();
+        if key.is_empty() {
+            return Err(anyhow::anyhow!(
+                "config: [panel].managed_units[{i}] has an empty `key`; refusing to start — \
+                 the key is what the restart route resolves against, so an unnamed entry \
+                 could never be reached"
+            ));
+        }
+        if BUILT_IN_UNIT_KEYS.contains(&key) {
+            return Err(anyhow::anyhow!(
+                "config: [panel].managed_units[{i}] uses key {key:?}, which is one of the \
+                 built-in tv-shell unit keys ({}); refusing to start — rename it. The \
+                 built-ins are hardcoded precisely so a config entry can never take the \
+                 recovery path away",
+                BUILT_IN_UNIT_KEYS.join(", ")
+            ));
+        }
+        if let Some(bad) = key
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+        {
+            return Err(anyhow::anyhow!(
+                "config: [panel].managed_units[{i}] key {key:?} contains {bad:?}; a key is a \
+                 URL path segment, so only ASCII letters, digits, '-' and '_' are accepted"
+            ));
+        }
+        if out.iter().any(|t| t.key == key) {
+            return Err(anyhow::anyhow!(
+                "config: [panel].managed_units has two entries with key {key:?}; refusing to \
+                 start — whichever one lost would be silently unreachable"
+            ));
+        }
+        let unit = UnitName::parse(&entry.unit).map_err(|e| {
+            anyhow::anyhow!("config: [panel].managed_units[{i}] ({key:?}) has a bad `unit`: {e}")
+        })?;
+        let scope = UnitScope::parse(&entry.scope).map_err(|e| {
+            anyhow::anyhow!("config: [panel].managed_units[{i}] ({key:?}) has a bad `scope`: {e}")
+        })?;
+        out.push(RestartTarget {
+            key: key.to_string(),
+            unit,
+            scope,
+        });
+    }
+    Ok(out)
+}
+
+/// Resolve one of the three [`BUILT_IN_UNIT_KEYS`] to its restart target.
+///
+/// Hardcoded, not configurable: `docs/PANEL_IA.md` § Services keeps the
+/// tv-shell units built in so a config typo cannot cost the recovery path.
+/// All three are `--user` units, so none of them needs `sudo`.
+pub fn builtin_target(key: &str) -> Option<RestartTarget> {
+    let unit = match key {
+        "daemon" => daemon_unit(),
+        "shell" => shell_unit(),
+        "panel" => panel_unit(),
+        _ => return None,
+    };
+    Some(RestartTarget {
+        key: key.to_string(),
+        unit,
+        scope: UnitScope::User,
+    })
 }
 
 /// One `[[panel.nodes]]` entry, as written in `config.toml`.
@@ -240,6 +569,11 @@ pub struct AppConfig {
     /// carry an unreviewed credential-handling change.
     #[allow(dead_code)]
     pub remote_nodes: Vec<RemoteNode>,
+    /// `[panel].managed_units`, resolved and validated (`resolve_managed_units`).
+    /// The server-side table System ▸ Services' restart route indexes into —
+    /// the client only ever sends a key. Empty by default: on a node with no
+    /// `managed_units`, only the three built-in tv-shell units are restartable.
+    pub managed_units: Vec<RestartTarget>,
 }
 
 impl Default for AppConfig {
@@ -260,6 +594,7 @@ impl Default for AppConfig {
             http_bridge_base: None,
             http_token: None,
             remote_nodes: Vec::new(),
+            managed_units: Vec::new(),
         }
     }
 }
@@ -271,6 +606,28 @@ impl AppConfig {
     /// rather than read as "auth off".
     pub fn auth_enabled(&self) -> bool {
         self.panel_token_file.is_some()
+    }
+
+    /// Resolve a restart `key` to the unit it names — the ONE lookup
+    /// `POST /system/services/restart/{key}` performs.
+    ///
+    /// Built-ins are consulted first, so even if the collision check in
+    /// [`resolve_managed_units`] were ever removed, config could not shadow
+    /// the recovery path. `None` means "not in the table" and the caller must
+    /// refuse before touching `systemctl`: an unknown key is not a unit name,
+    /// it is a client asking for one.
+    pub fn restart_target(&self, key: &str) -> Option<RestartTarget> {
+        builtin_target(key).or_else(|| self.managed_units.iter().find(|t| t.key == key).cloned())
+    }
+
+    /// Every restartable unit, built-ins first, in the order System ▸ Services
+    /// renders them.
+    pub fn restart_targets(&self) -> Vec<RestartTarget> {
+        BUILT_IN_UNIT_KEYS
+            .iter()
+            .filter_map(|k| builtin_target(k))
+            .chain(self.managed_units.iter().cloned())
+            .collect()
     }
 
     /// Refuse to start in a configuration that would expose the panel — the
@@ -405,6 +762,13 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
     let remote_nodes =
         read_remote_nodes(&raw.panel.nodes, &tv_shell_protocol::brand::config_dir())?;
 
+    // Same posture, and the same reason: a `managed_units` entry that is
+    // malformed, duplicated or shadowing a built-in ABORTS startup rather than
+    // being dropped. The list is a privilege boundary; silently serving a
+    // shorter one than the operator wrote is the failure mode that gets found
+    // out mid-incident.
+    let managed_units = resolve_managed_units(&raw.panel.managed_units)?;
+
     let cfg = AppConfig {
         enabled: raw.panel.enabled,
         panel_bind,
@@ -416,6 +780,7 @@ fn resolve(raw: RawConfig) -> anyhow::Result<AppConfig> {
         http_bridge_base,
         http_token,
         remote_nodes,
+        managed_units,
     };
     if cfg.enabled {
         cfg.validate()?;
@@ -705,19 +1070,30 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}/{name}"))
 }
 
+/// Build a [`UnitName`] from a brand-derived unit string.
+///
+/// These are compile-time-shaped (`<SLUG>-input.service` and friends, `SLUG`
+/// being a `&'static str` const) so they cannot fail [`UnitName::parse`];
+/// `built_in_unit_names_are_valid_unit_names` pins that rather than trusting
+/// the reasoning.
+fn brand_unit(suffix: &str) -> UnitName {
+    let raw = format!("{}-{suffix}", tv_shell_protocol::brand::SLUG);
+    UnitName::parse(&raw).expect("brand-derived unit names are valid unit names")
+}
+
 /// systemd unit name for the input daemon (`tv-shell-input.service`).
-pub fn daemon_unit() -> String {
-    format!("{}-input.service", tv_shell_protocol::brand::SLUG)
+pub fn daemon_unit() -> UnitName {
+    brand_unit("input.service")
 }
 
 /// systemd unit name for the Quickshell shell (`tv-shell-quickshell.service`).
-pub fn shell_unit() -> String {
-    format!("{}-quickshell.service", tv_shell_protocol::brand::SLUG)
+pub fn shell_unit() -> UnitName {
+    brand_unit("quickshell.service")
 }
 
 /// systemd unit name for the panel itself (`tv-shell-panel.service`).
-pub fn panel_unit() -> String {
-    format!("{}-panel.service", tv_shell_protocol::brand::SLUG)
+pub fn panel_unit() -> UnitName {
+    brand_unit("panel.service")
 }
 
 /// `journalctl --user -u <unit>` target for the input daemon
@@ -1274,11 +1650,205 @@ mod tests {
 
     #[test]
     fn unit_and_journal_names_use_slug() {
-        assert_eq!(daemon_unit(), "tv-shell-input.service");
-        assert_eq!(shell_unit(), "tv-shell-quickshell.service");
-        assert_eq!(panel_unit(), "tv-shell-panel.service");
+        assert_eq!(daemon_unit().as_str(), "tv-shell-input.service");
+        assert_eq!(shell_unit().as_str(), "tv-shell-quickshell.service");
+        assert_eq!(panel_unit().as_str(), "tv-shell-panel.service");
         assert_eq!(daemon_journal_unit(), "tv-shell-input");
         assert_eq!(shell_journal_tag(), "tv-shell-quickshell");
+    }
+
+    /// `brand_unit` `expect`s — this is what stops that being a latent panic.
+    #[test]
+    fn built_in_unit_names_are_valid_unit_names() {
+        for key in BUILT_IN_UNIT_KEYS {
+            let target = builtin_target(key).expect("every built-in key resolves");
+            assert_eq!(target.key(), key);
+            assert!(
+                UnitName::parse(target.unit().as_str()).is_ok(),
+                "built-in {key} resolves to an invalid unit name {}",
+                target.unit()
+            );
+            assert_eq!(
+                target.scope(),
+                UnitScope::User,
+                "all three tv-shell units are --user units; a System one would need sudo"
+            );
+        }
+        assert!(builtin_target("sshd").is_none());
+    }
+
+    fn raw(key: &str, unit: &str, scope: &str) -> RawManagedUnit {
+        RawManagedUnit {
+            key: key.to_string(),
+            unit: unit.to_string(),
+            scope: scope.to_string(),
+        }
+    }
+
+    #[test]
+    fn managed_units_resolve_key_unit_and_scope() {
+        let resolved = resolve_managed_units(&[
+            raw("sshd", "sshd.service", "system"),
+            raw("pipewire", "pipewire.service", "user"),
+        ])
+        .expect("a well-formed list resolves");
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].key(), "sshd");
+        assert_eq!(resolved[0].unit().as_str(), "sshd.service");
+        assert_eq!(resolved[0].scope(), UnitScope::System);
+        assert_eq!(resolved[1].scope(), UnitScope::User);
+    }
+
+    /// The built-ins are hardcoded so a config typo cannot cost the recovery
+    /// path — which only holds if a colliding key is REFUSED rather than
+    /// silently shadowing (or being shadowed by) the built-in.
+    #[test]
+    fn a_managed_unit_cannot_take_a_built_in_key() {
+        for key in BUILT_IN_UNIT_KEYS {
+            let err = resolve_managed_units(&[raw(key, "somethingelse.service", "system")])
+                .expect_err("a built-in key collision must be a load error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(key) && msg.contains("built-in"),
+                "the error must name the colliding key and say why: {msg}"
+            );
+        }
+    }
+
+    /// Even if the collision check above were removed, resolution consults the
+    /// built-ins first — so `daemon` can never resolve to a config-supplied
+    /// unit. Belt and braces on the one property phase 5 must not lose.
+    #[test]
+    fn built_in_keys_win_the_lookup() {
+        let cfg = AppConfig {
+            managed_units: vec![RestartTarget {
+                key: "daemon".to_string(),
+                unit: UnitName::parse("evil.service").unwrap(),
+                scope: UnitScope::System,
+            }],
+            ..AppConfig::default()
+        };
+        let resolved = cfg.restart_target("daemon").expect("daemon resolves");
+        assert_eq!(resolved.unit(), &daemon_unit());
+        assert_eq!(resolved.scope(), UnitScope::User);
+    }
+
+    #[test]
+    fn managed_units_reject_duplicates_and_empty_keys() {
+        let err = resolve_managed_units(&[
+            raw("sshd", "sshd.service", "system"),
+            raw("sshd", "ssh.service", "system"),
+        ])
+        .expect_err("a duplicate key must be a load error");
+        assert!(err.to_string().contains("two entries"), "{err}");
+
+        let err = resolve_managed_units(&[raw("  ", "sshd.service", "system")])
+            .expect_err("an empty key must be a load error");
+        assert!(err.to_string().contains("empty `key`"), "{err}");
+
+        let err = resolve_managed_units(&[raw("ssh/../root", "sshd.service", "system")])
+            .expect_err("a key that is not a path segment must be a load error");
+        assert!(err.to_string().contains("URL path segment"), "{err}");
+    }
+
+    #[test]
+    fn a_managed_unit_with_a_bad_scope_is_a_load_error() {
+        for bad in ["System", "root", "", "user ; reboot"] {
+            let err = resolve_managed_units(&[raw("x", "x.service", bad)])
+                .expect_err("only \"system\"/\"user\" may parse");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("bad `scope`") && msg.contains("\"system\" or \"user\""),
+                "the error must name the field and the two legal values: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_managed_unit_with_a_malformed_unit_is_a_load_error() {
+        for bad in ["", "a b.service", "../etc/passwd", "-x.service", "sshd.sh"] {
+            let err = resolve_managed_units(&[raw("x", bad, "system")])
+                .expect_err("a malformed unit name must be a load error");
+            assert!(
+                err.to_string().contains("bad `unit`"),
+                "the error must name the field: {err}"
+            );
+        }
+    }
+
+    /// The read path's validator: an operator types into this one, so it is
+    /// the boundary between a text box and an `exec`.
+    #[test]
+    fn unit_name_parse_rejects_everything_that_is_not_a_unit_name() {
+        for bad in [
+            "",
+            "   ",
+            "sshd .service",
+            "sshd\t.service",
+            "sshd;reboot",
+            "sshd&&reboot",
+            "sshd|tee",
+            "$(reboot)",
+            "`reboot`",
+            "/etc/systemd/system/sshd.service",
+            "../../etc/shadow",
+            "..",
+            "-h",
+            "--user",
+            ".hidden.service",
+            "sshd\nreboot.service",
+            "sshd.sh",
+            "sshd.",
+            "sshd\\x2d.service",
+        ] {
+            assert!(
+                UnitName::parse(bad).is_err(),
+                "{bad:?} must be rejected by the read-path validator"
+            );
+        }
+        let absurd = format!("{}.service", "a".repeat(4096));
+        assert!(UnitName::parse(&absurd).is_err(), "length cap must hold");
+
+        for good in [
+            "sshd.service",
+            "NetworkManager.service",
+            "systemd-networkd.socket",
+            "getty@tty1.service",
+            "org.freedesktop.thing.service",
+            "sshd",
+            "  bluetooth.service  ",
+        ] {
+            UnitName::parse(good).unwrap_or_else(|e| panic!("{good:?} must be accepted: {e}"));
+        }
+        assert_eq!(
+            UnitName::parse("  bluetooth.service  ").unwrap().as_str(),
+            "bluetooth.service",
+            "parse trims, so the validated value is what reaches systemctl"
+        );
+    }
+
+    #[test]
+    fn remote_access_criticality_covers_ssh_and_the_network_link_only() {
+        let units = resolve_managed_units(&[
+            raw("sshd", "sshd.service", "system"),
+            raw("network", "NetworkManager.service", "system"),
+            raw("bluetooth", "bluetooth.service", "system"),
+            raw("usersshd", "sshd.service", "user"),
+        ])
+        .unwrap();
+        assert!(units[0].is_remote_access_critical(), "sshd strands the box");
+        assert!(
+            units[1].is_remote_access_critical(),
+            "NetworkManager owns the link ssh arrives over"
+        );
+        assert!(
+            !units[2].is_remote_access_critical(),
+            "bluetooth is not how anyone reaches this box"
+        );
+        assert!(
+            !units[3].is_remote_access_critical(),
+            "a --user unit cannot be the system ssh server"
+        );
     }
 
     #[test]

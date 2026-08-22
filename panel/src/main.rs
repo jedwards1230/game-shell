@@ -175,6 +175,10 @@ fn build_router(state: SharedState) -> Router {
             get(pages::dashboard::updates_tile),
         ) // htmx poll partial, own slower interval
         .route("/system/services", get(pages::services::page))
+        // A READ: `systemctl show` for any unit, either scope. A GET because
+        // it mutates nothing — the asymmetry with the restart route below is
+        // the whole point of the page (`docs/PANEL_IA.md` § Services).
+        .route("/system/services/inspect", get(pages::services::inspect))
         .route(
             "/system/services/restart/{key}",
             post(pages::services::restart),

@@ -97,7 +97,7 @@ page.
 
 | Page | From | Notes |
 |---|---|---|
-| **Services** | *new*, plus Processes' unit table | ✅ landed in phase 2 at `/system/services` — the three built-in units only; the rest is phase 5. See [Services](#services-new) below |
+| **Services** | *new*, plus Processes' unit table | ✅ landed at `/system/services` — the three built-in units in phase 2, arbitrary-unit reads and the `managed_units` restart allowlist in phase 5. See [Services](#services-new) below; the sudoers half of phase 5 is still open |
 | **Processes** | Processes (top-processes table, Hyprland active window/clients/monitors) | ✅ landed in phase 2 — purely read-only observation, no action affordance at all |
 | **Updates** | Processes (System Updates section) | ✅ landed in phase 2 at `/system/updates` — it has its own slow poll, its own background job, and the most dangerous button on the page it used to share |
 | **Logs** | Logs | Unchanged |
@@ -181,6 +181,12 @@ were exact duplicates of the Controllers page's own.
 
 ## Services (new)
 
+> ✅ **Landed in phase 5**, with one documented exception: the sudoers
+> generation under [Privilege](#privilege) is ansible-side work that has not
+> shipped, so system-scope restarts fail closed on every node today. Everything
+> else below is built — see PANEL.md's
+> [Restartable units](PANEL.md#restartable-units-panelmanaged_units).
+
 The gap that prompted this: there is no way to see whether `sshd` is running, let
 alone restart it, without SSHing in — which is precisely what you cannot do when
 `sshd` is the thing that is down.
@@ -231,10 +237,13 @@ tv-shell ALL=(root) NOPASSWD: /usr/bin/systemctl restart sshd.service, \
                               /usr/bin/systemctl restart NetworkManager.service
 ```
 
-Shipped by the `htpc_common` ansible role, generated from the same list that
-renders `managed_units`, so the two cannot drift. A unit in `managed_units`
-without a matching sudoers line fails closed with an honest "not permitted on
-this node" — never a silent no-op.
+To be shipped by the `htpc_common` ansible role, generated from the same list
+that renders `managed_units`, so the two cannot drift. **That generation has not
+landed** (it was out of scope for the panel PR), so today *every* system-scope
+entry is a unit without a matching sudoers line. Which is exactly the case the
+panel has to get right, and does: it fails closed with an honest "NOT PERMITTED
+on this node", naming the unit and the missing line — never a silent no-op,
+never a misleading success.
 
 `systemctl --user` restarts need no sudo and keep working with the daemon down,
 which is what makes this page a recovery surface rather than a convenience.
@@ -276,12 +285,26 @@ Each phase ships independently and leaves the panel working.
 | **2** ✅ landed | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
 | **3** ✅ landed | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC — plus the `Input` group onto Devices/Controllers. Saves are now scoped to the groups the submitting form rendered. | 1 | #407 |
 | **4** ✅ landed | Dissolve **Media** and **Tools** → Shell/Appearance + Shell/Apps, Devices/Network, Devices/Display & Audio, Remote/Navigation + Remote/Launcher, Dev/Screenshot + Dev/Console. Six duplicate routes deleted rather than moved. | 1, 3 | #408 |
-| **5** | Services: read any unit; `managed_units` config; sudoers generation in the ansible role; danger-tier confirms. | 2 | #409 |
+| **5** ⚠️ partly landed | Services: read any unit; `managed_units` config; danger-tier confirms. **The ansible-side sudoers generation did NOT land** — see below. | 2 | #409 |
 | **6** | Overview rebuilt as pure read-only tiles with deep links. | 2-5 | #410 |
 
 Phase 1 is deliberately mechanical — it changes navigation without changing any
 page's content, so it can be reviewed as a routing change and reverted cleanly if
 the structure feels wrong in use.
+
+**Phase 5's split delivery.** The panel half is done: any unit is readable in
+either scope, `[panel].managed_units` is parsed and validated at load (a bad
+`key`/`unit`/`scope`, or a key colliding with a built-in, aborts startup),
+restart is allowlist-only and resolved server-side, and the confirms are
+scope-derived. The **ansible half was explicitly out of scope for that PR** and
+has not landed: the `htpc_common` role in `jedwards1230/homelab-ansible` still
+generates no per-unit sudoers lines. The consequence is worth stating plainly
+rather than discovering: **on every node today, including htpc-1, a
+`scope = "system"` restart fails closed** — `sudo -n` refuses and the page
+reports "NOT PERMITTED on this node", naming the unit and the missing sudoers
+line. Reading those units works, and `scope = "user"` restarts work. Phase 5
+closes when the role ships the lines, generated from the same list that renders
+`managed_units` so the two cannot drift.
 
 ## Open questions
 

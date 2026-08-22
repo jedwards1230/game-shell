@@ -1,31 +1,75 @@
 {% extends "base.html" %}
+{# One macro for both restart tables: the built-in tv-shell units and the
+   configured allowlist render identically, because they ARE the same thing —
+   two halves of one server-side table, indexed by key. #}
+{% macro unit_rows(units) %}
+    {% for u in units %}
+    <tr>
+      <td>{{ u.label }} <span class="muted">({{ u.unit }})</span></td>
+      {# The raw systemd token is only worth showing when it is not the word we
+         already printed — otherwise every healthy row reads "active (active)". #}
+      <td><span class="unit-chip"><span class="dot {{ u.dot_class }}"></span>{{ u.state_word }}</span>{% if u.state != u.state_word %} <span class="muted">({{ u.state }})</span>{% endif %}
+        {%- if u.failure_reason != "" %}<div class="muted unit-failure">{{ u.failure_reason }}</div>{% endif %}</td>
+      <td class="muted">{% if u.enabled_state != "" %}{{ u.enabled_state }}{% else %}—{% endif %}</td>
+      <td class="muted">{% if u.active_since != "" %}{{ u.active_since }}{% else %}—{% endif %}</td>
+      <td class="muted">{{ u.scope }}</td>
+      <td>
+        <form hx-post="/system/services/restart/{{ u.key }}" hx-disabled-elt="find button" hx-target="#services-result" hx-swap="innerHTML"
+              hx-confirm="{{ u.confirm }}" class="inline-form">
+          <button class="{{ u.danger_class }}" type="submit">Restart</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+{% endmacro %}
 {% block title %}Services — tv-shell panel{% endblock %}
 {% block content %}
 <h1>Services</h1>
 
 <div id="services-result"></div>
 
+
 <section class="processes-section">
-  <h2>systemd units</h2>
-  <p class="muted">The three tv-shell user units. Restart is resolved server-side from a fixed key — an arbitrary unit name is never accepted.</p>
+  <h2>tv-shell units</h2>
+  <p class="muted">The three built-in tv-shell <code>--user</code> units. Built in rather than configured, so a typo in <code>[panel].managed_units</code> can never cost the recovery path. Restart resolves a fixed key server-side — an arbitrary unit name is never accepted.</p>
   <table>
-    <thead><tr><th>Unit</th><th>State</th><th></th></tr></thead>
+    <thead><tr><th>Unit</th><th>State</th><th>Enabled</th><th>Active since</th><th>Scope</th><th></th></tr></thead>
     <tbody>
-    {% for u in units %}
-    <tr>
-      <td>{{ u.label }} <span class="muted">({{ u.unit }})</span></td>
-      {# The raw systemd token is only worth showing when it is not the word we
-         already printed — otherwise every healthy row reads "active (active)". #}
-      <td><span class="unit-chip"><span class="dot {{ u.dot_class }}"></span>{{ u.state_word }}</span>{% if u.state != u.state_word %} <span class="muted">({{ u.state }})</span>{% endif %}</td>
-      <td>
-        <form hx-post="/system/services/restart/{{ u.key }}" hx-disabled-elt="find button" hx-target="#services-result" hx-swap="innerHTML"
-              hx-confirm="{{ u.confirm }}" class="inline-form">
-          <button class="warn-action" type="submit">Restart</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
+    {% call unit_rows(builtin) %}{% endcall %}
     </tbody>
   </table>
+</section>
+
+<section class="processes-section">
+  <h2>Managed units</h2>
+  {% if managed.is_empty() %}
+  <p class="muted">No <code>[panel].managed_units</code> are configured on this node, so nothing beyond the tv-shell units can be restarted from here. Add entries to <code>[panel]</code> in <code>config.toml</code> (see <code>config/config.toml.example</code>); each one needs a matching per-unit <code>NOPASSWD</code> sudoers line before a <code>system</code>-scope restart will be permitted. Reading is unrestricted — use <strong>Inspect any unit</strong> below.</p>
+  {% else %}
+  <p class="muted">The restart allowlist from <code>[panel].managed_units</code>. The client sends the key; the unit name is resolved server-side. A <code>system</code>-scope restart runs through <code>sudo -n</code> and fails closed with an explicit refusal when this node has no per-unit sudoers line for it.</p>
+  <table>
+    <thead><tr><th>Unit</th><th>State</th><th>Enabled</th><th>Active since</th><th>Scope</th><th></th></tr></thead>
+    <tbody>
+    {% call unit_rows(managed) %}{% endcall %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="processes-section">
+  <h2>Inspect any unit</h2>
+  <p class="muted">Reading a unit's status is inert, so this side is unrestricted: any unit, either scope. Restarting is not — only the units above can be restarted.</p>
+  <form class="inline-form" hx-get="/system/services/inspect" hx-target="#services-inspect" hx-swap="innerHTML">
+    <label>Unit
+      <input class="field-wide" type="text" name="unit" placeholder="sshd.service" autocomplete="off" spellcheck="false">
+    </label>
+    <label>Scope
+      <select name="scope">
+        <option value="system">system</option>
+        <option value="user">user</option>
+      </select>
+    </label>
+    <button class="btn-probe" type="submit">Show status</button>
+  </form>
+  <div id="services-inspect"></div>
 </section>
 {% endblock %}

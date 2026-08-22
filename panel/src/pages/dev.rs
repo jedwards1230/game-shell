@@ -77,7 +77,12 @@ pub async fn render_page(state: &AppState) -> String {
 /// restart/build/deploy, the operator sees the unit actually came back
 /// without a manual page reload) as well as rendered inline on normal page
 /// load (`oob = false`).
-async fn render_unit_chip(state: &AppState, id: &str, unit: String, oob: bool) -> String {
+async fn render_unit_chip(
+    state: &AppState,
+    id: &str,
+    unit: crate::config::UnitName,
+    oob: bool,
+) -> String {
     let raw = state.recovery.unit_active(&unit).await;
     let (dot_class, word) = super::units::unit_dot(&raw);
     let oob_attr = if oob { " hx-swap-oob=\"true\"" } else { "" };
@@ -273,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn unit_chip_keeps_the_dot_and_its_label_in_one_nowrap_element() {
         let state = hermetic_state();
-        let chip = render_unit_chip(&state, "daemon", "tv-shell-input.service".into(), false).await;
+        let chip = render_unit_chip(&state, "daemon", crate::config::daemon_unit(), false).await;
         let chip_open = chip
             .find(r#"<span class="unit-chip""#)
             .expect("a .unit-chip wrapper");

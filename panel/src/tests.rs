@@ -1379,7 +1379,7 @@ async fn processes_page_renders_no_restart_control_or_updates_section() {
 }
 
 /// Services owns the unit table: the three built-in tv-shell units, each with
-/// its own restart form. Reading arbitrary units is phase 5.
+/// its own restart form.
 #[tokio::test]
 async fn services_page_renders_the_three_built_in_units() {
     let state = hermetic_state();
@@ -1398,16 +1398,332 @@ async fn services_page_renders_the_three_built_in_units() {
         html.matches(r#"<span class="unit-chip">"#).count() == 3,
         "each unit's dot and status word must sit in one nowrap chip: {html}"
     );
+    // All three are `--user` units, so none of them is severe-tier.
+    assert!(
+        !html.contains("danger-severe"),
+        "a --user restart needs no elevation and stays tier 1: {html}"
+    );
+}
+
+/// With nothing configured, the page says so rather than rendering an empty
+/// table — and still offers the (unrestricted) read path.
+#[tokio::test]
+async fn services_page_explains_an_empty_allowlist_and_still_offers_the_read_path() {
+    let state = hermetic_state();
+    let html = pages::services::render_page(&state).await;
+    assert!(
+        html.contains("No <code>[panel].managed_units</code> are configured"),
+        "an empty allowlist must be explained: {html}"
+    );
+    assert!(
+        html.contains(r#"hx-get="/system/services/inspect""#) && html.contains(r#"name="unit""#),
+        "the inspect form is the read side and is never gated: {html}"
+    );
+}
+
+// ── phase 5: the restart allowlist ─────────────────────────────────────────
+
+fn managed(entries: &[(&str, &str, &str)]) -> AppConfig {
+    let raw: Vec<crate::config::RawManagedUnit> = entries
+        .iter()
+        .map(|(key, unit, scope)| crate::config::RawManagedUnit {
+            key: key.to_string(),
+            unit: unit.to_string(),
+            scope: scope.to_string(),
+        })
+        .collect();
+    AppConfig {
+        managed_units: crate::config::resolve_managed_units(&raw).expect("well-formed test list"),
+        ..AppConfig::default()
+    }
 }
 
 #[tokio::test]
-async fn services_restart_rejects_unknown_unit_key() {
-    let state = hermetic_state();
-    let html = pages::services::render_restart(&state, "bogus").await;
+async fn services_page_renders_the_configured_allowlist_with_severe_tier_confirms() {
+    let state = state_with(managed(&[
+        ("sshd", "sshd.service", "system"),
+        ("network", "NetworkManager.service", "system"),
+        ("bluetooth", "bluetooth.service", "system"),
+        ("pipewire", "pipewire.service", "user"),
+    ]));
+    let html = pages::services::render_page(&state).await;
+
+    for key in ["sshd", "network", "bluetooth", "pipewire"] {
+        assert!(
+            html.contains(&format!(r#"hx-post="/system/services/restart/{key}""#)),
+            "expected a restart form for the allowlisted {key}: {html}"
+        );
+    }
+    // The form carries the KEY, never the unit name — that is the property.
     assert!(
-        html.to_lowercase().contains("unknown"),
-        "expected an unknown-unit-key error: {html}"
+        !html.contains("restart/sshd.service") && !html.contains("restart/NetworkManager.service"),
+        "the client must only ever be handed a key: {html}"
     );
+    // Elevated restarts are severe tier; the user-scope one is not.
+    assert_eq!(
+        html.matches(r#"<button class="danger-severe""#).count(),
+        3,
+        "the three system-scope restarts are severe tier and nothing else is: {html}"
+    );
+    // Confirms name the specific unit, and the two that can strand the box
+    // say so.
+    assert!(html.contains("Restart sshd.service now?"), "{html}");
+    assert!(
+        html.matches("end remote access entirely").count() == 2,
+        "sshd and NetworkManager warn about losing remote access; bluetooth and \
+         pipewire must not: {html}"
+    );
+}
+
+/// An unknown key is refused **before any exec** — it is not a unit name, it
+/// is a client asking for one.
+#[tokio::test]
+async fn services_restart_rejects_an_unknown_unit_key_before_touching_systemctl() {
+    let state = state_with(managed(&[("sshd", "sshd.service", "system")]));
+    for key in [
+        "bogus",
+        "sshd.service",   // the unit name is not a key
+        "NetworkManager", // not in this node's table
+        "",
+        "../../dev/reboot",
+    ] {
+        let html = pages::services::render_restart(&state, key).await;
+        assert!(
+            html.contains("unknown unit key") && html.contains("nothing was run"),
+            "{key:?} must be refused with no exec: {html}"
+        );
+        assert!(html.contains("result-error"), "{key:?}: {html}");
+    }
+}
+
+/// The built-ins are hardcoded so a config typo cannot cost the recovery path.
+/// Config can neither shadow them nor be shadowed by them — it is a load
+/// error, and even the lookup consults the built-ins first.
+#[test]
+fn a_managed_unit_may_not_shadow_a_built_in_key() {
+    for key in crate::config::BUILT_IN_UNIT_KEYS {
+        let raw = [crate::config::RawManagedUnit {
+            key: key.to_string(),
+            unit: "somethingelse.service".to_string(),
+            scope: "system".to_string(),
+        }];
+        assert!(
+            crate::config::resolve_managed_units(&raw).is_err(),
+            "{key} must be refused at config load, not silently shadowed"
+        );
+    }
+}
+
+/// **The read path is where an operator types.** It must reject anything that
+/// is not plausibly a unit name, before the string is capable of reaching an
+/// argv at all.
+#[tokio::test]
+async fn services_inspect_validates_the_typed_unit_name() {
+    let state = hermetic_state();
+    for bad in [
+        "",
+        "   ",
+        "sshd .service",
+        "sshd;reboot",
+        "sshd && reboot",
+        "sshd | tee /tmp/x",
+        "$(reboot)",
+        "`reboot`",
+        "/etc/systemd/system/sshd.service",
+        "../../etc/shadow",
+        "-h",
+        "--user",
+    ] {
+        let html = pages::services::render_inspect(&state, bad, "system").await;
+        assert!(
+            html.contains("banner-error"),
+            "{bad:?} must be rejected by the inspect form: {html}"
+        );
+        assert!(
+            !html.contains("unit-inspect"),
+            "{bad:?} must not render a status table: {html}"
+        );
+    }
+    let absurd = "a".repeat(9000);
+    let html = pages::services::render_inspect(&state, &absurd, "system").await;
+    assert!(html.contains("banner-error"), "an absurd name is rejected");
+
+    // ... and a bad scope is refused too, rather than defaulting.
+    let html = pages::services::render_inspect(&state, "sshd.service", "root").await;
+    assert!(html.contains("Not a scope"), "{html}");
+}
+
+/// A readable unit is not a restartable one. The inspect fragment says which
+/// it is, so the page never implies an affordance the allowlist does not grant.
+#[tokio::test]
+async fn services_inspect_says_whether_the_unit_is_restartable() {
+    let state = state_with(managed(&[("sshd", "sshd.service", "system")]));
+    let html = pages::services::render_inspect(&state, "sshd.service", "system").await;
+    assert!(
+        html.contains("restart allowlist as <code>sshd</code>"),
+        "an allowlisted unit points back at its key: {html}"
+    );
+    let html = pages::services::render_inspect(&state, "cups.service", "system").await;
+    assert!(
+        html.contains("not in the restart allowlist"),
+        "a merely-readable unit says so: {html}"
+    );
+}
+
+/// **The structural half of the no-arbitrary-unit property.**
+///
+/// Every mutating `systemctl` argv in `exec.rs` is built from string literals
+/// plus, at most, `target.unit().as_str()` — where `target` is the
+/// [`crate::config::RestartTarget`] parameter. A `&str` unit name has no
+/// signature to arrive through, and this test fails if one is ever added.
+#[test]
+fn the_only_mutating_systemctl_argv_is_a_restart_target() {
+    const MUTATING_VERBS: [&str; 14] = [
+        "restart",
+        "start",
+        "stop",
+        "reload",
+        "try-restart",
+        "kill",
+        "isolate",
+        "mask",
+        "unmask",
+        "enable",
+        "disable",
+        "reboot",
+        "suspend",
+        "poweroff",
+    ];
+    /// The one non-literal argv element the mutating path may use.
+    const ALLOWED_DYNAMIC: &str = "target.unit().as_str()";
+
+    let src = include_str!("exec.rs");
+    let mut checked = 0usize;
+    for (signature, body) in fn_blocks(src) {
+        let mutating = MUTATING_VERBS
+            .iter()
+            .any(|v| body.contains(&format!("\"{v}\"")));
+        if !mutating {
+            continue;
+        }
+        checked += 1;
+        for argv in argv_slices(&body) {
+            for element in argv.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                if element.starts_with('"') {
+                    continue; // a literal — fixed at compile time
+                }
+                assert_eq!(
+                    element, ALLOWED_DYNAMIC,
+                    "exec.rs `{signature}` passes {element:?} to a mutating systemctl \
+                     argv. The only non-literal argument permitted there is \
+                     {ALLOWED_DYNAMIC} — a unit name must come from the server-side \
+                     table (docs/PANEL_IA.md § Preserving the no-arbitrary-unit property)"
+                );
+                assert!(
+                    signature.contains("target: &RestartTarget"),
+                    "exec.rs `{signature}` uses a dynamic unit name without taking a \
+                     &RestartTarget"
+                );
+            }
+        }
+    }
+    assert!(
+        checked >= 3,
+        "expected to have checked restart/reboot/suspend at least; the scanner \
+         found only {checked} mutating fn(s) — it has probably stopped matching \
+         exec.rs's shape and is asserting nothing"
+    );
+}
+
+/// The counterpart in `config.rs`: [`crate::config::RestartTarget`] is
+/// constructible only by resolving a KEY against a server-side table, so there
+/// is no way to hand [`crate::exec::Recovery::restart`] a name off the wire.
+#[test]
+fn restart_target_is_only_constructible_from_the_server_side_table() {
+    let src = include_str!("config.rs");
+    // Exactly three public constructors, each of which takes a key or the
+    // raw config list — never a bare unit name.
+    let constructors: Vec<String> = fn_blocks(src)
+        .into_iter()
+        .map(|(sig, _)| sig)
+        .filter(|sig| sig.starts_with("pub fn") && sig.contains("RestartTarget"))
+        .collect();
+    let mut names: Vec<&str> = constructors
+        .iter()
+        .map(|sig| sig.split_whitespace().nth(2).unwrap_or(sig))
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            // key -> built-in table
+            "builtin_target(key:",
+            // the raw `[panel].managed_units` list -> validated table
+            "resolve_managed_units(raw:",
+            // key -> built-ins, then the configured table
+            "restart_target(&self,",
+            // the whole table, no argument at all
+            "restart_targets(&self)",
+        ],
+        "config.rs grew a new public way to make a RestartTarget. Every one must \
+         resolve a key (or take no argument at all) against the server-side table — \
+         a constructor taking a unit name would hand the restart path straight to \
+         the client. Public constructors found: {constructors:?}"
+    );
+    // No trait conversion, and no public field, either.
+    assert!(
+        !src.contains("for RestartTarget"),
+        "a From/TryFrom impl would be a fourth constructor"
+    );
+    let decl = src
+        .split_once("pub struct RestartTarget {")
+        .and_then(|(_, rest)| rest.split_once('}').map(|(body, _)| body.to_string()))
+        .expect("RestartTarget is a braced struct");
+    assert!(
+        !decl.contains("pub "),
+        "RestartTarget's fields stay private — a pub field is a fourth \
+         constructor, and a mutable one: {decl}"
+    );
+}
+
+/// Split a Rust source file into `(signature, body)` pairs, one per `fn`, for
+/// the two structural scans above. Comment lines are dropped first so prose
+/// mentioning a quoted verb cannot trip the scanner.
+fn fn_blocks(src: &str) -> Vec<(String, String)> {
+    let code: Vec<&str> = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in code {
+        let t = line.trim();
+        let is_fn = t.starts_with("fn ")
+            || t.starts_with("pub fn ")
+            || t.starts_with("async fn ")
+            || t.starts_with("pub async fn ")
+            || t.starts_with("pub(crate) fn ");
+        if is_fn {
+            out.push((t.to_string(), String::new()));
+        } else if let Some(last) = out.last_mut() {
+            last.1.push_str(line);
+            last.1.push('\n');
+        }
+    }
+    out
+}
+
+/// Pull the contents of every `&[ ... ]` array literal out of a fn body — the
+/// argv slices `exec::run` is called with.
+fn argv_slices(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(i) = rest.find("&[") {
+        rest = &rest[i + 2..];
+        let Some(end) = rest.find(']') else { break };
+        out.push(rest[..end].replace('\n', " "));
+        rest = &rest[end..];
+    }
+    out
 }
 
 #[tokio::test]
@@ -1877,6 +2193,14 @@ fn route_table() -> Vec<RouteSpec> {
             Authenticated,
         ),
         r("/system/services", "/system/services", Get, Authenticated),
+        // Read-only (`systemctl show`), and probed with no query at all, so
+        // the handler renders the empty prompt without spawning anything.
+        r(
+            "/system/services/inspect",
+            "/system/services/inspect",
+            Get,
+            Authenticated,
+        ),
         // Deliberately an unknown unit key: the handler rejects it before
         // touching `systemctl`, so this row is inert even if probed.
         recovery(
@@ -2773,12 +3097,13 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        106,
+        107,
         "expected the 109 routes phase 3 left, then phase 4: 6 deleted outright \
          (the four `/tools/sys/*` probes, already on the Overview tiles, and the \
          two `controllerdb-*` duplicates of the Controllers page's own), the \
          Media and Tools page GETs gone, and `/dev/screenshot/image` net-new \
-         (the PNG proxy renamed to free `/dev/screenshot` for the page). \
+         (the PNG proxy renamed to free `/dev/screenshot` for the page) — then \
+         phase 5's single net-new route, `GET /system/services/inspect`. \
          Everything else moved rather than being added (docs/PANEL_IA.md)"
     );
 }

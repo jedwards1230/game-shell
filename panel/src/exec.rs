@@ -16,6 +16,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+use crate::config::{RestartTarget, UnitName, UnitScope};
+
 /// Timeout for the build script (matches the daemon bridge's own dev-op
 /// timeout budget).
 const BUILD_TIMEOUT: Duration = Duration::from_secs(180);
@@ -24,6 +26,19 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(180);
 const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for journalctl / is-active reads.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `systemctl show` properties [`Recovery::show_unit`] asks for — exactly
+/// what System ▸ Services renders and nothing else, so the output stays small
+/// and the parser has a fixed vocabulary.
+const SHOW_PROPERTIES: &str = "--property=Id,Description,LoadState,ActiveState,SubState,\
+     UnitFileState,ActiveEnterTimestamp,Result,StatusText,ExecMainStatus,LoadError";
+
+/// Resolve a built-in key to its [`RestartTarget`], panicking on an unknown
+/// one — the three call sites pass literals, and `config`'s
+/// `built_in_unit_names_are_valid_unit_names` pins that they resolve.
+fn builtin(key: &'static str) -> RestartTarget {
+    crate::config::builtin_target(key).expect("built-in unit key")
+}
 
 /// Errors a local command spawn/run can produce.
 #[derive(Debug)]
@@ -36,6 +51,15 @@ pub enum ExecError {
     /// `-1` when the process was terminated by a signal) and the `String` is
     /// the combined stdout+stderr.
     NonZero(i32, String),
+    /// `sudo -n` refused to elevate — no sudoers rule for this exact command,
+    /// or none that is NOPASSWD. The `String` is sudo's own line.
+    ///
+    /// A distinct variant rather than a `NonZero` with a suggestive body,
+    /// because the callers must not be able to render it as a generic failure:
+    /// "not permitted on this node" and "the restart was attempted and failed"
+    /// send an operator to two different places, and only one of them is true.
+    /// See [`is_sudo_refusal`].
+    NotPermitted(String),
 }
 
 impl std::fmt::Display for ExecError {
@@ -44,7 +68,47 @@ impl std::fmt::Display for ExecError {
             ExecError::Spawn(msg) => write!(f, "failed to spawn command: {msg}"),
             ExecError::Timeout => write!(f, "command timed out"),
             ExecError::NonZero(code, body) => write!(f, "command exited {code}: {body}"),
+            ExecError::NotPermitted(detail) => {
+                write!(f, "not permitted on this node: {detail}")
+            }
         }
+    }
+}
+
+/// What `sudo -n` prints when it will not elevate without a prompt.
+///
+/// Matched case-insensitively as substrings because the exact wording varies
+/// across sudo versions and locales; every one of these means the same thing
+/// operationally — **the rule is missing, nothing ran**.
+const SUDO_REFUSAL_MARKERS: [&str; 6] = [
+    "a password is required",
+    "a terminal is required",
+    "no tty present",
+    "no askpass program",
+    "is not allowed to execute",
+    "may not run",
+];
+
+/// Whether a failed `sudo -n` output is a refusal-to-elevate (as opposed to
+/// the elevated command itself having failed).
+pub fn is_sudo_refusal(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    SUDO_REFUSAL_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Reclassify a `sudo -n` failure into [`ExecError::NotPermitted`] when it was
+/// sudo, not the wrapped command, that said no.
+///
+/// A missing `sudo` binary counts: on a node with no sudo at all the elevated
+/// action is exactly as unavailable, and reporting "failed to spawn command"
+/// would send the operator looking at `systemctl`.
+fn classify_sudo_failure(err: ExecError) -> ExecError {
+    match err {
+        ExecError::NonZero(_, body) if is_sudo_refusal(&body) => {
+            ExecError::NotPermitted(body.trim().to_string())
+        }
+        ExecError::Spawn(msg) => ExecError::NotPermitted(format!("sudo is unavailable: {msg}")),
+        other => other,
     }
 }
 
@@ -54,6 +118,12 @@ impl std::error::Error for ExecError {}
 /// operations.
 pub struct Recovery {
     lock: Mutex<()>,
+    /// The elevation helper for system-scope restarts. Always `"sudo"` in
+    /// production; a test seam so the fail-closed path can be exercised
+    /// without a real `sudo` on the machine running the suite (and, more to
+    /// the point, without a machine that has NOPASSWD ALL quietly turning the
+    /// test into a real restart).
+    sudo: String,
 }
 
 impl Default for Recovery {
@@ -66,31 +136,79 @@ impl Recovery {
     pub fn new() -> Self {
         Self {
             lock: Mutex::new(()),
+            sudo: "sudo".to_string(),
+        }
+    }
+
+    /// See [`Recovery::sudo`].
+    #[cfg(test)]
+    pub fn with_sudo(sudo: impl Into<String>) -> Self {
+        Self {
+            lock: Mutex::new(()),
+            sudo: sudo.into(),
         }
     }
 
     // ── Destructive (single-flight) ─────────────────────────────────────
 
+    /// Restart the unit `target` names.
+    ///
+    /// **This is the only place in the panel that restarts a systemd unit**,
+    /// and it takes a [`RestartTarget`] — a type constructible only by
+    /// resolving a key against the server-side table in [`crate::config`] — so
+    /// there is no signature here a client-supplied unit name could be passed
+    /// through. `docs/PANEL_IA.md` § "Preserving the no-arbitrary-unit
+    /// property".
+    ///
+    /// Scope decides privilege:
+    ///
+    /// * [`UnitScope::User`] → `systemctl --user restart <unit>`. No
+    ///   elevation, and it keeps working with the daemon down — that is what
+    ///   makes System ▸ Services a recovery surface rather than a convenience.
+    /// * [`UnitScope::System`] → `sudo -n systemctl restart <unit>`, matching
+    ///   the per-unit NOPASSWD sudoers line the `htpc_common` ansible role
+    ///   ships (`docs/PANEL.md` § Deployment prerequisite). The argv is
+    ///   deliberately `systemctl restart <unit>` with no `--` separator and no
+    ///   extra flags: sudoers matches on the exact command line, so anything
+    ///   else would silently stop matching the rule. Safe because `<unit>`
+    ///   came out of the validated table, not off the wire.
+    ///
+    /// With no sudoers rule, `sudo -n` exits non-zero immediately and this
+    /// returns [`ExecError::NotPermitted`] — never `Ok`, never a silent no-op.
+    pub async fn restart(&self, target: &RestartTarget) -> Result<String, ExecError> {
+        let _guard = self.lock.lock().await;
+        // `target.unit().as_str()` is written out at both call sites rather
+        // than bound to a local: `tests::the_only_mutating_systemctl_argv_is_a_
+        // restart_target` reads this file and requires every argv element of a
+        // mutating `systemctl` to be either a string literal or exactly that
+        // expression, so a future edit cannot quietly interpose a `&str`.
+        match target.scope() {
+            UnitScope::User => {
+                run(
+                    "systemctl",
+                    &["--user", "restart", target.unit().as_str()],
+                    SYSTEMCTL_TIMEOUT,
+                )
+                .await
+            }
+            UnitScope::System => run(
+                &self.sudo,
+                &["-n", "systemctl", "restart", target.unit().as_str()],
+                SYSTEMCTL_TIMEOUT,
+            )
+            .await
+            .map_err(classify_sudo_failure),
+        }
+    }
+
     /// `systemctl --user restart <daemon-unit>`.
     pub async fn restart_daemon(&self) -> Result<String, ExecError> {
-        let _guard = self.lock.lock().await;
-        run(
-            "systemctl",
-            &["--user", "restart", &crate::config::daemon_unit()],
-            SYSTEMCTL_TIMEOUT,
-        )
-        .await
+        self.restart(&builtin("daemon")).await
     }
 
     /// `systemctl --user restart <shell-unit>`.
     pub async fn restart_shell(&self) -> Result<String, ExecError> {
-        let _guard = self.lock.lock().await;
-        run(
-            "systemctl",
-            &["--user", "restart", &crate::config::shell_unit()],
-            SYSTEMCTL_TIMEOUT,
-        )
-        .await
+        self.restart(&builtin("shell")).await
     }
 
     /// Run `scripts/build-daemon.sh`, resolved via `$TV_SHELL_DIR` else the
@@ -111,19 +229,6 @@ impl Recovery {
     pub async fn suspend(&self) -> Result<String, ExecError> {
         let _guard = self.lock.lock().await;
         run("systemctl", &["suspend"], SYSTEMCTL_TIMEOUT).await
-    }
-
-    /// `systemctl --user restart <unit>` for an arbitrary unit name — a
-    /// generic counterpart to [`Self::restart_daemon`]/[`Self::restart_shell`]
-    /// used by the Processes page, which restarts all three tv-shell units
-    /// (daemon/shell/panel) from one code path rather than three near-
-    /// identical named wrappers. The caller is responsible for only passing a
-    /// known-good unit name (see `pages::services::render_restart`, which
-    /// maps a fixed key to a unit name rather than accepting one from the
-    /// client directly).
-    pub async fn restart_unit(&self, unit: &str) -> Result<String, ExecError> {
-        let _guard = self.lock.lock().await;
-        run("systemctl", &["--user", "restart", unit], SYSTEMCTL_TIMEOUT).await
     }
 
     // ── Non-destructive (no lock) ────────────────────────────────────────
@@ -168,11 +273,43 @@ impl Recovery {
         Ok(apply_filter(out, filter))
     }
 
+    /// `systemctl [--user] show <unit>` for the properties System ▸ Services
+    /// renders: load/active/sub state, enabled-state, active-since and the
+    /// failure detail.
+    ///
+    /// **Read-only, and therefore unrestricted** — any unit, either scope
+    /// (`docs/PANEL_IA.md` § Services: reading unit status is inert). The
+    /// operator-typed name still arrives as a [`UnitName`], so the validator
+    /// cannot be bypassed by adding a caller; `--` additionally ends option
+    /// parsing, which is free here because no sudoers rule has to match this
+    /// command line.
+    ///
+    /// `systemctl show` exits 0 for a unit that does not exist, answering
+    /// `LoadState=not-found` — the parser distinguishes that from an error.
+    pub async fn show_unit(&self, scope: UnitScope, unit: &UnitName) -> Result<String, ExecError> {
+        let mut args: Vec<&str> = Vec::new();
+        if scope.is_user() {
+            args.push("--user");
+        }
+        args.push("show");
+        args.push("--no-pager");
+        args.push(SHOW_PROPERTIES);
+        args.push("--");
+        args.push(unit.as_str());
+        run("systemctl", &args, READ_TIMEOUT).await
+    }
+
     /// `systemctl --user is-active <unit>`, trimmed. A spawn failure or
     /// timeout degrades to `"unknown"` rather than propagating an error —
     /// this is a status probe, not a control action.
-    pub async fn unit_active(&self, unit: &str) -> String {
-        match run("systemctl", &["--user", "is-active", unit], READ_TIMEOUT).await {
+    pub async fn unit_active(&self, unit: &UnitName) -> String {
+        match run(
+            "systemctl",
+            &["--user", "is-active", unit.as_str()],
+            READ_TIMEOUT,
+        )
+        .await
+        {
             Ok(out) => {
                 let trimmed = out.trim();
                 if trimmed.is_empty() {
@@ -284,12 +421,136 @@ mod tests {
     async fn unit_active_never_panics_and_returns_some_string() {
         let recovery = Recovery::new();
         let status = recovery
-            .unit_active("definitely-not-a-real-unit.service")
+            .unit_active(&UnitName::parse("definitely-not-a-real-unit.service").unwrap())
             .await;
         assert!(
             !status.is_empty(),
             "unit_active must always return a non-empty string"
         );
+    }
+
+    /// Build a one-entry restart table the way config load does — the only
+    /// way to get a [`RestartTarget`], in tests as in production.
+    fn target(key: &str, unit: &str, scope: &str) -> RestartTarget {
+        let raw = [crate::config::RawManagedUnit {
+            key: key.to_string(),
+            unit: unit.to_string(),
+            scope: scope.to_string(),
+        }];
+        crate::config::resolve_managed_units(&raw)
+            .expect("well-formed test entry")
+            .remove(0)
+    }
+
+    /// A stand-in for `sudo` that records the argv it was called with and
+    /// refuses exactly the way `sudo -n` does with no matching sudoers rule.
+    /// Returns `(script path, marker path)`.
+    fn fake_sudo(name: &str, refuse: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tv-shell-panel-sudo-{}-{name}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("argv");
+        let script = dir.join("fake-sudo");
+        let body = if refuse {
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {m}\n\
+                 echo 'sudo: a password is required' >&2\nexit 1\n",
+                m = marker.display()
+            )
+        } else {
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {m}\necho ok\n",
+                m = marker.display()
+            )
+        };
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (script, marker)
+    }
+
+    /// **The behaviour htpc-1 exercises today**: a unit is in `managed_units`,
+    /// no sudoers line exists for it, and `sudo -n` refuses. That must surface
+    /// as [`ExecError::NotPermitted`] — not `Ok`, not a generic failure.
+    #[tokio::test]
+    async fn a_system_scope_restart_with_no_sudoers_rule_fails_closed() {
+        let (script, marker) = fake_sudo("refuse", true);
+        let recovery = Recovery::with_sudo(script.to_string_lossy().into_owned());
+        let err = recovery
+            .restart(&target("sshd", "sshd.service", "system"))
+            .await
+            .expect_err("a refused sudo must never read as success");
+        match &err {
+            ExecError::NotPermitted(detail) => {
+                assert!(
+                    detail.contains("a password is required"),
+                    "sudo's own line must survive into the error: {detail}"
+                );
+            }
+            other => panic!("expected NotPermitted, got {other:?}"),
+        }
+        // And it really did try, with the exact argv the sudoers rule matches.
+        let argv = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(argv.trim(), "-n systemctl restart sshd.service");
+    }
+
+    /// `systemctl --user` needs no elevation, and routing it through `sudo`
+    /// would break the one thing that keeps working with the daemon down.
+    #[tokio::test]
+    async fn a_user_scope_restart_never_touches_sudo() {
+        let (script, marker) = fake_sudo("unused", false);
+        let recovery = Recovery::with_sudo(script.to_string_lossy().into_owned());
+        // A unit that does not exist: the point is which binary is spawned,
+        // and `systemctl --user restart` on a missing unit is inert.
+        let _ = recovery
+            .restart(&target(
+                "nope",
+                "tv-shell-panel-no-such-test-unit.service",
+                "user",
+            ))
+            .await;
+        assert!(
+            !marker.exists(),
+            "a user-scope restart must not invoke the elevation helper"
+        );
+    }
+
+    #[test]
+    fn sudo_refusals_are_told_apart_from_the_wrapped_command_failing() {
+        for refusal in [
+            "sudo: a password is required",
+            "sudo: no tty present and no askpass program specified",
+            "Sorry, user tv-shell is not allowed to execute '/usr/bin/systemctl restart x' as root.",
+        ] {
+            assert!(is_sudo_refusal(refusal), "{refusal:?} is a refusal");
+            assert!(matches!(
+                classify_sudo_failure(ExecError::NonZero(1, refusal.to_string())),
+                ExecError::NotPermitted(_)
+            ));
+        }
+        // The unit itself failing to restart is NOT a permission problem, and
+        // must not be reported as one.
+        let real =
+            "Job for sshd.service failed because the control process exited with error code.";
+        assert!(!is_sudo_refusal(real));
+        assert!(matches!(
+            classify_sudo_failure(ExecError::NonZero(1, real.to_string())),
+            ExecError::NonZero(1, _)
+        ));
+        // No sudo at all is, operationally, the same as no rule.
+        assert!(matches!(
+            classify_sudo_failure(ExecError::Spawn("No such file or directory".to_string())),
+            ExecError::NotPermitted(_)
+        ));
     }
 
     #[test]

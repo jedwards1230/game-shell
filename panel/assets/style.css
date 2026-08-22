@@ -341,6 +341,36 @@ a:hover {
   white-space: nowrap;
 }
 
+/* Why a unit is failed, under its state chip in the Services table. Wraps
+   (unlike the chip) — a systemd failure line is prose and clipping it would
+   hide the one thing the row is there to tell you. */
+.unit-failure {
+  margin-top: 0.2rem;
+  font-size: 0.85em;
+  color: var(--error);
+  white-space: normal;
+}
+
+/* The Services page's arbitrary-unit read result. Boxed so it is visibly a
+   response to the form above it rather than another table on the page. */
+.unit-inspect {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-alt);
+}
+
+.unit-inspect h3 {
+  margin-top: 0;
+}
+
+.unit-inspect th {
+  width: 9rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
 /* ── Tiles ───────────────────────────────────────────────────────────── */
 
 .tile-grid {

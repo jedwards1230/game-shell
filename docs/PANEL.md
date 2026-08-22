@@ -105,9 +105,10 @@ page constructs one from a live node — that is the node switcher,
 > page three ways under **System**: Services, Processes and Updates. Phase 3
 > (#407) dissolved **Settings**, and phase 4 (#408) dissolved the last two
 > grab-bags, **Media** and **Tools** — so every page below has one subject and
-> every group is at its final page set. Phases 5-6 change page *contents*
-> (Services reading arbitrary units, Overview rebuilt as pure tiles), not the
-> structure. The table below is what is built today.
+> every group is at its final page set. Phase 5 (#409) gave Services its
+> read/restart asymmetry: read any unit, restart only an allowlist (see
+> [Restartable units](#restartable-units-panelmanaged_units)). Phase 6 rebuilds
+> Overview as pure tiles. The table below is what is built today.
 
 Every page keeps a forwarding address: the pre-IA path 303s to the new one
 (`pages::redirects`), registered in the same capability block as its target so a
@@ -117,7 +118,7 @@ partials moved without redirects — they are poll targets, not bookmarks.
 | Page | Path | Contents |
 |---|---|---|
 | Dashboard | `/` (Overview) | unit status, build info, system/storage tiles, pad fleet, quick actions, an Updates tile (own slow poll — see [System updates](#system-updates-pacman) below) |
-| Services | `/system/services` | the three tv-shell systemd **user** units (daemon/shell/panel) with a per-unit Restart (color-coded dot + status word, not just text). `POST /system/services/restart/{key}` matches `key` against that fixed three-key set and resolves it to a real unit name **server-side** — an arbitrary client-supplied unit name never reaches `systemctl`. The panel's own unit carries a distinct confirm saying the restart will disconnect the page you are looking at. Reading arbitrary units and the configurable `managed_units` restart allowlist are phase 5 (#409) |
+| Services | `/system/services` | **read any unit, restart an allowlist.** Two restart tables — the three built-in tv-shell **user** units (daemon/shell/panel) and whatever `[panel].managed_units` names — each row showing a color-coded dot + status word, enabled-state, active-since and, when failed, systemd's reason. `POST /system/services/restart/{key}` resolves `key` against that server-side table and refuses an unknown one before any exec; an arbitrary client-supplied unit name never reaches a mutating `systemctl` on any path (the exec API takes a `config::RestartTarget`, which only the table constructs). Below them, an **Inspect any unit** form: any unit, either scope, validated by `config::UnitName::parse` and passed only to `systemctl show`. See [Restartable units](#restartable-units-panelmanaged_units). The panel's own unit carries a distinct confirm saying the restart will disconnect the page you are looking at |
 | Processes | `/system/processes` | **read-only observation, no actions at all**: Hyprland active window/clients (styled table)/monitors via IPC, and a top-processes table (`ps`, CPU-sorted, no kill action in v1) |
 | Updates | `/system/updates` | the pacman System Updates section — pending-package table, cache-bypassing Refresh, the background full-update job and its self-terminating status poll (see [System updates](#system-updates-pacman) below) |
 | Appearance | `/shell/appearance` | the `Appearance` slice of `settings.json` — theme mode, the two auto-theme hours, reduce-motion, text scale — as typed fields over `get-config`/`set-config` (shallow merge; unmentioned keys are left untouched), **plus the wallpaper picker** (phase 4): upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one or clear it, and delete — the only way to get an image onto the box without SSH. Upload is treated as an attack surface in its own right (the route is authenticated, but auth is opt-in and a loopback panel may run without it): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. `wallpaperPath` moved into this schema group with the picker and is **not** rendered as a typed field — the grid is its editor (`settings::CUSTOM_EDITOR_KEYS`) |
@@ -264,6 +265,89 @@ and the log-tail `<details>` auto-expands on a failed run instead of staying
 collapsed — so the real cause is visible without an extra click. The
 Dashboard Updates tile is unaffected either way, since it only reflects the
 unprivileged `checkupdates` read.
+
+## Restartable units (`[panel].managed_units`)
+
+System ▸ Services is deliberately **asymmetric**: reading a unit's status is
+inert, so it is unrestricted; restarting one is not, so it is allowlisted.
+
+```toml
+[panel]
+managed_units = [
+  { key = "sshd",      unit = "sshd.service",           scope = "system" },
+  { key = "network",   unit = "NetworkManager.service", scope = "system" },
+  { key = "bluetooth", unit = "bluetooth.service",      scope = "system" },
+]
+```
+
+**The allowlist is an index into a server-side table, not a unit name passed
+through.** The browser only ever sends `key`;
+`POST /system/services/restart/{key}` resolves it via
+`AppConfig::restart_target` and refuses an unknown key before any exec. The
+resolved value is a `config::RestartTarget`, whose fields are private and whose
+only constructors resolve a key against that table — and
+`Recovery::restart` accepts nothing else. So there is no signature a
+client-supplied unit name could arrive through, and two tests keep it that way:
+`the_only_mutating_systemctl_argv_is_a_restart_target` reads `exec.rs` and
+requires every argv element of a mutating `systemctl` to be a string literal or
+`target.unit().as_str()`, and
+`restart_target_is_only_constructible_from_the_server_side_table` pins the
+constructor set.
+
+**The three tv-shell units stay built in** (`daemon`, `shell`, `panel`), so a
+config typo cannot cost the recovery path. A `managed_units` entry whose key
+collides with a built-in is a **startup error**, not a silent shadow — as is an
+empty or duplicated key, a `unit` that is not a plausible systemd unit name, or
+a `scope` that is not exactly `system` or `user`. The list is a privilege
+boundary; a quietly-dropped entry would be discovered mid-incident.
+
+The read side takes any unit in either scope. An operator-typed name goes
+through `config::UnitName::parse` — non-empty, ≤255 bytes, ASCII
+`[A-Za-z0-9._@:-]` only, no leading `-` (which `systemctl` would read as an
+option: the one real injection this interface has), no `..`, and a known unit
+suffix if it has one — and only the parsed value reaches `systemctl show`.
+Escaped names (`dev-disk-by\x2duuid-….device`) carry a backslash and are
+therefore not addressable; mount and device units are not what this surface is
+for.
+
+### Deployment prerequisite: a per-unit sudoers line for `scope = "system"`
+
+The panel runs as `systemd --user`, so a system-scope restart needs root. It
+reuses the same `sudo -n` NOPASSWD mechanism as the [pacman apply
+path](#deployment-prerequisite-passwordless-sudo-for-the-apply-path), but with
+a **narrow entry per allowlisted unit** rather than blanket `systemctl`:
+
+```
+tv-shell ALL=(root) NOPASSWD: /usr/bin/systemctl restart sshd.service, \
+                              /usr/bin/systemctl restart NetworkManager.service
+```
+
+The panel's argv is exactly `sudo -n systemctl restart <unit>` — no `--`
+separator and no extra flags, because sudoers matches on the whole command
+line and anything else would stop matching the rule. That is safe because
+`<unit>` came out of the validated table, not off the wire.
+
+`scope = "user"` units go through `systemctl --user` and **never** through
+`sudo`. That is what keeps Services working with the daemon down, i.e. what
+makes it a recovery surface rather than a convenience.
+
+**Failure mode when the rule is absent, and it is the current state of every
+node**: `sudo -n` exits non-zero immediately printing something like `sudo: a
+password is required`. `exec::classify_sudo_failure` tells that apart from the
+restart itself failing and returns `ExecError::NotPermitted`, which the page
+renders as an explicit refusal — `NOT PERMITTED on this node: <unit> was not
+restarted, and nothing was run`, followed by the exact sudoers line that is
+missing. Never a silent no-op, never a misleading success. A genuine restart
+failure (`Job for sshd.service failed…`) is *not* reported as a permission
+problem — the two send an operator to different places.
+
+> **The ansible side has not landed.** The `htpc_common` role in
+> `jedwards1230/homelab-ansible` is where these sudoers lines will be
+> generated, from the same list that renders `managed_units` so the two cannot
+> drift. Until it does, **every `scope = "system"` restart fails closed on every
+> node, htpc-1 included.** Listing a system unit in `managed_units` today makes
+> it readable and visible on the page; it does not make it restartable.
+> `scope = "user"` entries work now.
 
 ## Authentication
 
@@ -527,13 +611,36 @@ are gated on `screenshot` (see [Capability gating](#capability-gating)).
 
 Mutating buttons across the panel use one of two tiers, distinct from
 `--error` (reserved for banners): `.warn-action` (amber-red) for
-recoverable-but-disruptive actions — unit restarts, Controllers'
+recoverable-but-disruptive actions — `--user` unit restarts, Controllers'
 release/handoff, controllerdb refresh — and `.danger-severe` (deep red,
 bold border) for actions that take the whole box down or overwrite the
-running build — Dev's Reboot/Suspend/Deploy/Build, and the Updates
-page's "Run full update". The Services page's own-unit (panel) Restart
-button carries a distinct confirm message noting the click will disconnect
-the very page the operator is looking at.
+running build — Dev's Reboot/Suspend/Deploy/Build, the Updates page's
+"Run full update", and **every system-scope restart on the Services page**.
+
+On Services the tier is derived from the unit's scope rather than from which
+table it is in, which is the honest cut: a `--user` restart needs no elevation
+and is itself the recovery path, while a `scope = "system"` restart is elevated
+and can take a service the whole box depends on with it. So the three built-in
+tv-shell units stay tier 1 and a `managed_units` entry is severe iff it is
+system-scope.
+
+Every Services confirm names the specific unit, and three cases say more:
+
+- **the panel's own unit** — the click disconnects the very page being looked
+  at, so the confirm says so rather than reusing the generic wording;
+- **remote-access-critical units** — a failed restart may end remote access
+  entirely and leave the box needing physical attention;
+- everything else gets `Restart <unit> now?`.
+
+"Remote-access-critical" is `RestartTarget::is_remote_access_critical`, a small
+explicit set (`sshd`, `ssh`, `dropbear`, `NetworkManager`, `systemd-networkd`,
+`networking`, `iwd`, `wpa_supplicant`, `dhcpcd`, `tailscaled`) matched on the
+lowercased unit stem, and never for a user-scope unit. It is a list rather than
+a derivation because systemd exposes no property that honestly answers "is this
+how I am connected right now" — `WantedBy=network.target` is true of plenty of
+units whose failure costs nothing. The membership criterion is narrow and
+checkable by eye: **system-scope units that either serve the remote login
+session or own the network link it runs over.**
 
 ## Running locally
 
