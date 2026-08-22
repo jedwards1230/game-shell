@@ -264,6 +264,17 @@ pub struct InspectQuery {
 struct InspectTemplate {
     /// Set when the input was rejected or the read failed; the rest is empty.
     error: String,
+    /// The name and scope parsed cleanly, so this fragment is about a real
+    /// unit even if reading it failed.
+    ///
+    /// It separates two things that both set `error` but deserve different
+    /// answers: a REJECTED input (not a unit name, not a scope) is about the
+    /// typing and gets a bare banner, while a unit that parsed but could not
+    /// be read still has an allowlist answer — `systemctl` being unreachable
+    /// says nothing about whether `[panel].managed_units` names it. Dropping
+    /// that made the fragment least informative exactly when the exec tier was
+    /// the thing in trouble.
+    resolved: bool,
     unit: String,
     scope: String,
     found: bool,
@@ -306,6 +317,7 @@ pub async fn render_inspect(state: &AppState, unit: &str, scope: &str) -> String
 async fn build_inspect(state: &AppState, unit: &str, scope: &str) -> InspectTemplate {
     let mut tmpl = InspectTemplate {
         error: String::new(),
+        resolved: false,
         unit: unit.trim().to_string(),
         scope: scope.trim().to_string(),
         found: false,
@@ -342,6 +354,20 @@ async fn build_inspect(state: &AppState, unit: &str, scope: &str) -> InspectTemp
     };
     tmpl.unit = name.to_string();
     tmpl.scope = scope.as_str().to_string();
+    tmpl.resolved = true;
+    // The heading falls back to what was asked for; a successful read replaces
+    // it with systemd's canonical `Id` below.
+    tmpl.id = name.to_string();
+    // Resolved from config BEFORE the read: whether a unit is restartable is a
+    // `[panel].managed_units` fact, not a systemd one, so it survives a read
+    // that fails.
+    tmpl.restart_key = state
+        .cfg
+        .restart_targets()
+        .into_iter()
+        .find(|t| t.unit() == &name && t.scope() == scope)
+        .map(|t| t.key().to_string())
+        .unwrap_or_default();
 
     let status = match state.recovery.show_unit(scope, &name).await {
         Ok(raw) => units::parse_show(&raw),
@@ -367,13 +393,6 @@ async fn build_inspect(state: &AppState, unit: &str, scope: &str) -> InspectTemp
     tmpl.enabled_state = status.unit_file_state.clone();
     tmpl.active_since = status.active_since.clone();
     tmpl.failure_reason = status.failure_reason();
-    tmpl.restart_key = state
-        .cfg
-        .restart_targets()
-        .into_iter()
-        .find(|t| t.unit() == &name && t.scope() == scope)
-        .map(|t| t.key().to_string())
-        .unwrap_or_default();
     tmpl
 }
 

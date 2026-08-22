@@ -1,9 +1,16 @@
-{% if error != "" %}
+{# Three outcomes, not two. `resolved == false` means the INPUT was rejected —
+   there is no unit to say anything about, so a bare banner is the whole answer.
+   Once the name and scope parse there IS a unit, and whether it is restartable
+   is a `[panel].managed_units` fact that holds even when the read failed: a
+   `systemctl` that will not spawn says nothing about the allowlist. #}
+{% if !resolved %}
 <p class="banner banner-error">{{ error }}</p>
 {% else %}
 <div class="unit-inspect">
   <h3>{{ id }} <span class="muted">({{ scope }})</span></h3>
-  {% if !found %}
+  {% if error != "" %}
+  <p class="banner banner-error">{{ error }}</p>
+  {% else if !found %}
   <p class="banner banner-warn">systemd does not know this unit in the <code>{{ scope }}</code> scope{% if load_state != "" %} (<code>{{ load_state }}</code>){% endif %}. Check the name, or try the other scope.</p>
   {% else %}
   {% if description != "" %}<p class="muted">{{ description }}</p>{% endif %}
