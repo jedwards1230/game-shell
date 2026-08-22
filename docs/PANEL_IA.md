@@ -342,9 +342,9 @@ tracked on #409, not on this table.
 | **5** ⚠️ partly landed | Services: read any unit; `managed_units` config; danger-tier confirms. **The ansible-side sudoers generation did NOT land** — see below. | 2 | #409 |
 | **6** ✅ landed | Overview rebuilt as pure read-only tiles with deep links. Gained a system-services tile on its own 30s poll; the three poll targets now fill one grid. | 2-5 | #410 |
 
-Phase 1 is deliberately mechanical — it changes navigation without changing any
-page's content, so it can be reviewed as a routing change and reverted cleanly if
-the structure feels wrong in use.
+Phase 1 was deliberately mechanical — it changed navigation without changing any
+page's content, so it could be reviewed as a routing change and reverted cleanly if
+the structure felt wrong in use.
 
 **Phase 5's split delivery.** The panel half is done: any unit is readable in
 either scope, `[panel].managed_units` is parsed and validated at load (a bad
