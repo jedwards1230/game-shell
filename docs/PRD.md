@@ -284,7 +284,7 @@ User preferences live separately in `settings.json`, written only by the daemon:
 | CEC adapter self-heal | A wedged adapter recovers without a host reboot | not started | jedwards1230/tv-shell#251 |
 | Display release / ownership handoff | The box can give the display back, enabling ownership-aware idle | not started | jedwards1230/tv-shell#372 |
 | AV lifecycle beyond CEC | Receiver zone-off and cold TV wake are handled | partial — see Open decision 1 | jedwards1230/tv-shell#186 |
-| AV control settings actually wired | Every rendered toggle has a reader | partial — three toggles persist but nothing reads them | jedwards1230/tv-shell#16 |
+| AV control settings actually wired | Every rendered control has a consumer | partial — `cecAutoSwitchOnPowerOn` has a reader nothing calls; `cecDefaultInput` has no reader at all | jedwards1230/tv-shell#16 |
 | MQTT / Home Assistant | Full state + command surface, HA discovery | shipped | — |
 | MCP + HTTP bridge | Agent can deploy, drive, screenshot, verify | shipped | — |
 | Current MCP spec | Track the 2026-07-28 spec | not started — blocked on an upstream stable release and an MSRV bump | jedwards1230/tv-shell#379 |
@@ -318,7 +318,7 @@ User preferences live separately in `settings.json`, written only by the daemon:
 - **The MQTT security boundary is the broker ACL**, not the published button list — anything that can publish to `cmd/+` drives the entire intent vocabulary.
 - **No binary has a config reload path.** Rotating any credential is a restart, which on the TV box is outage-adjacent.
 - **A wedged compositor is currently invisible.** Qt timers keep firing while nothing is presented; every existing check can pass through a multi-day black screen. This is the single most severe known failure mode and it has neither a sensor nor an actuator today.
-- **`--features cec` is not compiled in CI's default leg but is in the deploy build**, so a break in that path can ship green. The dedicated cec CI leg exists precisely to close this; the same hazard recurs for `mcp`.
+- **`--features mcp` is compiled by the deploy and release builds but never by CI.** `cec` has a dedicated CI leg; `mcp` has none, so a break in the agent control surface — the one carrying the RCE-by-design dev tools — passes PR CI green and fails only at release or on the device.
 - **The panel does not build on Windows** because every page module compiles regardless of capability gating; serving sidecars remotely removes the reason to care, and nothing plans a non-Linux shell node.
 - **A public repo with a private consumer** is a standing tension. Site-specific host identity, service names and addresses have been rejected from this repo three separate times; keeping them out is a live constraint on every feature that touches AV or deployment.
 - **Hardware-bound verification is a throughput limit, not a scheduling detail.** The three hardest open problems (multi-pad handoff, CEC wedge recovery, render-wedge detection) all require a physical, singly-available TV to verify.
