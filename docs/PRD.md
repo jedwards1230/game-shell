@@ -54,8 +54,10 @@ A dedicated TV box has requirements a desktop session structurally cannot meet:
 5. **Every couch action is machine-drivable** over socket, HTTP, MCP and MQTT, with the same action logic behind all four.
 6. **An out-of-band recovery path** that does not depend on the thing being recovered.
 7. **Secure by default on a LAN**: token-gated network surfaces, secrets by reference only, fail-closed on an insecure non-loopback bind.
-8. **Distribution-agnostic**: no knowledge of any specific infrastructure, deployment tool or host inside the repo.
-9. Signal emitted in standard formats (journald, Prometheus) so any collector can consume it.
+8. **Site-neutral source**: no site's addresses, hostnames or device identities appear as literals in code. AV endpoints, node addresses and the panel's deployment target are all configuration.
+9. **Self-sufficient AV lifecycle**: the box can wake, claim, and release the display chain on its own, without an external automation platform.
+10. **Installable the standard way for its platform** — a package, not a clone-and-run script.
+11. Signal emitted in standard formats (journald, Prometheus) so any collector can consume it.
 
 **Non-goals**
 
@@ -66,12 +68,16 @@ A dedicated TV box has requirements a desktop session structurally cannot meet:
 | Embedding a web engine (QtWebEngine) | Quickshell ships none; Widevine + hardware decode come free from a system Chromium |
 | Collecting or forwarding its own telemetry | The repo emits signal; collection is deployment-private |
 | Configuring autologin / display-manager setup | Site-specific, deliberately left to the installer |
+| **First-run onboarding** — a guided setup wizard | Explicitly out of scope; it serves a user the project does not have, and the hardware-verification bottleneck cannot sustain the support surface it implies |
 | Carrying homelab-specific host identity, service names or addresses | Repeatedly rejected — the repo is public and site-neutral |
 | A `net-wifi-connect` IPC command | Network reads are first-class; joining stays a shell-out |
 | Waking a machine over MQTT | A command topic cannot be actioned by a machine that is off; that is WoL's job |
 | A Windows build of the panel | Sidecar nodes are served remotely instead; nothing plans a non-Linux *shell* node |
 | Splitting the QML shell and the daemon into separate repos | They are bound by a private versioned IPC protocol and version as a unit |
 | Screenshots over MQTT | Retained PNGs bloat the broker; they stay on the HTTP bridge |
+| A general 10-foot on-screen keyboard | Only the flows that strand a user mid-use get one (see §5) |
+
+**What "distribution agnostic" does and does not mean.** It means **no site identity in source** and no dependency on any particular configuration-management tool. It does **not** mean OS-neutral: the panel's recovery tier is systemd-specific by design, and its system-update tier is pacman-specific. `CLAUDE.md`'s "no knowledge of specific infrastructure, deployment tools, or host management" overstates this and should be narrowed to match — the panel manages systemd units and applies `pacman -Syu` today. Packaging (§5) turns that coupling into a **declared platform target** rather than an unstated assumption.
 
 ## 5. Locked product decisions
 
@@ -97,6 +103,11 @@ A dedicated TV box has requirements a desktop session structurally cannot meet:
 | Web apps | Chromium `--app` + generated `.desktop` + `StartupWMClass` | Widevine and hardware decode for free; reuses the existing app-discovery and window-matching path |
 | Text entry today | The **panel** is the add surface for anything needing a keyboard | The couch UI has no on-screen keyboard yet |
 | CEC scope in-repo | libcec statically linked behind `--features cec`; no site-specific helper scripts invoked | Keeps homelab identity out of a public repo |
+| Site config vs source | **AV device addresses, node addresses and the panel's deployment target are configuration, never literals in code.** No hostname, IP or MAC of any deployment appears in a non-test source path | The repo is public; site identity has been rejected from it three separate times |
+| AV lifecycle owner | **The daemon owns IP-based AV control** alongside CEC — receiver power/zone control and display wake, driven from typed config | The box must be self-sufficient for AV; an external automation platform is not a dependency |
+| Panel topology | **A fleet console with a node switcher.** Every shell node also runs its own local panel as the recovery path of last resort | The exec tier is local; a remote console cannot restart a hung unit |
+| Text entry | **A narrow on-screen keyboard** for flows that strand a user mid-use (Wi-Fi password, stream target) — not a general keyboard | A fresh install must be able to join a network without a second device; nothing more |
+| Wedge recovery | **Sensor in the daemon, actuator outside** — export a frame-presentation counter; let external automation decide to act | An actuator that fires wrongly kills a live game; the daemon cannot see enough context |
 | Doctrine | **The daemon reports; the caller decides** — no `busy` boolean, no auto-suspend on unknown | Policy belongs to the automation, not the device |
 | Versioning | Per-artifact tag streams (`input-v*`, `host-v*`, `widget-<id>-v*`); the tag *is* the version, stamped into `Cargo.toml` at build | Shell and panel ship from git and carry no version |
 
@@ -128,7 +139,7 @@ Unix socket at `/run/user/$UID/tv-shell-input.sock` (override `TV_SHELL_SOCK`), 
 | Notifications | `get-notifications` · `record-notification <json>` · `set-notifications <json>` |
 | System | `sys-status` · `storage-status` · `sys-metrics` · `build-info` · `capabilities` |
 | Bluetooth | `bt-power-status\|-on\|-off` · `bt-scan-on\|-off` · `bt-list` · `bt-connect\|-disconnect\|-pair\|-trust <mac>` |
-| Network (read-only) | `net-status` · `net-wifi-list` · `net-wifi-rescan` · `net-throughput <iface>` · `net-ping <host> [count]` · `wol <host>` |
+| Network (read-only) | `net-status` · `net-wifi-list` · `net-wifi-rescan` · `net-throughput <iface>` · `net-ping <host> [count]` · `wol <host>` (stateless wake of a configured host; served directly from the dispatcher, like `sunshine-status`) |
 | Power | `power-can-suspend` · `power-suspend` · `power-battery` |
 | Compositor | `hypr-active` · `hypr-clients` · `hypr-monitors` |
 | HDMI-CEC (`--features cec`) | `cec-scan` · `cec-device <addr>` · `cec-power-on\|-off <addr>` · `cec-active-source` · `cec-health` · `cec-test` |
@@ -137,7 +148,9 @@ Unix socket at `/run/user/$UID/tv-shell-input.sock` (override `TV_SHELL_SOCK`), 
 
 **Events** (after `subscribe`): controller lifecycle (`controller-wake`, `pad:connected\|disconnected\|index\|battery`), `intent:<name>`, combos (`combo:end-session`, `combo:force-quit`, `combo:suspend-stream`), `input-mode:controller\|mouse`, `bt:*`, `net:*`, `power:battery`, `hypr:*`, `cec:device\|power\|health`, `config:changed`, `health:<json>`.
 
-**Intent vocabulary** (the single closed control language, shared by socket, HTTP, MCP and MQTT): `home`, `home-tap`, `home-hold`, `menu`, `settings`, `power`; deep links `settings:<page>`, `overlay:volume|network|session`, `app:<wmClass>`. The `overlay:` namespace is closed; `settings:` and `app:` accept any leaf because those registries live in QML. `key <name>` accepts exactly `up`, `down`, `left`, `right`, `select`, `back`.
+**Intent vocabulary** (the single closed control language, shared by socket, HTTP, MCP and MQTT): `home`, `home-tap`, `home-hold`, `menu`, `settings`, `power`; deep links `settings:<page>`, `overlay:volume|network|session`, `app:<wmClass>`. The `overlay:` namespace is **closed and includes `session`** — every enumeration of it must list all three. `app:` accepts any leaf. `key <name>` accepts exactly `up`, `down`, `left`, `right`, `select`, `back`.
+
+**Authoritative `settings:<page>` slugs.** The registry in `shell/settings/SettingsApp.qml` is the single source of truth, and every doc that enumerates slugs must match it: `audio`, `bluetooth`, `network`, `display`, `wallpaper`, `controllers`, `keybindings`, `avcontrol`, `webapps`, `accessibility`, `power`, `system`. Three further slugs are accepted by `ShellLayout.openSettings` but are **not** settings pages — `widgets` (a top-level surface) and `moonlight`/`streaming` (demoted, both land on Widgets ▸ Moonlight). There is no `appearance` page.
 
 **Capability handshake.** `capabilities` returns `{node_id, kind, agent_version, platform, features}` where `kind` is `shell` or `sidecar` and `features` is a sorted set drawn from `cec`, `controllers`, `widgets`, `web_apps`, `settings_store`, `shell_lifecycle`, `screenshot`, `sleep`, `dev_deploy`, `logs`, `steam_library`, `game_launch`, `wallpapers`, `processes`, `system_updates`. Two rules govern it: **report what this build can do, never what is momentarily working** (a wedged CEC adapter does not drop `cec`), and **a proxied capability stays the remote node's to declare**. Unknown feature names round-trip verbatim rather than failing the parse.
 
@@ -253,6 +266,8 @@ User preferences live separately in `settings.json`, written only by the daemon:
 
 **Agent/dev loop.** Push a branch → `/dev/deploy?ref=` → `/dev/build` → `/dev/restart-daemon` or `/dev/restart-shell` → `/screenshot`. These routes are RCE-by-design and always registered when the bridge is bound; on the panel they sit behind both `allow_dangerous` and the `dev_deploy` capability. **Deploy the daemon before the panel, or both together** — the panel requires a daemon that answers `capabilities`.
 
+**Credential rotation.** A node carries up to three independent tokens — the daemon's `[http].token_file` (shared by the HTTP bridge and MCP), the panel's `[panel].token_file`, and one `sidecar_token_file` per remote node served. **No binary has a reload path**, so rotation is a restart, and rotation is therefore outage-adjacent rather than a config edit. The order is: write the new token file (mode 0600, inside the config dir) → restart the holder → restart the consumer. Rotating the daemon's bridge token invalidates any fleet console holding it; rotating a sidecar token must be done on both ends together. The panel's cookie *is* its token, so rotating it logs every browser out by construction.
+
 **Observability.** Logs go to journald when available (structured fields, syslog priority mapping) and stdout otherwise, never neither; `RUST_LOG` behaves identically on both paths. Metrics are namespaced `tv_shell_*` and rendered once, shared between a node_exporter textfile writer and the auth-exempt `GET /metrics`. The catalogue is deliberately counter-heavy — `input_events_total`, `intents_emitted_total`, `transitions_total`, `pad_joins/leaves_total`, `shell_restarts_total`, `input_runtime_up`, `input_runtime_restarts_total`, `grab_invariant_violations_total`, `deploy/build/restart_* _total`, `quickshell_multi_instance_total`, `build_info` — with CPU/memory/load/temperature gauges as a convenience that a real node_exporter should supersede. Collection and forwarding are out of scope on purpose.
 
 **System updates.** The panel reads pending updates via `checkupdates` with a TTL cache, detects a needed reboot by comparing the running kernel to the installed package, and applies with a single-flighted `sudo -n pacman -Syu --noconfirm` streaming a live tail. This requires a narrow NOPASSWD sudoers rule for the unit's user; with no rule it fails closed with an explicit refusal naming what is missing.
@@ -283,7 +298,7 @@ User preferences live separately in `settings.json`, written only by the daemon:
 | HDMI-CEC control | Wake, claim source, standby, health reporting | shipped | — |
 | CEC adapter self-heal | A wedged adapter recovers without a host reboot | not started | jedwards1230/tv-shell#251 |
 | Display release / ownership handoff | The box can give the display back, enabling ownership-aware idle | not started | jedwards1230/tv-shell#372 |
-| AV lifecycle beyond CEC | Receiver zone-off and cold TV wake are handled | partial — see Open decision 1 | jedwards1230/tv-shell#186 |
+| AV lifecycle beyond CEC | Receiver zone-off and cold TV wake handled by the daemon over IP, from typed config | partial — a complete implementation exists unmerged and needs porting to `config.toml` | jedwards1230/tv-shell#186 |
 | AV control settings actually wired | Every rendered control has a consumer | partial — `cecAutoSwitchOnPowerOn` has a reader nothing calls; `cecDefaultInput` has no reader at all | jedwards1230/tv-shell#16 |
 | MQTT / Home Assistant | Full state + command surface, HA discovery | shipped | — |
 | MCP + HTTP bridge | Agent can deploy, drive, screenshot, verify | shipped | — |
@@ -291,19 +306,18 @@ User preferences live separately in `settings.json`, written only by the daemon:
 | Screenshot fidelity | A capture under fullscreen HDR is current and 10-bit | partial — triggers done, capture engine returns stale/flattened frames | jedwards1230/tv-shell#284 |
 | Web control panel | Capability-gated, recovery-first operator surface | shipped | — |
 | Panel information architecture | Six grouped areas, dangerous actions in one place | partial — landing now | jedwards1230/tv-shell#409 |
-| Multi-node panel | One panel serves N nodes incl. remote sidecars | partial — transport and config landed, nothing serves a second node | jedwards1230/tv-shell#409 and MULTI_NODE_PANEL.md step 6 |
-| Compositor wedge detection + auto-heal | A wedged render loop is detected and healed unattended | not started — sensor blocks actuator | jedwards1230/tv-shell#383, jedwards1230/tv-shell#384 |
-| On-screen keyboard | Text entry from the couch | not started — blocks web-app add and onboarding | jedwards1230/tv-shell#20 |
+| Fleet console | One panel serves N nodes behind a node switcher; every shell node keeps a local recovery panel | partial — transport and node config landed, nothing serves a second node | jedwards1230/tv-shell#409 and MULTI_NODE_PANEL.md step 6 |
+| On-screen keyboard | A narrow OSK for stranding flows only (Wi-Fi password, stream target) | not started | jedwards1230/tv-shell#20 |
 | Web apps | Add from the couch or the panel; presets and icons | partial — panel add flow shipped; presets, icons, on-TV flow deferred | jedwards1230/tv-shell#187 |
-| First-run onboarding | A fresh install walks a user through display/audio/network/controller | not started | jedwards1230/tv-shell#202 |
 | Packaging | Installable the standard way for the platform | not started — `packaging/` is empty | jedwards1230/tv-shell#144, jedwards1230/tv-shell#147 |
+| Wedge detection | A frame-presentation counter on `/metrics`; healing is the environment's job | not started | jedwards1230/tv-shell#383 |
 | Home rail richness | Box art, configurable rows, structured hint bar | not started / partial | jedwards1230/tv-shell#114, jedwards1230/tv-shell#19, jedwards1230/tv-shell#377 |
 
 ## 11. Risks & accepted limits
 
 **Hardware and AV.** These are properties of the room, not bugs to fix:
 
-- A receiver's CEC processor is typically **off in standby** — it cannot be woken over CEC at all. Waking the chain needs an out-of-band path (IP control, or a physical button), which is precisely the gap Open decision 1 covers.
+- A receiver's CEC processor is typically **off in standby** — it cannot be woken over CEC at all. Waking the chain needs an out-of-band path — which is why the daemon owns IP-based AV control (§5) rather than leaving the gap to CEC.
 - TVs commonly accept a CEC standby **only from the current active source**, and cold-wake over CEC is unreliable; Wake-on-LAN is the dependable wake for a TV that supports it.
 - Other HDMI sources reassert active-source seconds after any bus activity, so claiming the display is not a one-shot operation — it has to be defended.
 - The USB-CEC adapter can enter a **transmit-dead state** whose only known fix today is a host reboot; the daemon reports this honestly through `cec-health` rather than pretending, but cannot yet recover it.
@@ -320,60 +334,25 @@ User preferences live separately in `settings.json`, written only by the daemon:
 - **A wedged compositor is currently invisible.** Qt timers keep firing while nothing is presented; every existing check can pass through a multi-day black screen. This is the single most severe known failure mode and it has neither a sensor nor an actuator today.
 - **`--features mcp` is compiled by the deploy and release builds but never by CI.** `cec` has a dedicated CI leg; `mcp` has none, so a break in the agent control surface — the one carrying the RCE-by-design dev tools — passes PR CI green and fails only at release or on the device.
 - **The panel does not build on Windows** because every page module compiles regardless of capability gating; serving sidecars remotely removes the reason to care, and nothing plans a non-Linux shell node.
-- **A public repo with a private consumer** is a standing tension. Site-specific host identity, service names and addresses have been rejected from this repo three separate times; keeping them out is a live constraint on every feature that touches AV or deployment.
+- **Site identity is already leaking into source, and both the AV and fleet-console decisions push harder on it.** A deployment hostname appears in a non-test doc comment in `panel/src/capabilities.rs` and in `panel/src/updates.rs`'s module doc, and the update path hard-codes `checkupdates`/`pacman`. This is the exact class of thing two PRs were closed over, now sitting in `main`. The locked rule in §5 is the mitigation: addresses and identities are configuration, and the fix is a cleanup plus a gate, not vigilance.
+- **A fleet console concentrates device-control credentials.** Serving a *remote shell node* means holding that node's daemon bridge token — the same token that reaches `/dev/deploy`. A fleet console is therefore only as safe as the least-trusted node it serves is allowed to be, and must be deployed on a host no less trusted than the most privileged node in its set.
 - **Hardware-bound verification is a throughput limit, not a scheduling detail.** The three hardest open problems (multi-pad handoff, CEC wedge recovery, render-wedge detection) all require a physical, singly-available TV to verify.
 - **Version reporting is uneven**: the daemon and sidecar carry real released versions; the shell and panel ship from git and report none, so "what is deployed" is answered by `build-info`/`tv_shell_build_info` (sha + branch) rather than a version number.
 
-## 12. Open decisions
+## 12. Decision record
 
-These are forks only the owner can settle; each changes what this document should say.
+The five forks that shaped this document, and how they were settled. None remain open.
 
-### 1. Who owns AV control beyond CEC?
+**1. Who owns AV control beyond CEC? → The daemon does.** CEC cannot wake a receiver in standby or reliably cold-wake a TV. The alternative — publishing state over MQTT and letting Home Assistant drive the receiver and the wake — was rejected: **tv-shell must be self-sufficient for AV lifecycle**, not dependent on an external automation platform. The existing unmerged implementation is a port, not a rewrite; it must land driven by typed `config.toml`, with every address supplied as configuration. Consequence: the daemon carries protocol code for AV control, and the §5 site-config rule is what keeps that from becoming site identity in source.
 
-CEC cannot wake a receiver in standby or reliably cold-wake a TV. A complete IP-based implementation (receiver control + Wake-on-LAN) was written and reviewed clean, then closed unmerged when the config system changed underneath it.
+**2. Who is this for? → Package it; skip onboarding.** Packaging is an end-state goal and the single biggest gap between the stated goals and reality. First-run onboarding is an **explicit non-goal**. Consequence: the product is installable by someone who already runs Hyprland, and makes no promise to a user who does not.
 
-- **A — Port it into the daemon.** Generic, typed config; inert when unconfigured. Cost: more daemon code, and a real risk of site-specific addresses creeping into a public repo.
-- **B — Let Home Assistant own it**, driven off the MQTT state the daemon already publishes. Less code, no addresses in the repo, and HA already owns Wake-on-LAN.
-- **C — Ship neither; document CEC as the repo's only AV path** and treat everything else as the environment's job.
+**3. Is the panel a fleet console or a per-node tool? → A fleet console.** The node switcher is end-state, not a nicety, and the deployment question `MULTI_NODE_PANEL.md` left open is answered here:
 
-**Recommendation: B**, with the daemon's job narrowed to *reporting* display ownership and shell state honestly. It matches the standing "the daemon reports; the caller decides" doctrine, it keeps homelab identity out of a public repo, and the MQTT surface that makes it possible already exists. Consequence: the product gains a hard dependency on an external automation platform for full AV lifecycle — acceptable for the reference deployment, a documented gap for anyone else. Choosing A instead makes the box self-sufficient at the cost of carrying protocol code for specific AV vendors.
+- **Where it runs.** The fleet console is a second `tv-shell-panel` instance on a Linux shell node, bound to its own port with its own token file. It does not replace the per-node panel: **every shell node keeps a local panel on the default bind**, because the exec tier — restarting a hung unit — is inherently local and is the reason the panel exists. The fleet instance is the convenience surface; the local instance is the recovery surface of last resort.
+- **What it serves.** Sidecar nodes are served in full over `HttpTransport` with a per-node `sidecar_token_file`. A remote **shell** node is served in a **degraded tier**: everything reachable through that node's daemon (state, settings, controllers, CEC, intents, dev bridge) but *not* its local exec tier. Capability gating already produces exactly this shape with no new mechanism — an unreachable tier is simply a set of routes that never register.
+- **How it is secured.** All node transports are LAN-scoped HTTP with bearer auth and a per-node credential; a non-loopback bind without a token refuses to start. Reach beyond the LAN is the environment's job — a VPN or an authenticating reverse proxy — and never the panel's. The escalation is stated plainly: serving a remote shell node means holding its **daemon bridge token**, which reaches `/dev/deploy`, so a fleet console must be deployed on a host no less trusted than the most privileged node it serves, and a node's *panel* token is still never shared.
 
-### 2. Who is this for?
+**4. Is an on-screen keyboard part of the end state? → Yes, narrowly.** Scoped to flows that strand a user **mid-use** with no second device — joining a Wi-Fi network, entering a stream target. Not a general 10-foot keyboard, and explicitly not scoped to first-run setup, which is a non-goal per decision 2. The panel remains the comfortable surface for bulk text entry.
 
-The repo is public, GPL-3.0, and claims distribution-agnosticism — but there is no package, no first-run onboarding, and installation means cloning and running a script.
-
-- **A — Personal appliance.** One reference deployment; other users are welcome to read the code. Drop packaging and onboarding from the end state.
-- **B — Installable product.** Packaging is a goal; first-run onboarding is a goal; the README targets a stranger.
-- **C — Middle: package it, skip onboarding.** Make it installable for people who already run Hyprland, without pretending it is consumer software.
-
-**Recommendation: C.** Packaging is cheap and removes the single biggest gap between the stated "distribution agnostic" goal and reality; full onboarding is expensive and mostly serves a user who does not exist yet. Consequence: A makes §10's packaging and onboarding rows into non-goals and shrinks the PRD; B commits to a support surface (multi-distro, multi-GPU, arbitrary display managers) that the hardware-bound verification limit above cannot sustain.
-
-### 3. Is the panel a fleet console or a per-node tool?
-
-The remote-sidecar transport and node config have landed, but nothing serves a second node, and where a "remote panel" process would run is explicitly unresolved.
-
-- **A — Fleet console.** A node switcher; one panel serves the shell node locally and sidecars remotely. Needs a deployment answer for where it runs.
-- **B — Per-node tool.** The panel serves exactly the node it runs on; sidecars are managed by whatever manages that host.
-- **C — Finish the switcher but keep it single-process on the shell node** — sidecars appear as extra tabs, no new deployment question.
-
-**Recommendation: C.** It realizes the capability model that has already been paid for, without opening a deployment question that the repo has deliberately declared out of scope. Consequence: choosing B means retiring `HttpTransport` and `[[panel.nodes]]` as dead weight and saying so explicitly; choosing A means the PRD must answer "which machine runs the fleet panel," which is a homelab decision the repo does not want to hold.
-
-### 4. Is an on-screen keyboard part of the end state?
-
-Today the panel is the answer to every flow needing text, and that is documented as a *reason* the panel exists — but it is also the blocker on adding a web app or joining a Wi-Fi network from the couch.
-
-- **A — OSK is end-state.** Build it; the panel becomes a convenience rather than a requirement.
-- **B — The panel is the permanent text-entry surface.** Make "no text entry from the couch" an explicit non-goal and stop tracking the OSK.
-- **C — Narrow OSK**: only for the small number of flows that genuinely cannot wait (Wi-Fi password, stream target), not a general keyboard.
-
-**Recommendation: C.** A general 10-foot keyboard is a large, low-reward build; the specific flows that strand a user with no laptop are few and enumerable. Consequence: A unblocks web-app add and onboarding on the TV but is a significant QML project; B is honest and cheap but means a fresh install cannot get onto Wi-Fi without a second device.
-
-### 5. Does the product self-heal, or report and let the environment act?
-
-A wedged compositor has produced a multi-day black screen that every existing check passed through. The sensor (a render-liveness signal) and the actuator (kill and restart the graphical stack) are separate decisions.
-
-- **A — Both in the daemon.** Detect and auto-heal unattended. Risk: an actuator that fires wrongly kills a live game.
-- **B — Sensor in the daemon, actuator outside.** Export a frame-presentation counter on `/metrics`; let alerting and external automation decide to act.
-- **C — Sensor only, no actuator anywhere.** Make the failure visible and accept manual recovery.
-
-**Recommendation: B.** It is the same split the product already made everywhere else — the daemon reports, the caller decides — and it keeps the dangerous action behind a policy layer that can see more context than the daemon can. Consequence: A gives genuine unattended reliability and is the only option that fixes the failure with no external dependency; C leaves the worst known failure mode unmitigated but is honest about the verification constraint.
+**5. Does the product self-heal? → It reports; the environment acts.** The daemon exports a frame-presentation counter on `/metrics` so a wedged render loop becomes visible; the actuator that kills and restarts the graphical stack lives outside the daemon. This is the same split the product already made everywhere else, and it keeps a game-killing action behind a policy layer that can see more context than the daemon can. Consequence: unattended recovery depends on external automation being configured — the one place the product deliberately does not stand alone.
