@@ -1,4 +1,4 @@
-<div id="update-job-status" hx-get="/processes/updates/job" hx-trigger="every 2s [this.dataset.running=='1']" hx-swap="outerHTML" data-running="{% if running %}1{% else %}0{% endif %}">
+<div id="update-job-status" hx-get="/system/updates/job" hx-trigger="every 2s [this.dataset.running=='1']" hx-swap="outerHTML" data-running="{% if running %}1{% else %}0{% endif %}">
   {% if running %}
   <p class="banner banner-warn">Update running&hellip; ({{ elapsed }}s elapsed)</p>
   {% else if done %}

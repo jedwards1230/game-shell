@@ -368,9 +368,10 @@ fn group_of(page_key: &str) -> &str {
 /// `crate::tests::nav_items_agree_with_the_route_table_they_link_to` can pin
 /// the two together.
 ///
-/// This is the phase-1 shape of `docs/PANEL_IA.md`: the groups are final, but
-/// three pages (Shell ▸ Media, Remote ▸ Tools, and Shell ▸ Settings) are still
-/// the pre-split grab-bags, and dissolve in phases 3-4.
+/// This is the phase-2 shape of `docs/PANEL_IA.md`: the groups are final and
+/// System is at its final four pages, but three pages (Shell ▸ Media,
+/// Remote ▸ Tools, and Shell ▸ Settings) are still the pre-split grab-bags,
+/// and dissolve in phases 3-4.
 pub const NAV: &[NavGroup] = &[
     NavGroup {
         label: "Overview",
@@ -387,9 +388,21 @@ pub const NAV: &[NavGroup] = &[
         key: "system",
         pages: &[
             NavPage {
+                href: "/system/services",
+                label: "Services",
+                key: "system.services",
+                gate: Gate::Recovery,
+            },
+            NavPage {
                 href: "/system/processes",
                 label: "Processes",
                 key: "system.processes",
+                gate: Gate::Recovery,
+            },
+            NavPage {
+                href: "/system/updates",
+                label: "Updates",
+                key: "system.updates",
                 gate: Gate::Recovery,
             },
             NavPage {
@@ -858,7 +871,7 @@ mod tests {
         assert_eq!(drawer(&down), vec!["Overview", "System", "Dev"]);
         assert_eq!(
             down.groups.iter().map(|g| g.href).collect::<Vec<_>>(),
-            vec!["/", "/system/processes", "/dev/recovery"]
+            vec!["/", "/system/services", "/dev/recovery"]
         );
         assert!(down.recovery_mode);
         assert!(

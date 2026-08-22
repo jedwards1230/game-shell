@@ -68,11 +68,11 @@
     {% endif %}
   </a>
   {% endif %}
-  <a class="tile" href="/system/processes">
+  <a class="tile" href="/system/services">
     <h3>Units</h3>
-    <p><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }} <span class="muted">({{ daemon_unit.raw }})</span></p>
-    <p><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }} <span class="muted">({{ shell_unit.raw }})</span></p>
-    <p><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }} <span class="muted">({{ panel_unit.raw }})</span></p>
+    <p><span class="unit-chip"><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }}</span> <span class="muted">({{ daemon_unit.raw }})</span></p>
+    <p><span class="unit-chip"><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }}</span> <span class="muted">({{ shell_unit.raw }})</span></p>
+    <p><span class="unit-chip"><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }}</span> <span class="muted">({{ panel_unit.raw }})</span></p>
   </a>
 </div>
 {% else %}
@@ -81,9 +81,9 @@
   <div class="tile-grid">
     <div class="tile">
       <h3>Units (via systemd)</h3>
-      <p><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }} <span class="muted">({{ daemon_unit.raw }})</span></p>
-      <p><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }} <span class="muted">({{ shell_unit.raw }})</span></p>
-      <p><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }} <span class="muted">({{ panel_unit.raw }})</span></p>
+      <p><span class="unit-chip"><span class="dot {{ daemon_unit.dot_class }}"></span>daemon: {{ daemon_unit.word }}</span> <span class="muted">({{ daemon_unit.raw }})</span></p>
+      <p><span class="unit-chip"><span class="dot {{ shell_unit.dot_class }}"></span>shell: {{ shell_unit.word }}</span> <span class="muted">({{ shell_unit.raw }})</span></p>
+      <p><span class="unit-chip"><span class="dot {{ panel_unit.dot_class }}"></span>panel: {{ panel_unit.word }}</span> <span class="muted">({{ panel_unit.raw }})</span></p>
     </div>
   </div>
   <p><a href="/dev/recovery">Go to the Dev page for recovery actions →</a></p>

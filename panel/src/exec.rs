@@ -118,7 +118,7 @@ impl Recovery {
     /// used by the Processes page, which restarts all three tv-shell units
     /// (daemon/shell/panel) from one code path rather than three near-
     /// identical named wrappers. The caller is responsible for only passing a
-    /// known-good unit name (see `pages::processes::render_restart`, which
+    /// known-good unit name (see `pages::services::render_restart`, which
     /// maps a fixed key to a unit name rather than accepting one from the
     /// client directly).
     pub async fn restart_unit(&self, unit: &str) -> Result<String, ExecError> {

@@ -173,13 +173,15 @@ fn build_router(state: SharedState) -> Router {
             "/overview/updates-tile",
             get(pages::dashboard::updates_tile),
         ) // htmx poll partial, own slower interval
-        .route("/system/processes", get(pages::processes::page))
-        .route("/processes/restart/{key}", post(pages::processes::restart))
+        .route("/system/services", get(pages::services::page))
         .route(
-            "/processes/updates/refresh",
-            post(pages::processes::updates_refresh),
+            "/system/services/restart/{key}",
+            post(pages::services::restart),
         )
-        .route("/processes/updates/job", get(pages::processes::updates_job))
+        .route("/system/processes", get(pages::processes::page))
+        .route("/system/updates", get(pages::updates::page))
+        .route("/system/updates/refresh", post(pages::updates::refresh))
+        .route("/system/updates/job", get(pages::updates::job))
         // The shell pane comes from the bridge and degrades inline; the daemon
         // pane is `journalctl` via direct exec. So this page reads logs with no
         // node at all and is NOT `Feature::Logs` (which describes the DAEMON's
@@ -188,7 +190,7 @@ fn build_router(state: SharedState) -> Router {
         .route("/system/logs/view", get(pages::logs::view)) // htmx refresh partial
         .route("/dev/recovery", get(pages::dev::page))
         // Recovery, NOT part of the S5 set: these restart the same two systemd
-        // units `POST /processes/restart/{key}` restarts, so gating them while
+        // units `POST /system/services/restart/{key}` restarts, so gating them while
         // that stays open would buy nothing.
         .route("/dev/restart-daemon", post(pages::dev::restart_daemon))
         .route("/dev/restart-shell", post(pages::dev::restart_shell))
@@ -333,7 +335,7 @@ fn build_router(state: SharedState) -> Router {
     // `/cec/recover/restart-daemon` therefore lives here despite being a unit
     // restart: it is the CEC page's own recovery ladder rung, and the two
     // always-registered paths to that same unit (`/dev/restart-daemon`,
-    // `/processes/restart/{key}`) are untouched, so nothing is lost when the
+    // `/system/services/restart/{key}`) are untouched, so nothing is lost when the
     // page is absent.
     let app = if caps.allows(Gate::Cec) {
         app.route("/devices/cec", get(pages::cec::page))
@@ -463,7 +465,7 @@ fn build_router(state: SharedState) -> Router {
     // the panel exists); **changing what code runs, powering the box, or
     // running arbitrary commands is root-equivalent** (gated, here). So
     // `/dev/restart-daemon`, `/dev/restart-shell`,
-    // `POST /processes/restart/{key}` and `POST /cec/recover/restart-daemon`
+    // `POST /system/services/restart/{key}` and `POST /cec/recover/restart-daemon`
     // are all deliberately NOT here.
     //
     // Reboot/suspend and the pacman apply are the PANEL's own exec tier, so
@@ -479,10 +481,7 @@ fn build_router(state: SharedState) -> Router {
     let app = if allow_dangerous {
         app.route("/dev/reboot", post(pages::dev::reboot))
             .route("/dev/suspend", post(pages::dev::suspend))
-            .route(
-                "/processes/updates/apply",
-                post(pages::processes::updates_apply),
-            )
+            .route("/system/updates/apply", post(pages::updates::apply))
             .route("/tools/raw", post(pages::tools::raw))
     } else {
         app

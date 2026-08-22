@@ -303,6 +303,16 @@ a:hover {
   background: var(--text-muted);
 }
 
+/* A dot and the status word it colors are ONE unit of meaning (#6 — color is
+   never allowed to stand alone). The dot is an inline-block and the word is
+   ordinary text, so in a narrow column the line would otherwise break between
+   them and leave an orphan dot at the end of the previous line. Every dot+label
+   pair — Services table, Overview units tile, Dev unit chips — renders inside
+   one of these. */
+.unit-chip {
+  white-space: nowrap;
+}
+
 /* ── Tiles ───────────────────────────────────────────────────────────── */
 
 .tile-grid {
@@ -809,7 +819,12 @@ textarea {
   color: var(--warn);
 }
 
-/* ── Processes page ──────────────────────────────────────────────────── */
+/* ── System group: Services / Processes / Updates ─────────────────────
+   Section spacing, shared by the three pages the old Processes page split
+   into. The name is kept as-is on purpose: renaming the four synonymous
+   section classes (`.processes-section`, `.tools-section`, `.settings-group`,
+   `.controllers-section`) is a normalization pass of its own, and folding it
+   into an IA phase would hide a behavioural change inside a rename. */
 
 .processes-section {
   margin-bottom: 1.5rem;

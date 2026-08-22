@@ -64,22 +64,16 @@ pub async fn render_page(state: &AppState) -> String {
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
 }
 
-/// Map a raw `systemctl is-active` string to a colored dot class + a short
-/// status word — color always paired with explicit text (#6), same mapping
-/// as `pages::dashboard`/`pages::processes` (each page keeps its own copy —
-/// see `pages::controllers`'s doc comment for why).
-fn unit_dot(state: &str) -> (&'static str, &'static str) {
-    match state {
-        "active" => ("dot-ok", "active"),
-        "failed" => ("dot-error", "failed"),
-        "activating" => ("dot-warn", "activating"),
-        "deactivating" => ("dot-warn", "deactivating"),
-        "inactive" => ("dot-neutral", "inactive"),
-        _ => ("dot-neutral", "unknown"),
-    }
-}
-
-/// Render a `<span id="dev-{id}-chip">` dot+word status chip for `unit`.
+/// Render a `<span id="dev-{id}-chip">` dot+word status chip for `unit`,
+/// using the shared [`super::units::unit_dot`] mapping.
+///
+/// The dot and its label live inside ONE `.unit-chip` (`white-space:
+/// nowrap`): the dot is an inline-block and the label is ordinary text, so
+/// without that wrapper the line breaks between them and leaves an orphan dot
+/// at the end of the previous line. The id sits on the chip rather than on
+/// the dot because an OOB swap replaces the whole element — the label has to
+/// come with it.
+///
 /// `oob` adds `hx-swap-oob="true"` so this can be bolted onto another
 /// action's response (#7 — post-action verification: after
 /// restart/build/deploy, the operator sees the unit actually came back
@@ -87,10 +81,10 @@ fn unit_dot(state: &str) -> (&'static str, &'static str) {
 /// load (`oob = false`).
 async fn render_unit_chip(state: &AppState, id: &str, unit: String, oob: bool) -> String {
     let raw = state.recovery.unit_active(&unit).await;
-    let (dot_class, word) = unit_dot(&raw);
+    let (dot_class, word) = super::units::unit_dot(&raw);
     let oob_attr = if oob { " hx-swap-oob=\"true\"" } else { "" };
     format!(
-        r#"<span class="dot {dot_class}" id="dev-{id}-chip"{oob_attr} title="{unit}: {raw}">{word}</span>"#
+        r#"<span class="unit-chip" id="dev-{id}-chip"{oob_attr} title="{unit}: {raw}"><span class="dot {dot_class}"></span>{id} {word}</span>"#
     )
 }
 
@@ -369,11 +363,27 @@ mod tests {
         })
     }
 
-    #[test]
-    fn unit_dot_maps_active_and_failed_to_distinct_colors() {
-        assert_eq!(unit_dot("active"), ("dot-ok", "active"));
-        assert_eq!(unit_dot("failed"), ("dot-error", "failed"));
-        assert_eq!(unit_dot("something-unexpected"), ("dot-neutral", "unknown"));
+    /// The dot and its label must ship inside one `.unit-chip`, or the label
+    /// wraps to the next line and orphans the dot (`docs/PANEL_IA.md`
+    /// § Two known rendering bugs).
+    #[tokio::test]
+    async fn unit_chip_keeps_the_dot_and_its_label_in_one_nowrap_element() {
+        let state = hermetic_state();
+        let chip = render_unit_chip(&state, "daemon", "tv-shell-input.service".into(), false).await;
+        let chip_open = chip
+            .find(r#"<span class="unit-chip""#)
+            .expect("a .unit-chip wrapper");
+        let dot_open = chip
+            .find(r#"<span class="dot "#)
+            .expect("a dot span inside the chip");
+        assert!(
+            chip_open < dot_open && chip.trim_end().ends_with("</span>"),
+            "the dot and its label must sit inside one nowrap chip: {chip}"
+        );
+        assert!(
+            chip.contains("daemon "),
+            "the chip carries its own label so an OOB swap does not orphan it: {chip}"
+        );
     }
 
     #[tokio::test]

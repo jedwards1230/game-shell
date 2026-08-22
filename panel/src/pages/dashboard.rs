@@ -127,11 +127,8 @@ struct PadView {
 
 /// A systemd unit's state paired with a colored dot class + a short status
 /// word (#6 — color must always pair with explicit text, never a bare dot).
-/// `active` is the healthy state; `failed` is the one state that reads as
-/// an outright problem (red); everything else (`inactive`, `activating`,
-/// `deactivating`, `unknown`, ...) is a neutral "not running" state rather
-/// than an alarm — a stopped-but-not-failed unit isn't necessarily wrong
-/// (e.g. between restarts).
+/// The mapping itself is [`super::units::unit_dot`], shared with the Services
+/// page and the Dev page's chips; this is just its template-facing shape.
 struct UnitStateView {
     raw: String,
     dot_class: &'static str,
@@ -139,14 +136,7 @@ struct UnitStateView {
 }
 
 fn unit_state_view(raw: String) -> UnitStateView {
-    let (dot_class, word) = match raw.as_str() {
-        "active" => ("dot-ok", "active"),
-        "failed" => ("dot-error", "failed"),
-        "activating" => ("dot-warn", "activating"),
-        "deactivating" => ("dot-warn", "deactivating"),
-        "inactive" => ("dot-neutral", "inactive"),
-        _ => ("dot-neutral", "unknown"),
-    };
+    let (dot_class, word) = super::units::unit_dot(&raw);
     UnitStateView {
         raw,
         dot_class,

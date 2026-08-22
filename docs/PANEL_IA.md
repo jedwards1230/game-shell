@@ -97,9 +97,9 @@ page.
 
 | Page | From | Notes |
 |---|---|---|
-| **Services** | *new*, plus Processes' unit table | See [Services](#services-new) below |
-| **Processes** | Processes (top-processes table, Hyprland active window/clients/monitors) | Becomes purely read-only observation |
-| **Updates** | Processes (System Updates section) | Its own page — it has its own slow poll, its own background job, and the most dangerous button on the page it currently shares |
+| **Services** | *new*, plus Processes' unit table | ✅ landed in phase 2 at `/system/services` — the three built-in units only; the rest is phase 5. See [Services](#services-new) below |
+| **Processes** | Processes (top-processes table, Hyprland active window/clients/monitors) | ✅ landed in phase 2 — purely read-only observation, no action affordance at all |
+| **Updates** | Processes (System Updates section) | ✅ landed in phase 2 at `/system/updates` — it has its own slow poll, its own background job, and the most dangerous button on the page it used to share |
 | **Logs** | Logs | Unchanged |
 
 ### Shell
@@ -166,9 +166,9 @@ privilege-escalation primitive.
 
 ### Preserving the no-arbitrary-unit property
 
-Today `POST /processes/restart/:key` matches `key` against a fixed three-key set
+`POST /system/services/restart/{key}` matches `key` against a fixed three-key set
 (`daemon`/`shell`/`panel`) and resolves it to a real unit name server-side —
-`panel/src/pages/processes.rs` calls this out explicitly. That property must
+`panel/src/pages/services.rs` calls this out explicitly. That property must
 survive: the allowlist is an **index into a server-side table**, not a unit name
 passed through.
 
@@ -241,7 +241,7 @@ Each phase ships independently and leaves the panel working.
 | Phase | Scope | Depends on | Issue |
 |---|---|---|---|
 | **1** ✅ landed | Drawer + sub-nav chrome; group model in `capabilities.rs`; existing pages re-routed under new paths with redirects from old ones. No page content changes. | — | #405 |
-| **2** | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
+| **2** ✅ landed | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
 | **3** | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC. | 1 | #407 |
 | **4** | Dissolve **Media** and **Tools** → Shell/*, Devices/Network, Remote/*, Dev/Console. | 1, 3 | #408 |
 | **5** | Services: read any unit; `managed_units` config; sudoers generation in the ansible role; danger-tier confirms. | 2 | #409 |

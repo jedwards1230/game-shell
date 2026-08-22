@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Services — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Services</h1>
+
+<div id="services-result"></div>
+
+<section class="processes-section">
+  <h2>systemd units</h2>
+  <p class="muted">The three tv-shell user units. Restart is resolved server-side from a fixed key — an arbitrary unit name is never accepted.</p>
+  <table>
+    <thead><tr><th>Unit</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for u in units %}
+    <tr>
+      <td>{{ u.label }} <span class="muted">({{ u.unit }})</span></td>
+      <td><span class="unit-chip"><span class="dot {{ u.dot_class }}"></span>{{ u.state_word }}</span> <span class="muted">({{ u.state }})</span></td>
+      <td>
+        <form hx-post="/system/services/restart/{{ u.key }}" hx-disabled-elt="find button" hx-target="#services-result" hx-swap="innerHTML"
+              hx-confirm="{{ u.confirm }}" class="inline-form">
+          <button class="warn-action" type="submit">Restart</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

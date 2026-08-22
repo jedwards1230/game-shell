@@ -864,7 +864,7 @@ async fn tools_raw_rejects_empty_command() {
 }
 
 // ---------------------------------------------------------------------------
-// M3: Processes page
+// M3 / IA phase 2: the three pages the Processes page split into
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -880,12 +880,59 @@ async fn processes_page_renders_when_daemon_unreachable() {
         html.to_lowercase().contains("unavailable"),
         "expected a Hyprland-unavailable note when the daemon is down: {html}"
     );
+    assert!(
+        html.contains("Top processes"),
+        "expected the top-processes section: {html}"
+    );
+}
+
+/// The point of the phase-2 split: Processes is **purely read-only
+/// observation**. Unit control moved to Services and pacman to Updates, so
+/// this page must render no action affordance and no updates section at all.
+#[tokio::test]
+async fn processes_page_renders_no_restart_control_or_updates_section() {
+    let state = hermetic_state();
+    let html = pages::processes::render_page(&state).await;
+    assert!(
+        !html.contains("hx-post="),
+        "Processes mutates nothing — it must render no form target: {html}"
+    );
+    assert!(
+        !html.contains("System Updates") && !html.contains(r#"id="updates-check""#),
+        "the System Updates section belongs to /system/updates now: {html}"
+    );
+    assert!(
+        !html.contains("systemd units") && !html.contains(">Restart<"),
+        "the unit table and its Restart buttons belong to /system/services now: {html}"
+    );
+}
+
+/// Services owns the unit table: the three built-in tv-shell units, each with
+/// its own restart form. Reading arbitrary units is phase 5.
+#[tokio::test]
+async fn services_page_renders_the_three_built_in_units() {
+    let state = hermetic_state();
+    let html = pages::services::render_page(&state).await;
+    for key in ["daemon", "shell", "panel"] {
+        assert!(
+            html.contains(&format!(r#"hx-post="/system/services/restart/{key}""#)),
+            "expected a restart form for the built-in {key} unit: {html}"
+        );
+    }
+    assert!(
+        html.contains("This is the panel serving THIS page"),
+        "the panel's own unit keeps its distinct disconnect confirm: {html}"
+    );
+    assert!(
+        html.matches(r#"<span class="unit-chip">"#).count() == 3,
+        "each unit's dot and status word must sit in one nowrap chip: {html}"
+    );
 }
 
 #[tokio::test]
-async fn processes_restart_rejects_unknown_unit_key() {
+async fn services_restart_rejects_unknown_unit_key() {
     let state = hermetic_state();
-    let html = pages::processes::render_restart(&state, "bogus").await;
+    let html = pages::services::render_restart(&state, "bogus").await;
     assert!(
         html.to_lowercase().contains("unknown"),
         "expected an unknown-unit-key error: {html}"
@@ -893,9 +940,9 @@ async fn processes_restart_rejects_unknown_unit_key() {
 }
 
 #[tokio::test]
-async fn processes_page_renders_system_updates_section() {
+async fn updates_page_renders_the_system_updates_section() {
     let state = hermetic_state();
-    let html = pages::processes::render_page(&state).await;
+    let html = pages::updates::render_page(&state).await;
     assert!(
         html.contains("System Updates"),
         "expected the System Updates section heading: {html}"
@@ -907,6 +954,14 @@ async fn processes_page_renders_system_updates_section() {
     assert!(
         html.contains(r#"id="update-job-status""#),
         "expected the self-polling job-status partial: {html}"
+    );
+    assert!(
+        html.contains(r#"hx-trigger="every 2s [this.dataset.running=='1']""#),
+        "the job poll must still terminate itself once the job is done: {html}"
+    );
+    assert!(
+        html.contains(r#"hx-post="/system/updates/refresh""#),
+        "the Refresh button bypasses the 5-minute checkupdates TTL: {html}"
     );
 }
 
@@ -1350,23 +1405,25 @@ fn route_table() -> Vec<RouteSpec> {
             Get,
             Authenticated,
         ),
-        r("/system/processes", "/system/processes", Get, Authenticated),
+        r("/system/services", "/system/services", Get, Authenticated),
         // Deliberately an unknown unit key: the handler rejects it before
         // touching `systemctl`, so this row is inert even if probed.
         recovery(
-            "/processes/restart/{key}",
-            "/processes/restart/not-a-unit",
+            "/system/services/restart/{key}",
+            "/system/services/restart/not-a-unit",
             Post,
         ),
+        r("/system/processes", "/system/processes", Get, Authenticated),
+        r("/system/updates", "/system/updates", Get, Authenticated),
         r(
-            "/processes/updates/refresh",
-            "/processes/updates/refresh",
+            "/system/updates/refresh",
+            "/system/updates/refresh",
             Post,
             Authenticated,
         ),
         r(
-            "/processes/updates/job",
-            "/processes/updates/job",
+            "/system/updates/job",
+            "/system/updates/job",
             Get,
             Authenticated,
         ),
@@ -1374,7 +1431,7 @@ fn route_table() -> Vec<RouteSpec> {
         r("/system/logs/view", "/system/logs/view", Get, Authenticated),
         r("/dev/recovery", "/dev/recovery", Get, Authenticated),
         // Recovery, deliberately NOT part of the dangerous set: these restart
-        // the very same units `POST /processes/restart/{key}` restarts.
+        // the very same units `POST /system/services/restart/{key}` restarts.
         recovery("/dev/restart-daemon", "/dev/restart-daemon", Post),
         recovery("/dev/restart-shell", "/dev/restart-shell", Post),
         r(
@@ -1793,7 +1850,7 @@ fn route_table() -> Vec<RouteSpec> {
     table.extend([
         danger("/dev/reboot", Post),
         danger("/dev/suspend", Post),
-        danger("/processes/updates/apply", Post),
+        danger("/system/updates/apply", Post),
         danger("/tools/raw", Post),
     ]);
 
@@ -1809,18 +1866,18 @@ fn route_table() -> Vec<RouteSpec> {
 /// (`docs/MULTI_NODE_PANEL.md` §1).
 const RECOVERY_TIER_MUTATING: [(&str, &str); 5] = [
     (
-        "/processes/restart/{key}",
+        "/system/services/restart/{key}",
         "restarting a wedged systemd unit is the reason the panel exists; \
          panel-local exec, no node involved",
     ),
     (
-        "/processes/updates/refresh",
+        "/system/updates/refresh",
         "runs the panel's own unprivileged `checkupdates`; the daemon declares \
          no `system_updates` capability because it does not serve one",
     ),
     (
         "/dev/restart-daemon",
-        "same systemd unit as `/processes/restart/{key}` — recovery",
+        "same systemd unit as `/system/services/restart/{key}` — recovery",
     ),
     (
         "/dev/restart-shell",
@@ -2182,8 +2239,10 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        100,
-        "expected 90 pre-IA routes + the 10 phase-1 redirects (docs/PANEL_IA.md)"
+        102,
+        "expected 90 pre-IA routes + the 10 phase-1 redirects + the 2 net-new \
+         phase-2 pages (Services, Updates — the other five phase-2 routes moved \
+         rather than being added) (docs/PANEL_IA.md)"
     );
 }
 
@@ -2274,7 +2333,7 @@ fn public_routes_are_exactly_the_four_documented_exemptions() {
 /// **changing what code runs, powering the box, or running arbitrary commands
 /// is root-equivalent** (gated). So every `restart` route — including
 /// `/dev/restart-daemon` and `/dev/restart-shell`, which drive the SAME systemd
-/// units as `POST /processes/restart/{key}` — is deliberately absent.
+/// units as `POST /system/services/restart/{key}` — is deliberately absent.
 #[test]
 fn dangerous_set_is_exactly_the_root_equivalent_actions() {
     let table = route_table();
@@ -2291,7 +2350,7 @@ fn dangerous_set_is_exactly_the_root_equivalent_actions() {
             "/dev/deploy",
             "/dev/reboot",
             "/dev/suspend",
-            "/processes/updates/apply",
+            "/system/updates/apply",
             "/tools/raw",
         ]
     );
@@ -2306,10 +2365,10 @@ fn dangerous_set_is_exactly_the_root_equivalent_actions() {
 }
 
 /// The unit-restart routes: recovery, always registered, never in the S5 set.
-/// `/dev/restart-{daemon,shell}` and `/processes/restart/{key}` hit the same
+/// `/dev/restart-{daemon,shell}` and `/system/services/restart/{key}` hit the same
 /// two systemd units, so gating one and leaving the other open bought nothing.
 const RECOVERY_ROUTES: [&str; 4] = [
-    "/processes/restart/{key}",
+    "/system/services/restart/{key}",
     "/devices/cec/recover/restart-daemon",
     "/dev/restart-daemon",
     "/dev/restart-shell",
@@ -2495,7 +2554,7 @@ async fn dangerous_routes_are_unregistered_when_allow_dangerous_is_false() {
     // 401 (gated) rather than 404 (gone). Probed with GET so the handler is
     // never reached even if the auth layer were missing (see `exec_backed`).
     for path in [
-        "/processes/restart/not-a-unit",
+        "/system/services/restart/not-a-unit",
         "/devices/cec/recover/restart-daemon",
         "/dev/restart-daemon",
         "/dev/restart-shell",
@@ -2661,7 +2720,7 @@ async fn a_single_feature_opens_only_its_own_block() {
 ///
 /// This is the test that catches the trap: gating `/media/wallpaper/*` on
 /// `Feature::Wallpapers`, `/processes` on `Feature::Processes`, or
-/// `/processes/updates/*` on `Feature::SystemUpdates` would fail here, because
+/// `/system/updates/*` on `Feature::SystemUpdates` would fail here, because
 /// `daemon/src/ipc.rs::features()` never emits any of those three.
 #[tokio::test]
 async fn htpc_1_declared_set_registers_todays_entire_route_set() {
@@ -3092,12 +3151,21 @@ async fn base_html_renders_the_drawer_and_gates_the_subnav_on_group_size() {
     let processes = get("/system/processes").await;
     assert!(
         processes.contains(r#"class="subnav""#),
-        "System has two registered pages, so it gets a sub-nav bar: {processes}"
+        "System has four registered pages, so it gets a sub-nav bar: {processes}"
     );
-    assert!(
-        processes.contains(r#"<a href="/system/logs""#),
-        "the sub-nav must list the active group's other pages: {processes}"
-    );
+    // All four System pages, in the spec's order (`docs/PANEL_IA.md` § System).
+    for page in [
+        "/system/services",
+        "/system/processes",
+        "/system/updates",
+        "/system/logs",
+    ] {
+        assert!(
+            processes.contains(&format!(r#"<a href="{page}""#)),
+            "the sub-nav must list every registered page of the active group, \
+             missing {page}: {processes}"
+        );
+    }
     assert!(
         !processes.contains(r#"<a href="/shell/widgets""#),
         "the sub-nav must NOT list another group's pages: {processes}"
@@ -3204,7 +3272,7 @@ async fn the_pre_ia_paths_redirect_when_their_target_is_registered() {
 /// Pull every literal link/form target out of a rendered page.
 ///
 /// Rendered HTML, so no `{{ }}` survives — path parameters arrive already
-/// substituted (`/processes/restart/tv-shell-input`), which is why matching
+/// substituted (`/system/services/restart/tv-shell-input`), which is why matching
 /// back to a declaration is segment-wise below.
 fn link_targets(html: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();

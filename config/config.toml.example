@@ -83,10 +83,10 @@
 # commands is ROOT-EQUIVALENT (gated). When false these routes are NOT
 # registered at all (404) and their buttons are not rendered:
 #   POST /dev/deploy, /dev/build, /dev/reboot, /dev/suspend,
-#   /processes/updates/apply (sudo pacman -Syu),
+#   /system/updates/apply (sudo pacman -Syu),
 #   /tools/raw (the arbitrary-IPC console)
-# Every unit-restart route stays available — /processes/restart/{key},
-# /dev/restart-daemon, /dev/restart-shell and /cec/recover/restart-daemon all
+# Every unit-restart route stays available — /system/services/restart/{key},
+# /dev/restart-daemon, /dev/restart-shell and /devices/cec/recover/restart-daemon all
 # drive the same systemd units, and recovery is the reason the panel exists.
 #allow_dangerous = false
 

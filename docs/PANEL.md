@@ -101,9 +101,11 @@ page constructs one from a live node — that is the node switcher,
 > **The [PANEL_IA.md](PANEL_IA.md) redesign is landing in phases.** Phase 1
 > (#405) shipped the navigation shell — a left drawer for six subject groups
 > with a horizontal sub-nav inside each — and moved every page onto its new
-> path. **Page *contents* are unchanged**: Settings, Media and Tools are still
-> the pre-split grab-bags, and dissolve in phases 3-4. The table below is what
-> is built today.
+> path, with page *contents* unchanged. Phase 2 (#406) split the Processes
+> page three ways under **System**: Services (unit control), Processes
+> (read-only observation) and Updates (pacman). Settings, Media and Tools are
+> still the pre-split grab-bags, and dissolve in phases 3-4. The table below is
+> what is built today.
 
 Every page keeps a forwarding address: the pre-IA path 303s to the new one
 (`pages::redirects`), registered in the same capability block as its target so a
@@ -113,7 +115,9 @@ partials moved without redirects — they are poll targets, not bookmarks.
 | Page | Path | Contents |
 |---|---|---|
 | Dashboard | `/` (Overview) | unit status, build info, system/storage tiles, pad fleet, quick actions, an Updates tile (own slow poll — see [System updates](#system-updates-pacman) below) |
-| Processes | `/system/processes` | tv-shell systemd user units (daemon/shell/panel) with per-unit restart (color-coded dot + status word, not just text); Hyprland active window/clients (styled table)/monitors via IPC; a read-only top-processes table (`ps`, CPU-sorted, no kill action in v1); a System Updates section (see below) |
+| Services | `/system/services` | the three tv-shell systemd **user** units (daemon/shell/panel) with a per-unit Restart (color-coded dot + status word, not just text). `POST /system/services/restart/{key}` matches `key` against that fixed three-key set and resolves it to a real unit name **server-side** — an arbitrary client-supplied unit name never reaches `systemctl`. The panel's own unit carries a distinct confirm saying the restart will disconnect the page you are looking at. Reading arbitrary units and the configurable `managed_units` restart allowlist are phase 5 (#409) |
+| Processes | `/system/processes` | **read-only observation, no actions at all**: Hyprland active window/clients (styled table)/monitors via IPC, and a top-processes table (`ps`, CPU-sorted, no kill action in v1) |
+| Updates | `/system/updates` | the pacman System Updates section — pending-package table, cache-bypassing Refresh, the background full-update job and its self-terminating status poll (see [System updates](#system-updates-pacman) below) |
 | Settings | `/shell/settings` | grouped typed forms over `settings.json` via `get-config`/`set-config` (shallow merge — unmentioned keys, notably the daemon-owned `keyBindings`/`perGameBindings`/`perPlayerBindings`/`webApps`, are left untouched); covers the QML-owned scalars plus `wallpaperPath` and a line-per-entry `prewarmApps` list editor; the daemon-owned keys (binding layers + the `webApps` registry, `docs/WEB_APPS.md`) are shown read-only here (`keyBindings` is also editable via the Controllers page's bindings editor; the per-game/per-player layers are read-only there too — full editors are deferred; web-app **management** now lives on the Media page); read-only `config.toml` view (a general edit path is deferred — editing still requires a manual edit + daemon/panel restart via the Dev page; the one targeted exception is the CEC page's `[cec].osd_name` input-name editor); raw JSON escape hatch with an explicit shallow-merge/`null`-deletes warning for keys not modeled as typed fields (e.g. `widgets`, `cecDeviceNames`) |
 | Widgets | `/shell/widgets` | per-widget enabled/order/size/prefs editors (`widgets.<id>` subtree) |
 | Media | `/shell/media` | **Wallpapers**: upload images into `~/.config/tv-shell/wallpapers/` (the dir the shell's Settings ▸ Wallpaper page reads), preview them as a grid, pick the active one (persisted as `wallpaperPath` via `set-config`) or clear it, and delete — this is the only way to get an image onto the box without SSH. Upload is treated as an attack surface in its own right (the route is authenticated, but auth is opt-in and a loopback panel may run without it): extension allowlist, filename sanitization, a containment re-check against the wallpapers dir, a 32 MB cap, and magic-byte sniffing, with the read-back route sharing the same resolver so it can't become an arbitrary file read. **Web apps**: list/add/remove the daemon-owned registry (`webapp-list`/`-add`/`-remove`, #187 P1+P3) — the panel is the add surface because the couch UI has no on-screen keyboard (#20) |
@@ -154,8 +158,8 @@ startup snapshot. They answer different questions on purpose.
 ## System updates (pacman)
 
 `panel/src/updates.rs` owns pacman system-update state independently of the
-daemon — the Dashboard Updates tile and the Processes page's "System
-Updates" section both read it.
+daemon — the Dashboard Updates tile and the System ▸ Updates page
+(`/system/updates`) both read it.
 
 - **Read** (unprivileged): `checkupdates` (pacman-contrib) parsed into
   `{name, old_version, new_version}` rows. Exit code `2` ("no updates
@@ -163,7 +167,7 @@ Updates" section both read it.
   failure/timeout) surfaces as an honest error banner. Cached in `AppState`
   (`UpdatesState`) with a 5-minute TTL — `checkupdates` never runs on the
   Dashboard's fast 5s tile poll (the Updates tile polls on its own, much
-  slower 300s interval instead); the Processes page's Refresh button
+  slower 300s interval instead); the Updates page's Refresh button
   bypasses the cache.
 - **Reboot-needed detection**: compares `uname -r` against the installed
   kernel package's version. The kernel package is found by filtering
@@ -180,7 +184,7 @@ Updates" section both read it.
   `kill_on_drop` enforces a 30-minute timeout. A second "Run full update"
   click while one is already running is a no-op (the existing job's status
   is shown, not a new one started).
-- The Processes page's job-status view polls itself
+- The Updates page's job-status view polls itself
   (`hx-trigger="every 2s [this.dataset.running=='1']"`) only while
   `Running`; on `Done` it shows success/failure and, if the kernel package
   version no longer matches the running kernel, a reboot-needed banner
@@ -208,8 +212,8 @@ tv-shell ALL=(root) NOPASSWD: /usr/bin/pacman -Syu --noconfirm
 immediately — no hang, no password prompt — printing something like `sudo: a
 password is required` to stderr and exiting non-zero. The apply job captures
 that exact line into its log tail, and the UI surfaces it directly: the
-Processes page's failure banner shows the last non-empty log line inline
-(`last_error_line` in `pages::processes`) rather than a bare "Update failed",
+Updates page's failure banner shows the last non-empty log line inline
+(`last_error_line` in `pages::updates`) rather than a bare "Update failed",
 and the log-tail `<details>` auto-expands on a failed run instead of staying
 collapsed — so the real cause is visible without an extra click. The
 Dashboard Updates tile is unaffected either way, since it only reflects the
@@ -320,7 +324,7 @@ tiers — `panel/src/capabilities.rs`:
 
 | Tier | Registered when | Pages |
 |---|---|---|
-| **Recovery** | always | Overview, Processes (+ system updates), Logs, Dev (+ unit restarts), login, assets |
+| **Recovery** | always | Overview, Services (+ unit restarts), Processes, Updates, Logs, Dev (+ unit restarts), login, assets |
 | **Node** | the handshake succeeded | Tools console |
 | **Capability** | the node declared that `Feature` | Settings **and the whole Media page incl. the wallpaper files** (`settings_store`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the Dev screenshot pair (`screenshot`) |
 | **Danger** | `[panel].allow_dangerous`, intersected with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy` |
@@ -332,8 +336,8 @@ either — and a group whose pages all gated off has no drawer entry.
 
 **Gate on what the node actually emits.** `daemon/src/ipc.rs::features()`
 deliberately never emits `wallpapers`, `processes`, `system_updates`,
-`steam_library` or `game_launch` — the daemon serves none of them. So Processes
-and System Updates are **recovery** tier (the panel's own exec tier), not
+`steam_library` or `game_launch` — the daemon serves none of them. So Services,
+Processes and Updates are **recovery** tier (the panel's own exec tier), not
 capability tier. Same for `/system/logs`: `Feature::Logs` describes the
 *daemon's* `GET /dev/logs`, while this page reads `journalctl` directly.
 
@@ -374,7 +378,7 @@ That is sound because the node's set is static too — `features()` derives it f
 compile-time cfgs (cargo features, `target_os`) plus startup config
 (`[http]`/`[mcp]` binds), and health is deliberately *not* in it, so a wedged CEC
 adapter does not drop `cec` and nothing transient can flip a gate. The one-click
-recovery is the Processes page's own panel-restart button.
+recovery is the Services page's own panel-restart button.
 
 **Deployment dependency.** The panel now requires the deployed daemon to be at
 or past the commit that added the `capabilities` IPC command. An older daemon
@@ -415,13 +419,13 @@ are **not registered at all** (404, not a 403 from a handler) and their buttons
 are not rendered:
 
 `POST /dev/deploy` · `/dev/build` · `/dev/reboot` · `/dev/suspend` ·
-`/processes/updates/apply` · `/tools/raw`
+`/system/updates/apply` · `/tools/raw`
 
 `GET /dev/recovery` stays available (observability), as does every
-unit-restart route: `POST /processes/restart/{key}`, `/devices/cec/recover/restart-daemon`,
+unit-restart route: `POST /system/services/restart/{key}`, `/devices/cec/recover/restart-daemon`,
 `/dev/restart-daemon` and `/dev/restart-shell`. The last two used to be gated,
 which bought nothing — they drive the *same* two systemd units that the ungated
-`/processes/restart/{key}` does, so the gate only hid one door to the same room.
+`/system/services/restart/{key}` does, so the gate only hid one door to the same room.
 `POST /tools/raw` is in the dangerous set because it drives the entire IPC
 vocabulary, making it an arbitrary-command escape hatch. It carries **no**
 capability gate on top — `allow_dangerous` is already an explicit opt-in to an
@@ -443,7 +447,7 @@ recoverable-but-disruptive actions — unit restarts, Controllers'
 release/handoff, controllerdb refresh — and `.danger-severe` (deep red,
 bold border) for actions that take the whole box down or overwrite the
 running build — Dev's Reboot/Suspend/Deploy/Build, and the Updates
-section's "Run full update". The Processes page's own-unit (panel) Restart
+page's "Run full update". The Services page's own-unit (panel) Restart
 button carries a distinct confirm message noting the click will disconnect
 the very page the operator is looking at.
 

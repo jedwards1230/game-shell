@@ -1,10 +1,12 @@
-//! Page handlers. All nine pages are fully implemented: `dashboard`, `logs`,
-//! `dev`, `settings`, `widgets`, `tools`, `processes` (M1-M3), plus
-//! `controllers` and `cec` (M4) — the last two callers of the "coming in a
-//! later milestone" stub, which is removed along with them.
+//! Page handlers. Every page is fully implemented: `dashboard`, `logs`,
+//! `dev`, `settings`, `widgets`, `tools`, `processes` (M1-M3), `controllers`
+//! and `cec` (M4), plus `services` and `updates` — the two halves the
+//! Processes page was split into in `docs/PANEL_IA.md` phase 2.
 //!
-//! `redirects` is not a page: it holds the forwarding addresses from the
-//! pre-IA paths (`docs/PANEL_IA.md` phase 1).
+//! Two modules here are not pages: `redirects` holds the forwarding addresses
+//! from the pre-IA paths (`docs/PANEL_IA.md` phase 1), and `units` holds the
+//! single systemd-unit-state presentation helper `dashboard`, `dev` and
+//! `services` all render.
 
 pub mod cec;
 pub mod controllers;
@@ -16,8 +18,11 @@ pub mod media;
 pub mod nav;
 pub mod processes;
 pub mod redirects;
+pub mod services;
 pub mod settings;
 pub mod tools;
+pub mod units;
+pub mod updates;
 pub mod widgets;
 
 use askama::Template;
