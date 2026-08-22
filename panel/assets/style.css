@@ -428,6 +428,10 @@ a.tile:hover {
 .tile-value {
   margin-bottom: 0.35rem;
   font-weight: 600;
+  /* A tile is a fixed grid cell with `overflow: visible`, so an unbreakable
+     value (a long version string, a device name with no spaces) would run out
+     over the tile beside it rather than being clipped or scrolled. Break it. */
+  overflow-wrap: anywhere;
 }
 
 /* ── Banners ─────────────────────────────────────────────────────────── */
@@ -649,7 +653,12 @@ pre {
 
 /* ── Forms / buttons ─────────────────────────────────────────────────── */
 
+/* Every free-text input type the panel actually uses. `url` was missing and
+   rendered with the browser's default white chrome next to a correctly dark
+   `text` field on the Add-web-app form — the only `type="url"` in the panel,
+   which is exactly how it went unnoticed. */
 input[type="text"],
+input[type="url"],
 input[type="number"] {
   background: var(--bg);
   color: var(--text);

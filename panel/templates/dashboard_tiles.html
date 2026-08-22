@@ -11,13 +11,23 @@
 {% if controllers_enabled %}
 <a class="tile" href="/devices/controllers">
   <h3>Input daemon</h3>
-  <p class="tile-value"><span class="unit-chip"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</span></p>
+  {# NOT a `.unit-chip`: this label is a whole status sentence, not a dot plus
+     one word, and the chip's `white-space: nowrap` clamped ~290px of text into
+     a 256px tile with no ellipsis, silently losing the tail. There is no
+     whitespace between the dot and the first word, so no break opportunity
+     exists there and the dot cannot be orphaned anyway. #}
+  <p class="tile-value"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
   <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
 </a>
 {% else %}
 <div class="tile">
   <h3>Input daemon</h3>
-  <p class="tile-value"><span class="unit-chip"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</span></p>
+  {# NOT a `.unit-chip`: this label is a whole status sentence, not a dot plus
+     one word, and the chip's `white-space: nowrap` clamped ~290px of text into
+     a 256px tile with no ellipsis, silently losing the tail. There is no
+     whitespace between the dot and the first word, so no break opportunity
+     exists there and the dot cannot be orphaned anyway. #}
+  <p class="tile-value"><span class="dot {{ status_dot_class }}"></span>{{ status_label }}</p>
   <p class="muted" title="raw: {{ status_raw }}">{{ status_raw }}</p>
 </div>
 {% endif %}
