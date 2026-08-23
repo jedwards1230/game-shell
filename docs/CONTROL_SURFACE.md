@@ -8,7 +8,7 @@ token**, and are thin adapters over the same action logic in
 | Adapter | Module | Opt-in (config.toml) | Endpoint |
 |---------|--------|----------------------|----------|
 | HTTP/1.1 bridge | `daemon/src/http.rs` | `[http] bind = "host:port"` | `http://<bind>/...` |
-| MCP server (rmcp 1.7.0, streamable-HTTP) | `daemon/src/mcp.rs` | `[mcp] bind = "host:port"` | `http://<bind>/mcp` |
+| MCP server (rmcp 3.1.2, streamable-HTTP) | `daemon/src/mcp.rs` | `[mcp] bind = "host:port"` | `http://<bind>/mcp` |
 
 > The web control panel that consumes this surface is documented in [`PANEL.md`](PANEL.md).
 > A third, **outbound** surface — MQTT command topics, gated by broker credentials

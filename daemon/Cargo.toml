@@ -40,7 +40,7 @@ path = "src/main.rs"
 # CI's cec leg runs on Debian Trixie for the same reason — not bookworm/2.36).
 cec = ["dep:cec-rs", "dep:arrayvec", "libcec-sys/static"]
 
-# MCP server via rmcp 1.7.0 (the official Model Context Protocol Rust SDK).
+# MCP server via rmcp 3.1.2 (the official Model Context Protocol Rust SDK).
 # OFF by default — same rationale as `cec`: the default build leg (CI + macOS
 # dev boxes) stays free of the rmcp / axum / schemars toolchain.
 #
@@ -103,20 +103,20 @@ time = { version = "0.3", default-features = false, features = ["std", "formatti
 # Optional: only needed under the `mcp` feature.
 base64 = { version = "0.23", optional = true }
 
-# MCP server (rmcp 1.7.0 — official Model Context Protocol Rust SDK).
+# MCP server (rmcp 3.1.2 — official Model Context Protocol Rust SDK).
 # Optional + feature-gated (`mcp`): brings in axum, schemars, and the full
 # MCP protocol machinery. The `transport-streamable-http-server` feature pulls
 # in axum transitively; we declare axum directly so we can use it in mcp.rs.
 rmcp = { version = "3.1.2", features = ["server", "macros", "transport-streamable-http-server"], optional = true }
 # axum is used in mcp.rs to host the StreamableHttpService. Also optional so
 # the default build never links it. Version must be compatible with rmcp's
-# transitive axum requirement (rmcp 1.7.0 uses axum 0.8).
+# transitive axum requirement (rmcp 3.1.2 uses axum 0.8).
 axum = { version = "0.8", optional = true }
 # schemars is declared directly (optional) so `bridge_core::StatusInfo` can
 # derive `JsonSchema` under `#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]`.
 # The derive macro requires the crate to be available by its canonical crate name
 # `schemars` — a re-export path like `rmcp::schemars` does not satisfy the proc-macro
-# resolver. Version matches rmcp 1.7.0's transitive pin (schemars 1.x); Cargo
+# resolver. Version matches rmcp 3.1.2's transitive pin (schemars 1.x); Cargo
 # unifies them to the single resolved copy (1.2.1 in the lockfile).
 schemars = { version = "1", optional = true }
 
