@@ -644,6 +644,15 @@ units whose failure costs nothing. The membership criterion is narrow and
 checkable by eye: **system-scope units that either serve the remote login
 session or own the network link it runs over.**
 
+## QA
+
+Every page, its gate, what it does with the daemon down, and the cross-cutting
+states worth checking (recovery mode, `allow_dangerous = false`, an empty
+allowlist, narrow viewport): **[qa-panel-views.md](qa-panel-views.md)**.
+
+Linked rather than `@import`ed on purpose — `CLAUDE.md` imports the *shell*
+catalog in full, and most sessions never touch the panel.
+
 ## Running locally
 
 Build with `scripts/build-panel.sh` (outputs to `target/release/tv-shell-panel`)

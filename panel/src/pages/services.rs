@@ -84,13 +84,15 @@ pub async fn render_page(state: &AppState) -> String {
     let mut builtin = Vec::new();
     for key in config::BUILT_IN_UNIT_KEYS {
         let target = config::builtin_target(key).expect("built-in unit key");
-        builtin.push(unit_view(state, &target, builtin_label(key)).await);
+        let status = read_status(state, target.scope(), target.unit()).await;
+        builtin.push(unit_view(&status, &target, builtin_label(key)));
     }
 
     let mut managed = Vec::new();
     for target in &state.cfg.managed_units {
         let label = target.key().to_string();
-        managed.push(unit_view(state, target, label).await);
+        let status = read_status(state, target.scope(), target.unit()).await;
+        managed.push(unit_view(&status, target, label));
     }
 
     let tmpl = ServicesTemplate {
@@ -112,9 +114,19 @@ fn builtin_label(key: &str) -> String {
     .to_string()
 }
 
-/// Read one restartable unit's status and build its row.
-async fn unit_view(state: &AppState, target: &RestartTarget, label: String) -> UnitView {
-    let status = read_status(state, target.scope(), target.unit()).await;
+/// Build one restartable unit's row from an already-read status.
+///
+/// **Pure, and deliberately so.** This is the join between `units::parse_show`
+/// (which has its own tests) and the rendered row — the part that decides what
+/// an operator staring at a broken box actually reads. While it did its own
+/// `read_status`, no test could reach it with real data: CI has no `systemctl`,
+/// so every row rendered through the `Err(_) => UnitStatus::default()` branch
+/// and came out "unknown". Deleting `failure_reason` or `state` from this
+/// struct left the whole suite green.
+///
+/// Taking the status as an argument lets a plain test pin active / failed /
+/// not-found rows without a systemd on the machine running it.
+fn unit_view(status: &UnitStatus, target: &RestartTarget, label: String) -> UnitView {
     let (dot_class, state_word) = unit_dot(&status.active_state);
     UnitView {
         key: target.key().to_string(),
@@ -409,6 +421,117 @@ mod tests {
         config::resolve_managed_units(&raw)
             .expect("well-formed test entry")
             .remove(0)
+    }
+
+    /// A row for a unit that is up.
+    ///
+    /// Before `unit_view` became pure, nothing in the suite could reach it with
+    /// a real status: CI has no `systemctl`, so every row went through
+    /// `read_status`'s `Err(_) => UnitStatus::default()` branch and rendered
+    /// "unknown". `units::parse_show` was tested, the rendered row was tested,
+    /// and the join between them — which is what an operator reads — was not.
+    #[test]
+    fn a_running_unit_renders_its_real_state_not_unknown() {
+        let status = units::parse_show(
+            "Id=sshd.service\n\
+             LoadState=loaded\n\
+             ActiveState=active\n\
+             SubState=running\n\
+             UnitFileState=enabled\n\
+             ActiveEnterTimestamp=Fri 2026-08-22 18:03:56 EDT\n",
+        );
+        let view = unit_view(
+            &status,
+            &managed("sshd", "sshd.service", "system"),
+            "sshd".into(),
+        );
+
+        assert_eq!(view.state, "active");
+        assert_eq!(view.enabled_state, "enabled");
+        assert_eq!(view.active_since, "Fri 2026-08-22 18:03:56 EDT");
+        assert!(
+            view.failure_reason.is_empty(),
+            "a healthy unit must not claim a failure reason, got {:?}",
+            view.failure_reason
+        );
+        assert_eq!(view.state_word, "active");
+        assert_ne!(
+            view.state_word, "unknown",
+            "this is the assertion the old shape could not make"
+        );
+    }
+
+    /// The row that matters most: a failed unit must carry WHY it failed.
+    ///
+    /// This is the field an operator is actually looking for on a broken box,
+    /// and it was the easiest thing in the file to delete without any test
+    /// noticing.
+    #[test]
+    fn a_failed_unit_carries_its_failure_reason_into_the_row() {
+        let status = units::parse_show(
+            "Id=tv-shell-panel.service\n\
+             LoadState=loaded\n\
+             ActiveState=failed\n\
+             SubState=failed\n\
+             UnitFileState=enabled\n\
+             Result=exit-code\n\
+             ExecMainStatus=255\n",
+        );
+        let view = unit_view(
+            &status,
+            &config::builtin_target("panel").expect("built-in"),
+            "Panel".into(),
+        );
+
+        assert_eq!(view.state, "failed");
+        assert!(
+            !view.failure_reason.is_empty(),
+            "a failed unit must explain itself"
+        );
+        assert!(
+            view.failure_reason.contains("255"),
+            "the exit status is the diagnostic; got {:?}",
+            view.failure_reason
+        );
+    }
+
+    /// A unit systemd does not know about must not read as healthy.
+    #[test]
+    fn a_not_found_unit_does_not_render_as_active() {
+        let status = units::parse_show(
+            "Id=nope.service\nLoadState=not-found\nActiveState=inactive\nSubState=dead\n",
+        );
+        let view = unit_view(
+            &status,
+            &managed("nope", "nope.service", "system"),
+            "nope".into(),
+        );
+
+        assert_ne!(view.state_word, "active");
+        assert_eq!(view.state, "inactive");
+    }
+
+    /// The danger tier and confirm are scope-derived, and a pure `unit_view`
+    /// finally lets that be asserted on the row itself rather than inferred.
+    #[test]
+    fn scope_drives_the_rows_danger_tier() {
+        let status = UnitStatus::default();
+
+        let system = unit_view(
+            &status,
+            &managed("net", "NetworkManager.service", "system"),
+            "net".into(),
+        );
+        assert_eq!(system.danger_class, "danger-severe");
+        assert_eq!(system.scope, "system");
+
+        let user = unit_view(
+            &status,
+            &managed("thing", "thing.service", "user"),
+            "thing".into(),
+        );
+        assert_eq!(user.danger_class, "warn-action");
+        assert_eq!(user.scope, "user");
     }
 
     /// The behaviour htpc-1 shows today. Not "failed", not "ok" — an explicit

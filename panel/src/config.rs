@@ -1119,6 +1119,27 @@ pub fn shell_journal_tag() -> String {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that mutate process-global environment.
+    ///
+    /// `set_var` is not scoped to the calling test — the whole test binary is
+    /// one process, and cargo runs tests on several threads. Without this,
+    /// `expand_tilde_prefixes_home` can move `HOME` out from under any
+    /// concurrently-running test that resolves a config path, and
+    /// `socket_path_prefers_env_override` can do the same to `TV_SHELL_SOCK`.
+    /// Nothing has flaked yet; this is the shape that flakes under load, and
+    /// the failure would look like an unrelated path assertion breaking at
+    /// random.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`ENV_LOCK`], surviving a poisoned mutex.
+    ///
+    /// A panicking env test poisons the lock; the guard is only ordering, so
+    /// inheriting the poison would cascade one real failure into every other
+    /// env test and bury the original.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn default_panel_config_is_enabled_on_loopback() {
         let cfg = AppConfig::default();
@@ -1632,6 +1653,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_prefixes_home() {
+        let _env = env_guard();
         let prev = std::env::var_os("HOME");
         std::env::set_var("HOME", "/home/testuser");
         assert_eq!(
@@ -1853,8 +1875,16 @@ mod tests {
 
     #[test]
     fn socket_path_prefers_env_override() {
+        let _env = env_guard();
+        // Restore rather than blindly removing: a dev running the suite with
+        // TV_SHELL_SOCK exported would otherwise have it silently unset for
+        // every test that ran after this one.
+        let prev = std::env::var_os("TV_SHELL_SOCK");
         std::env::set_var("TV_SHELL_SOCK", "/tmp/custom.sock");
         assert_eq!(socket_path(), PathBuf::from("/tmp/custom.sock"));
-        std::env::remove_var("TV_SHELL_SOCK");
+        match prev {
+            Some(v) => std::env::set_var("TV_SHELL_SOCK", v),
+            None => std::env::remove_var("TV_SHELL_SOCK"),
+        }
     }
 }
