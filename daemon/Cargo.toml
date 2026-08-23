@@ -107,7 +107,7 @@ base64 = { version = "0.23", optional = true }
 # Optional + feature-gated (`mcp`): brings in axum, schemars, and the full
 # MCP protocol machinery. The `transport-streamable-http-server` feature pulls
 # in axum transitively; we declare axum directly so we can use it in mcp.rs.
-rmcp = { version = "2.2.0", features = ["server", "macros", "transport-streamable-http-server"], optional = true }
+rmcp = { version = "3.1.2", features = ["server", "macros", "transport-streamable-http-server"], optional = true }
 # axum is used in mcp.rs to host the StreamableHttpService. Also optional so
 # the default build never links it. Version must be compatible with rmcp's
 # transitive axum requirement (rmcp 1.7.0 uses axum 0.8).
