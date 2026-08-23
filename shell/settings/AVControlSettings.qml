@@ -504,8 +504,9 @@ SettingsPageBase {
         }
 
         // Focus preference toggles — always visible (not gated on cecAvailable).
-        // The daemon reads these at CEC startup and resume to decide whether to
-        // claim the active source.
+        // The daemon reads these at CEC startup, at resume, and on an observed
+        // device power-on to decide whether to focus the display — and reads the
+        // per-device default below to decide which input to focus.
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 16
@@ -544,8 +545,12 @@ SettingsPageBase {
                 }
             }
 
-            // Auto-switch input on power-on toggle (persist-only in Phase 1; the
-            // daemon does not act on it yet — behaviour wiring is a follow-up).
+            // Auto-switch input on power-on toggle. The daemon's CEC actor folds
+            // every bus sweep into a per-address power history and, on a power-on
+            // EDGE of the display chain (TV or AVR), applies the default input
+            // below (#415). Gated by the same lifecycle master flag as the focus
+            // toggles, and skipped when another device demonstrably holds the
+            // screen.
             PreferenceRow {
                 label: "Auto-switch input on power-on"
                 description: "Switch the TV/AVR to this input automatically when a device powers on."
@@ -857,8 +862,10 @@ SettingsPageBase {
                                     }
                                 }
 
-                                // Set-as-default action — persists the preference (Phase 1
-                                // is persist-only; daemon behaviour wiring is a follow-up).
+                                // Set-as-default action — picks which input the
+                                // daemon focuses (#415): unset means "claim the
+                                // display for this box", any other device means
+                                // "hand the display to that device instead".
                                 // z lifts it above the row-selection MouseArea so its own
                                 // click handler wins; Return on the focused row is the
                                 // controller path.

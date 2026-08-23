@@ -146,7 +146,7 @@ FocusScope {
             }
         }
 
-        // e.g. "Checking desktop-2 (192.168.8.153)" — the address the Wake card
+        // e.g. "Checking gaming-pc (192.0.2.10)" — the address the Wake card
         // targets while this server is down.
         Text {
             visible: root.available && root.active !== ""

@@ -830,11 +830,18 @@ const _: () = assert!(!CEC_FOCUS_ON_STARTUP_DEFAULT);
 const _: () = assert!(CEC_FOCUS_ON_WAKE_DEFAULT);
 
 /// Default for `cecAutoSwitchOnPowerOn`: off by default so a device powering on
-/// never yanks the TV/AVR input unexpectedly. The daemon does not yet act on this
-/// flag (behaviour wiring is a follow-up); Phase 1 establishes the key + a tested
-/// reader so the setting persists round-trip.
+/// never yanks the TV/AVR input unexpectedly. Consumed by the CEC actor's
+/// power-on edge detector (`cec::auto_switch_on_power_on`), which applies
+/// [`CecBehavior::default_input`] when the display chain comes out of standby.
 pub const CEC_AUTO_SWITCH_ON_POWER_ON_DEFAULT: bool = false;
 const _: () = assert!(!CEC_AUTO_SWITCH_ON_POWER_ON_DEFAULT);
+
+/// Value of `cecDefaultInput` meaning "no preferred default input" — the shell
+/// writes `-1` when the user clears the per-device "Default ✓" badge. Anything
+/// outside the 16 CEC logical addresses (`0..=15`) normalizes to this, so a
+/// stale or garbage value degrades to "claim the display for ourselves" rather
+/// than addressing a device that cannot exist.
+pub const CEC_DEFAULT_INPUT_UNSET: i32 = -1;
 
 /// Read the `cecFocusOnStartup` setting from a parsed settings document. Returns
 /// [`CEC_FOCUS_ON_STARTUP_DEFAULT`] when the key is absent or not a JSON bool.
@@ -901,6 +908,140 @@ pub fn cec_auto_switch_on_power_on(path: &Path) -> bool {
         Some(v) => cec_auto_switch_on_power_on_from(&v),
         None => CEC_AUTO_SWITCH_ON_POWER_ON_DEFAULT,
     }
+}
+
+/// Read the `cecDefaultInput` setting from a parsed settings document.
+///
+/// Returns a CEC logical address in `0..=15`, or [`CEC_DEFAULT_INPUT_UNSET`]
+/// when the key is absent, is not a JSON integer, or names an address outside
+/// the 16 addressable slots. Pure (no I/O) — unit-testable on any host.
+pub fn cec_default_input_from(settings: &serde_json::Value) -> i32 {
+    settings
+        .get("cecDefaultInput")
+        .and_then(|v| v.as_i64())
+        .filter(|a| (0..=15).contains(a))
+        .map(|a| a as i32)
+        .unwrap_or(CEC_DEFAULT_INPUT_UNSET)
+}
+
+/// Read the `cecDefaultInput` setting from `settings.json` on disk. A missing or
+/// unparseable file (or an out-of-range value) yields [`CEC_DEFAULT_INPUT_UNSET`].
+pub fn cec_default_input(path: &Path) -> i32 {
+    match std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    {
+        Some(v) => cec_default_input_from(&v),
+        None => CEC_DEFAULT_INPUT_UNSET,
+    }
+}
+
+/// The CEC *behaviour* settings the actor consumes, read as one unit so a single
+/// `settings.json` parse serves every gate.
+///
+/// Bundling them is not cosmetic: it is what lets a test go from a settings file
+/// on disk all the way to an asserted CEC transmit in one hop. A reader tested in
+/// isolation proves only that a getter parses — the failure mode #415 exists to
+/// fix — so the consuming decisions ([`should_auto_switch_target`],
+/// [`focus_target`]) take this struct rather than loose bools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CecBehavior {
+    /// `cecAutoSwitchOnPowerOn` — apply the default input when the display chain
+    /// transitions out of standby.
+    pub auto_switch_on_power_on: bool,
+    /// `cecDefaultInput` — logical address to make the active source, or
+    /// [`CEC_DEFAULT_INPUT_UNSET`].
+    pub default_input: i32,
+}
+
+impl Default for CecBehavior {
+    fn default() -> Self {
+        Self {
+            auto_switch_on_power_on: CEC_AUTO_SWITCH_ON_POWER_ON_DEFAULT,
+            default_input: CEC_DEFAULT_INPUT_UNSET,
+        }
+    }
+}
+
+impl CecBehavior {
+    /// Fold both keys out of an already-parsed settings document. Pure.
+    pub fn from_settings(settings: &serde_json::Value) -> Self {
+        Self {
+            auto_switch_on_power_on: cec_auto_switch_on_power_on_from(settings),
+            default_input: cec_default_input_from(settings),
+        }
+    }
+
+    /// Read both keys from `settings.json` on disk. A missing or unparseable
+    /// file yields [`CecBehavior::default`] (auto-switch off, no default input),
+    /// so a broken settings file can never *start* driving the CEC bus.
+    pub fn load(path: &Path) -> Self {
+        match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        {
+            Some(v) => Self::from_settings(&v),
+            None => Self::default(),
+        }
+    }
+}
+
+/// Where a focus action should point the display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    /// Claim active source for ourselves — today's behaviour, and what an unset
+    /// (or self-addressed) `cecDefaultInput` means.
+    Ours,
+    /// Hand the display to the device at this logical address instead.
+    Device(i32),
+}
+
+/// Resolve `cecDefaultInput` against our own logical address.
+///
+/// `ours` is our own address in `0..=15`, or [`CEC_DEFAULT_INPUT_UNSET`] when
+/// libcec cannot tell us. Unset, out-of-range, and self-addressed defaults all
+/// collapse to [`FocusTarget::Ours`], so the *default* configuration reproduces
+/// the pre-#415 behaviour byte for byte. Pure.
+pub fn focus_target(default_input: i32, ours: i32) -> FocusTarget {
+    if !(0..=15).contains(&default_input) || default_input == ours {
+        FocusTarget::Ours
+    } else {
+        FocusTarget::Device(default_input)
+    }
+}
+
+/// Whether an observed power word is a transition INTO powered-on.
+///
+/// `previous` is the last word observed for that address, or `None` when it has
+/// never been seen. A first observation is deliberately NOT an edge: the daemon
+/// starting up next to an already-on TV must not read that as "the TV just came
+/// on" and steal the input. Only a known non-on -> `on` move counts. Pure.
+pub fn powered_on_edge(previous: Option<&str>, current: &str) -> bool {
+    current == "on"
+        && matches!(
+            previous,
+            Some("standby") | Some("sleeping") | Some("waking") | Some("unknown")
+        )
+}
+
+/// Whether a power-on edge on `addr` should trigger the auto-switch.
+///
+/// `display_chain` names the addresses whose power-on means "the display came
+/// up" (the TV and the AVR). A *source* device powering on is claiming the
+/// display for itself, not offering it, so it is not a trigger — the caller
+/// supplies the list because the CEC module owns those constants. Pure.
+pub fn should_auto_switch_target(
+    lifecycle_enabled: bool,
+    behavior: &CecBehavior,
+    display_chain: &[i32],
+    addr: i32,
+    previous: Option<&str>,
+    current: &str,
+) -> bool {
+    lifecycle_enabled
+        && behavior.auto_switch_on_power_on
+        && display_chain.contains(&addr)
+        && powered_on_edge(previous, current)
 }
 
 /// Whether to claim CEC active source: only when the lifecycle master is on AND
@@ -1448,6 +1589,141 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cec_default_input_from_reads_addresses_and_rejects_the_rest() {
+        // Every addressable slot round-trips.
+        for addr in 0..=15i64 {
+            assert_eq!(
+                cec_default_input_from(&serde_json::json!({ "cecDefaultInput": addr })),
+                addr as i32
+            );
+        }
+        // The shell's explicit "cleared" sentinel, an out-of-range address, a
+        // non-integer, and an absent key all mean "unset".
+        for doc in [
+            serde_json::json!({ "cecDefaultInput": -1 }),
+            serde_json::json!({ "cecDefaultInput": 16 }),
+            serde_json::json!({ "cecDefaultInput": "4" }),
+            serde_json::json!({ "themeMode": "dark" }),
+        ] {
+            assert_eq!(
+                cec_default_input_from(&doc),
+                CEC_DEFAULT_INPUT_UNSET,
+                "doc {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn cec_behavior_loads_both_keys_from_disk() {
+        // See `crate::testutil` for why this is based on `current_exe()`
+        // rather than the system temp dir.
+        let path = crate::testutil::scratch_path("gs-cec-behavior", ".json");
+        let _ = std::fs::remove_file(&path);
+
+        // Missing file -> the inert default: no auto-switch, no default input.
+        assert_eq!(CecBehavior::load(&path), CecBehavior::default());
+
+        std::fs::write(
+            &path,
+            r#"{"cecAutoSwitchOnPowerOn":true,"cecDefaultInput":4}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            CecBehavior::load(&path),
+            CecBehavior {
+                auto_switch_on_power_on: true,
+                default_input: 4,
+            }
+        );
+
+        // Garbage file -> inert default, never a half-read that drives the bus.
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(CecBehavior::load(&path), CecBehavior::default());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn focus_target_collapses_unset_and_self_to_ours() {
+        let cases = [
+            // (default_input, ours, expected)
+            (CEC_DEFAULT_INPUT_UNSET, 4, FocusTarget::Ours),
+            (99, 4, FocusTarget::Ours),
+            (4, 4, FocusTarget::Ours),
+            // A real other device is the only case that redirects.
+            (0, 4, FocusTarget::Device(0)),
+            (5, 4, FocusTarget::Device(5)),
+            // Our own address undeterminable: a configured device still wins,
+            // because "we don't know who we are" is not "the user meant us".
+            (5, CEC_DEFAULT_INPUT_UNSET, FocusTarget::Device(5)),
+        ];
+        for (default_input, ours, expected) in cases {
+            assert_eq!(
+                focus_target(default_input, ours),
+                expected,
+                "focus_target({default_input}, {ours})"
+            );
+        }
+    }
+
+    #[test]
+    fn powered_on_edge_needs_a_known_non_on_predecessor() {
+        let cases = [
+            // (previous, current, expected)
+            (Some("standby"), "on", true),
+            (Some("sleeping"), "on", true),
+            (Some("waking"), "on", true),
+            (Some("unknown"), "on", true),
+            // Already on -> not an edge (a repeated poll must not re-fire).
+            (Some("on"), "on", false),
+            // Never observed -> not an edge: a daemon starting beside an
+            // already-on TV must not read that as "it just came on".
+            (None, "on", false),
+            // Any non-on current state is never an edge.
+            (Some("on"), "standby", false),
+            (None, "standby", false),
+        ];
+        for (previous, current, expected) in cases {
+            assert_eq!(
+                powered_on_edge(previous, current),
+                expected,
+                "powered_on_edge({previous:?}, {current})"
+            );
+        }
+    }
+
+    #[test]
+    fn should_auto_switch_target_requires_every_gate() {
+        let on = CecBehavior {
+            auto_switch_on_power_on: true,
+            default_input: CEC_DEFAULT_INPUT_UNSET,
+        };
+        let off = CecBehavior::default();
+        let chain = [0, 5];
+        let cases = [
+            // (lifecycle, behavior, addr, previous, current, expected)
+            (true, on, 0, Some("standby"), "on", true),
+            (true, on, 5, Some("standby"), "on", true),
+            // The setting is the gate this issue exists to install.
+            (true, off, 0, Some("standby"), "on", false),
+            // The lifecycle master flag still outranks it.
+            (false, on, 0, Some("standby"), "on", false),
+            // A source device powering on is claiming the display, not offering it.
+            (true, on, 4, Some("standby"), "on", false),
+            // No edge -> nothing to react to.
+            (true, on, 0, Some("on"), "on", false),
+            (true, on, 0, None, "on", false),
+        ];
+        for (lifecycle, behavior, addr, previous, current, expected) in cases {
+            assert_eq!(
+                should_auto_switch_target(lifecycle, &behavior, &chain, addr, previous, current),
+                expected,
+                "should_auto_switch_target({lifecycle}, {behavior:?}, {addr}, {previous:?}, {current})"
+            );
+        }
     }
 
     #[test]

@@ -275,7 +275,7 @@ impl From<Feature> for String {
 ///   handshake, and failing the parse is the fail-closed direction.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Stable identity of this node (`"htpc-1"`, `"desktop-2"`). Resolution
+    /// Stable identity of this node (`"tv-box"`, `"gaming-pc"`). Resolution
     /// order is the serving binary's business — see `docs/IPC_PROTOCOL.md`
     /// (daemon) and `docs/HOST_SETUP.md` (sidecar).
     #[serde(default)]

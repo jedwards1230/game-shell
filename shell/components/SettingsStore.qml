@@ -54,18 +54,18 @@ Item {
     property bool hdrEnabled: true               // mirrors config/hyprland.conf cm,hdr default
     property bool nightLightEnabled: false       // drives hyprsunset
     property int nightLightTemp: 4500            // color temperature in Kelvin
-    property int overscan: 0                     // safe-area overscan percent (0-10)
+    property int overscan: 0                     // safe-area inset percent (0-10); applied in shell.qml (#416)
     property string wallpaperPath: ""             // absolute path to home-screen wallpaper ("" = solid color)
     property int sleepTimerMinutes: 0            // 0 = disabled; cycle: 0/5/10/15/30/60
-    property bool wakeOnController: true         // declarative preference (no suspend wiring)
+    property bool wakeOnController: true         // gates the controller-wake AV nudge in shell.qml (#130)
     property bool autoDimEnabled: false          // auto-dim OLED protection (#143)
     property int autoDimDelayMinutes: 2          // idle minutes before dimming (#143)
     property string defaultSink: ""              // WirePlumber sink node.name (stable across reboots)
     property string audioCardProfile: ""         // "card|profile" surround profile to reapply on boot (#234)
     property bool cecFocusOnStartup: false      // claim active source when daemon starts (default off)
     property bool cecFocusOnWake: true          // claim active source on resume from sleep (default on)
-    property bool cecAutoSwitchOnPowerOn: false // switch TV/AVR input when a device powers on (default off, daemon wiring TBD)
-    property int cecDefaultInput: -1            // logical address of the preferred default input (-1 = unset; persist-only in Phase 1)
+    property bool cecAutoSwitchOnPowerOn: false // focus the display when the TV/AVR powers on (default off; daemon: cec::auto_switch_on_power_on)
+    property int cecDefaultInput: -1            // logical address to focus (-1 = unset, i.e. claim for this box; daemon: cec::apply_focus)
     property var cecDeviceNames: ({})           // local label overrides keyed by logical address, e.g. {"0":"Living Room TV"}
     property var prewarmApps: []                 // wmClass list of apps to silently prewarm at login (#238)
 

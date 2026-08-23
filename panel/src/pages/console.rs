@@ -13,8 +13,8 @@
 //!
 //! The **page** is [`Gate::Node`] — it exists iff a node answered the
 //! handshake. `POST /dev/console/raw` is in the `allow_dangerous` block, so
-//! with `allow_dangerous = false` (the default, and what the reference node
-//! htpc-1 runs) the route does not exist and the page renders an explanatory
+//! with `allow_dangerous = false` (the default, and what a stock shell node
+//! runs) the route does not exist and the page renders an explanatory
 //! banner with **no form at all** — never a button that 404s.
 
 use askama::Template;
