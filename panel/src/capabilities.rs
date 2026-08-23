@@ -70,8 +70,8 @@ const ATTEMPTS: usize = 4;
 
 /// Pause between attempts. `ATTEMPTS * ATTEMPT_TIMEOUT + (ATTEMPTS - 1) *
 /// RETRY_DELAY` ≈ 9.3s worst case — a bounded window, never an open-ended
-/// await. The retry exists for the documented htpc-1 cold-boot race where the
-/// panel unit starts before the daemon's socket exists.
+/// await. The retry exists for the documented cold-boot race where the panel
+/// unit starts before the daemon's socket exists.
 const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
 /// Declare the [`Gate`] enum, its [`Gate::ALL`] list, its [`Gate::ident`] and

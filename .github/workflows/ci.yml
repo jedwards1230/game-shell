@@ -135,10 +135,17 @@ jobs:
     if: needs.changes.outputs.mqtt == 'true'
     uses: ./.github/workflows/mqtt.yml
 
+  # Deliberately unconditional — no `needs: changes`, no filter. This one scans
+  # the whole tree in about a second, and site identity can be reintroduced from
+  # any source path, so skipping it on an "unrelated" PR is exactly how it came
+  # back three times (docs/PRD.md §11).
+  site-identity:
+    uses: ./.github/workflows/site-identity.yml
+
   # The ONLY required check. Always runs; fails if any area job failed/was
   # cancelled. Skipped area jobs (their area didn't change) count as success.
   ci-gate:
-    needs: [changes, rust, host, qml, qmlformat, widgets, mqtt]
+    needs: [changes, rust, host, qml, qmlformat, widgets, mqtt, site-identity]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -153,6 +160,7 @@ jobs:
           echo "  qmlformat=${{ needs.qmlformat.result }}"
           echo "  widgets=${{ needs.widgets.result }}"
           echo "  mqtt=${{ needs.mqtt.result }}"
+          echo "  site-identity=${{ needs['site-identity'].result }}"
           exit 1
       - name: All required jobs passed or were skipped
         run: echo "CI gate green."

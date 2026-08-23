@@ -313,7 +313,7 @@ FocusScope {
                     Text {
                         Layout.fillWidth: true
                         // The daemon's ipv4 already carries the interface
-                        // (e.g. "enp3s0: 192.168.1.100"), so there's no separate
+                        // (e.g. "enp3s0: 192.0.2.42"), so there's no separate
                         // interface label — it would duplicate the iface.
                         text: root.ipAddress
                         font.pixelSize: Theme.fontHint

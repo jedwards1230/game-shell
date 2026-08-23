@@ -1,0 +1,25 @@
+# Reusable workflow: no deployment's site identity in a non-test source path.
+#
+# `docs/PRD.md` §5 locks the rule; `scripts/check-site-identity.py` enforces it.
+# The check reads every tracked source file and understands the `#[cfg(test)]`
+# boundary, so fixtures stay legal while a violation one line above a `mod tests`
+# block still fails — which a file-level grep cannot do.
+#
+# Called from ci.yml with NO paths filter, deliberately. The check is a
+# whole-tree scan that finishes in about a second, and every path filter that
+# has ever been written for it would have to enumerate the same trees the script
+# already walks. A filter here buys nothing and can only create a hole.
+
+name: Site Identity
+
+on:
+  workflow_call:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: No site identity in non-test source
+        run: python3 scripts/check-site-identity.py --verbose

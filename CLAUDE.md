@@ -464,7 +464,7 @@ screenshot/deploy automation — no host-management tooling required.
 - **Controller-first navigation**: Every interactive element must be reachable via D-pad (arrow keys) and activatable with A (Enter). B (Escape) always goes back. Focus management is critical — use `KeyNavigation` chains and `Keys.on*Pressed` handlers.
 - **Palette rules**: See `config/palette.md`. Never use gold for text. Crimson for focus/active states. Ember for secondary interactive elements. All overlay backdrops use `Qt.rgba(0, 0, 0, 0.7-0.85)`.
 - **No build tooling**: No bundler, no compiler, no package manager for QML. Files are deployed as-is.
-- **Distribution agnostic**: This repo has no knowledge of specific infrastructure, deployment tools, or host management. It's a standalone QML shell that runs on any Linux system with Hyprland + Quickshell.
+- **Site-neutral, not OS-neutral**: no deployment's hostnames, IPs, MACs or device identities appear in a non-test source path — AV endpoints, node addresses and the panel's deployment target are all configuration (`docs/PRD.md` §4 goal 8, §5). Nothing here depends on a particular configuration-management tool. It does **not** mean platform-agnostic: the panel's recovery tier is systemd-specific (`systemctl`/`journalctl`) and its system-update tier is pacman-specific (`checkupdates`, `sudo -n pacman -Syu`), both by design. The QML shell itself runs on any Linux system with Hyprland + Quickshell. `scripts/check-site-identity.py` enforces the site-neutral half in CI, on every PR.
 
 ## Gotchas
 

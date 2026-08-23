@@ -393,9 +393,9 @@ fn reopen_connection(
         // so a reopen that registers only the command callback silently drops CEC
         // remote input: nav from the TV/AVR remote dies and STAYS dead until the
         // daemon restarts, with nothing logged. That is not a rare path — every
-        // transmit failure on a stale bus reopens (observed twice within 15 minutes
-        // on htpc-1), so in practice the remote stopped working almost immediately
-        // and looked like a hardware fault.
+        // transmit failure on a stale bus reopens (observed twice within 15
+        // minutes on a deployed box), so in practice the remote stopped working
+        // almost immediately and looked like a hardware fault.
         if let Some(key_tx) = key_tx {
             builder = attach_key_press_callback(builder, key_tx);
         }
@@ -1239,8 +1239,8 @@ const KERNEL_CEC_NODE: &str = "/dev/cec0";
 /// healthy adapter fails to open whenever something else got there first. That
 /// is indistinguishable from a hardware wedge at the libcec level — both surface
 /// as `AdapterOpenFailed` — and the `adapter_open_failed` copy tells the operator
-/// to "re-seat the USB adapter or power-cycle the AVR". Both real incidents on
-/// htpc-1 were software conflicts, so that message sent someone after a cable
+/// to "re-seat the USB adapter or power-cycle the AVR". Both real incidents in
+/// the field were software conflicts, so that message sent someone after a cable
 /// twice. Naming the claimant turns a hardware goose-chase into a one-line fix.
 ///
 /// Two claimants seen in practice, checked in that order:

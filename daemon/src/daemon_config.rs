@@ -11,7 +11,8 @@
 //! ```toml
 //! [panel]                     # tv-shell-panel web control panel (its own binary)
 //! enabled = true              #   the panel serves when its systemd unit runs
-//! bind = "127.0.0.1:8091"     #   panel listen address (LAN-only, no auth in v1)
+//! bind = "127.0.0.1:8091"     #   panel listen address; loopback by default
+//! token_file = "~/.config/tv-shell/panel-token"  # 0600; its OWN token, not [http]'s
 //!
 //! [http]                      # LAN HTTP control bridge (opt-in)
 //! bind = "127.0.0.1:8089"     #   absent ⇒ bridge off
@@ -37,14 +38,14 @@
 //! wake_active_host_on_start = false   # WoL the ACTIVE host on start / host switch
 //!
 //! [[steam.hosts]]             # …or named sidecars instead of the single `url`
-//! name = "desktop-1"
+//! name = "gaming-pc"
 //! url = "http://192.0.2.10:47995"
 //! mac = "aa:bb:cc:dd:ee:ff"   # static WoL MAC (preferred over `ip neigh`/cache)
 //!
 //! [mqtt]                      # MQTT state publisher + command surface (opt-in)
 //! broker = "mqtts://mqtt.example:8883"   # absent ⇒ MQTT off entirely
-//! device_id = "htpc-1"        #   EXPLICIT identity; required when broker is set
-//! username = "tv-shell-htpc-1"
+//! device_id = "tv-box"        #   EXPLICIT identity; required when broker is set
+//! username = "tv-shell-tv-box"
 //! password_file = "~/.config/tv-shell/mqtt-password"   # 0600
 //! ca_file = "~/.config/tv-shell/mqtt-ca.pem"           # PEM CA bundle (public)
 //! heartbeat_secs = 30         #   floor republish interval
@@ -129,9 +130,14 @@ pub struct DaemonConfig {
 pub struct PanelConfig {
     /// Whether the panel serves when its unit runs. Default true.
     pub enabled: bool,
-    /// Panel listen address, e.g. `127.0.0.1:8091`. LAN-only, no auth in v1.
+    /// Panel listen address, e.g. `127.0.0.1:8091`. Loopback by default; the
+    /// panel refuses to start on a non-loopback bind with no resolvable token.
     pub bind: Option<String>,
-    /// Reserved for future panel auth; unused in v1 (LAN-only).
+    /// 0600 file holding the panel's **own** bearer token — a separate secret
+    /// from `[http].token_file`, so a token that works on one port 401s on the
+    /// other. Its presence is what turns panel auth on (bearer header +
+    /// session cookie, `panel/src/auth.rs`); absent ⇒ the panel serves
+    /// unauthenticated, which is why the loopback rule above exists.
     pub token_file: Option<String>,
 }
 
@@ -206,8 +212,8 @@ pub struct MqttConfig {
     /// The device identity. EXPLICIT ONLY — never derived from hostname, OS, or
     /// IP. Required whenever `broker` is set; startup FAILS if it is missing.
     pub device_id: Option<String>,
-    /// MQTT username (e.g. `tv-shell-htpc-1`). Must be set together with
-    /// `password_file`, or neither.
+    /// MQTT username (conventionally `tv-shell-<device_id>`). Must be set
+    /// together with `password_file`, or neither.
     pub username: Option<String>,
     /// 0600 file under the config dir, resolved like every other token file.
     pub password_file: Option<String>,
@@ -436,7 +442,7 @@ pub struct SteamConfig {
 #[serde(deny_unknown_fields)]
 pub struct SteamHostConfig {
     /// Stable selector name, shown in the widget's server picker and used by
-    /// `steam-set-host <name>` (e.g. "desktop-1"). Must be unique + non-empty
+    /// `steam-set-host <name>` (e.g. "gaming-pc"). Must be unique + non-empty
     /// (checked by [`Config::validate`]).
     pub name: String,
     /// tv-shell-host base URL, e.g. `http://192.0.2.1:47995`.

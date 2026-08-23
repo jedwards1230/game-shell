@@ -150,9 +150,9 @@
 # the node switcher that would actually render a second node's UI hasn't
 # landed (docs/MULTI_NODE_PANEL.md sequencing step 6).
 #[[panel.nodes]]
-#id = "desktop-2"
-#base_url = "http://192.168.8.153:47995"
-#sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+#id = "gaming-pc"
+#base_url = "http://192.0.2.10:47995"
+#sidecar_token_file = "~/.config/tv-shell/gaming-pc-sidecar-token"
 
 # --- MCP server (optional, requires the daemon built with --features mcp) -----
 [mcp]
@@ -209,14 +209,14 @@
 # separated; an unparseable value aborts daemon startup rather than failing
 # silently at wake time.
 #[[steam.hosts]]
-#name = "desktop-1"
+#name = "gaming-pc"
 #url = "http://192.0.2.1:47995"
 #mac = "aa:bb:cc:dd:ee:ff"
 #[[steam.hosts]]
-#name = "desktop-2"
+#name = "gaming-pc-windows"
 #url = "http://192.0.2.2:47995"
 #mac = "aa:bb:cc:dd:ee:ff"          # same NIC on a dual-boot box ⇒ same MAC
-#token_file = "~/.config/tv-shell/steam-token-desktop-2"
+#token_file = "~/.config/tv-shell/steam-token-gaming-pc-windows"
 #token_file = "~/.config/tv-shell/steam-token"
 #
 # Proactively send a Wake-on-LAN packet to the ACTIVE host (only that one — never
@@ -256,13 +256,13 @@
 # both OSes; a derived id registers two Home Assistant devices for one machine,
 # one of which is permanently offline by construction. Alphabet is [A-Za-z0-9_-],
 # max 64 bytes (so it can never inject a topic level or an MQTT wildcard).
-#device_id = "htpc-1"
+#device_id = "tv-box"
 
 # Broker credentials. Set BOTH or NEITHER — a half-set pair would authenticate
 # anonymously and look like a broker-side ACL problem. The password is by
 # reference only and follows the same rules as every other token file: mode 0600
 # and under ~/.config/tv-shell/, or MQTT is disabled.
-#username = "tv-shell-htpc-1"
+#username = "tv-shell-tv-box"
 #password_file = "~/.config/tv-shell/mqtt-password"
 
 # PEM CA bundle — OPTIONAL and usually unnecessary. The broker presents a
