@@ -4932,3 +4932,652 @@ fn startup_refusal_precedes_the_listener_bind() {
         "config::load() (which refuses an insecure bind) must run before TcpListener::bind"
     );
 }
+
+// ---------------------------------------------------------------------------
+// settings.json key ⇄ consumer attribution gate (#416)
+// ---------------------------------------------------------------------------
+//
+// The failure mode this closes has shipped twice, and #416 found a third case:
+// a `settings.json` key gets a rendered control — here in [`SCHEMA`], or on a
+// QML settings page — and NOTHING anywhere reads it. The control saves, the
+// daemon persists, the UI reports success, and the preference does nothing.
+// `overscan` was that for its whole life until #416 wired it into `shell.qml`.
+//
+// Same shape as `route_table_matches_main_rs_declarations`, deliberately:
+//
+//   * the KEY LIST is machine-derived from `SettingsStore.qml`'s `_schema`,
+//     the single declaration site;
+//   * the CONTROL surfaces are machine-derived too — [`SCHEMA`] for the panel,
+//     a scan of `shell/settings/*.qml` for the shell;
+//   * the one hand-maintained thing is [`settings_consumer_table`], and even
+//     that is verified against the file it names, so an attribution cannot
+//     outlive the consumer it points at.
+//
+// Adding a key with a control and no consumer therefore cannot pass: there is
+// no row to write for it that the gate accepts. Declaring one legitimately
+// consumer-free requires [`ReadBy::Nobody`] with a written justification,
+// which is visible in review instead of silent.
+
+/// Where a `settings.json` key is actually read, and the proof it still is.
+struct Attribution {
+    /// Repo-relative path of the consuming file.
+    file: &'static str,
+    /// A literal that must appear in `file`. Pick the expression that reads the
+    /// key (or the construct that acts on it) — NOT the bare key name, which a
+    /// stale doc comment would satisfy.
+    needle: &'static str,
+    /// Where the effect lands, when that is a different file from `file`.
+    /// Documentation for the reader; not enforced.
+    effect: &'static str,
+}
+
+/// How a `settings.json` key earns the control that writes it.
+enum ReadBy {
+    /// The daemon reads the key and acts on it.
+    Daemon(Attribution),
+    /// QML reads the key at render/apply time.
+    Qml(Attribution),
+    /// Deliberately has NO consumer. Legal ONLY for a key that renders no
+    /// control on either surface; the string is the justification.
+    ///
+    /// Unconstructed today — every key in the table has a consumer, which is
+    /// the point of #416. It stays because it is the escape hatch the gate is
+    /// designed around: a future render-only key needs a VISIBLE, justified
+    /// row here rather than a silent pass, and deleting the variant would
+    /// leave a contributor with no legal way to declare one.
+    #[allow(dead_code)]
+    Nobody(&'static str),
+}
+
+fn daemon(file: &'static str, needle: &'static str, effect: &'static str) -> ReadBy {
+    ReadBy::Daemon(Attribution {
+        file,
+        needle,
+        effect,
+    })
+}
+
+fn qml(file: &'static str, needle: &'static str, effect: &'static str) -> ReadBy {
+    ReadBy::Qml(Attribution {
+        file,
+        needle,
+        effect,
+    })
+}
+
+/// THE table: one row per key `SettingsStore.qml` declares, naming what reads
+/// it. `every_settings_key_has_a_named_consumer` asserts this is EXACTLY that
+/// key set, and that every named file still contains its needle.
+fn settings_consumer_table() -> Vec<(&'static str, ReadBy)> {
+    vec![
+        // ── Appearance ──────────────────────────────────────────────────────
+        (
+            "themeMode",
+            qml(
+                "shell/components/Theme.qml",
+                "SettingsStore.themeMode",
+                "drives the whole palette + the `auto` schedule timer",
+            ),
+        ),
+        (
+            "autoThemeDarkStart",
+            qml(
+                "shell/components/Theme.qml",
+                "SettingsStore.autoThemeDarkStart",
+                "the `auto` themeMode flip-to-dark hour",
+            ),
+        ),
+        (
+            "autoThemeLightStart",
+            qml(
+                "shell/components/Theme.qml",
+                "SettingsStore.autoThemeLightStart",
+                "the `auto` themeMode flip-to-light hour",
+            ),
+        ),
+        (
+            "reduceMotion",
+            qml(
+                "shell/components/Theme.qml",
+                "SettingsStore.reduceMotion",
+                "every animation duration in shell/components/lib/ collapses to 0",
+            ),
+        ),
+        (
+            "textScale",
+            qml(
+                "shell/components/Theme.qml",
+                "SettingsStore.textScale",
+                "multiplies every Theme.font* tier",
+            ),
+        ),
+        (
+            "wallpaperPath",
+            qml(
+                "shell/components/HomeScreen.qml",
+                "SettingsStore.wallpaperPath",
+                "the home-screen wallpaper Image source + visibility",
+            ),
+        ),
+        (
+            "widgets",
+            qml(
+                "shell/widgets/lib/WidgetRegistry.qml",
+                "SettingsStore.widget(",
+                "per-widget enabled/order/size for every home-screen widget",
+            ),
+        ),
+        // ── Input ───────────────────────────────────────────────────────────
+        (
+            "controllerDebug",
+            qml(
+                "shell/components/ShellLayout.qml",
+                "Theme.controllerDebug",
+                "maps the debug overlay and the key-event tracing",
+            ),
+        ),
+        (
+            "rumbleEnabled",
+            daemon(
+                "daemon/src/input/mod.rs",
+                "rumble_enabled_from",
+                "gates every daemon-fired rumble; refreshed on set-config",
+            ),
+        ),
+        (
+            "keyBindings",
+            daemon(
+                "daemon/src/config.rs",
+                "apply_binding_overrides",
+                "overrides the daemon's action->button table",
+            ),
+        ),
+        // ── Display ─────────────────────────────────────────────────────────
+        (
+            "hdrEnabled",
+            qml(
+                "shell/settings/DisplaySettings.qml",
+                "applyHdr(SettingsStore.hdrEnabled)",
+                "hyprctl keyword monitor, with/without the `cm,hdr` suffix",
+            ),
+        ),
+        (
+            "nightLightEnabled",
+            qml(
+                "shell/settings/DisplaySettings.qml",
+                "applyNightLightSetting(SettingsStore.nightLightEnabled",
+                "spawns/kills hyprsunset",
+            ),
+        ),
+        (
+            "nightLightTemp",
+            qml(
+                "shell/settings/DisplaySettings.qml",
+                "SettingsStore.nightLightTemp)",
+                "the -t argument handed to hyprsunset",
+            ),
+        ),
+        (
+            "overscan",
+            qml(
+                "shell/shell.qml",
+                "Components.SettingsStore.overscan",
+                "insets the shell PanelWindow's content rect per axis (#416)",
+            ),
+        ),
+        (
+            "autoDimEnabled",
+            qml(
+                "shell/components/DimOverlay.qml",
+                "SettingsStore.autoDimEnabled",
+                "arms the OLED auto-dim overlay",
+            ),
+        ),
+        (
+            "autoDimDelayMinutes",
+            qml(
+                "shell/components/DimOverlay.qml",
+                "SettingsStore.autoDimDelayMinutes",
+                "the auto-dim idle timer interval",
+            ),
+        ),
+        // ── Power ───────────────────────────────────────────────────────────
+        (
+            "sleepTimerMinutes",
+            qml(
+                "shell/components/AutoSuspendController.qml",
+                "SettingsStore.sleepTimerMinutes",
+                "the auto-suspend timer interval and its running gate",
+            ),
+        ),
+        (
+            "wakeOnController",
+            qml(
+                "shell/shell.qml",
+                "Components.SettingsStore.wakeOnController",
+                "gates avController.wake() on controller activity (#130)",
+            ),
+        ),
+        // ── Audio ───────────────────────────────────────────────────────────
+        //
+        // Both are read by the store itself: it owns the boot-time re-apply
+        // Processes, because nothing else re-asserts them after a reboot
+        // (WirePlumber and PipeWire both revert). The needle is the Process id,
+        // not the key, so deleting the re-apply fails this gate.
+        (
+            "defaultSink",
+            qml(
+                "shell/components/SettingsStore.qml",
+                "startupSinkApply",
+                "wpctl set-default at shell startup (#131)",
+            ),
+        ),
+        (
+            "audioCardProfile",
+            qml(
+                "shell/components/SettingsStore.qml",
+                "startupCardProfileApply",
+                "pactl set-card-profile at shell startup (#234)",
+            ),
+        ),
+        // ── CEC ─────────────────────────────────────────────────────────────
+        (
+            "cecFocusOnStartup",
+            daemon(
+                "daemon/src/cec.rs",
+                "cec_focus_on_startup(&",
+                "runs the wake/claim-active-source sequence once at daemon start",
+            ),
+        ),
+        (
+            "cecFocusOnWake",
+            daemon(
+                "daemon/src/cec.rs",
+                "cec_focus_on_wake(&",
+                "claims active source on resume from sleep",
+            ),
+        ),
+        (
+            "cecAutoSwitchOnPowerOn",
+            daemon(
+                "daemon/src/cec.rs",
+                // The worker-loop call, NOT `cec_auto_switch_on_power_on(` — that
+                // name appears in this crate only inside a comment in cec.rs's
+                // own `#[cfg(test)]` block, so it would satisfy this row without
+                // any production code reading the key. `note_auto_switch(` is the
+                // real consumer: defined at cec.rs:996 and called from
+                // `blocking_worker` at 1598/1617, both above the 1924 test boundary.
+                "note_auto_switch(",
+                "switches the TV/AVR input when a device powers on (#415)",
+            ),
+        ),
+        (
+            "cecDefaultInput",
+            daemon(
+                "daemon/src/cec.rs",
+                // #415 reads this through `CecBehavior`, not a bare
+                // `cec_default_input(` call, so the field access is the honest
+                // proof: cec.rs:976/983 (focus target) and 1062 (wake sequence).
+                "behavior.default_input",
+                "the logical address the auto-switch selects (#415)",
+            ),
+        ),
+        (
+            "cecDeviceNames",
+            qml(
+                "shell/settings/AVControlSettings.qml",
+                "SettingsStore.cecDeviceNames[",
+                "friendly-name override per logical address; panel/src/pages/cec.rs reads it too",
+            ),
+        ),
+        // ── Apps ────────────────────────────────────────────────────────────
+        (
+            "prewarmApps",
+            qml(
+                "shell/shell.qml",
+                "Components.SettingsStore.prewarmApps",
+                "handed to AppLifecycleManager, which silently launches them at login (#238)",
+            ),
+        ),
+        (
+            "webApps",
+            qml(
+                "shell/settings/WebAppsSettings.qml",
+                "SettingsStore.webApps",
+                "lists the daemon-owned registry; daemon/src/webapps.rs is the writer",
+            ),
+        ),
+    ]
+}
+
+/// Blank whole-line `//` comments, preserving byte offsets, so a commented-out
+/// schema row can never be parsed as a live one. Separate from
+/// `blank_comment_lines` only because that one's panic message names `main.rs`.
+fn blank_qml_comment_lines(src: &str) -> String {
+    src.lines()
+        .map(|l| {
+            if l.trim_start().starts_with("//") {
+                " ".repeat(l.len())
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One `_schema` row from `SettingsStore.qml`.
+struct QmlSettingKey {
+    key: String,
+    /// `noSave: true` — a daemon-owned key the store mirrors read-only and
+    /// never sends back in a `set-config` payload.
+    no_save: bool,
+}
+
+/// `SettingsStore.qml` verbatim. `include_str!` rather than a runtime read so a
+/// moved or renamed file is a COMPILE error, not a gate that quietly stops
+/// guarding anything.
+const SETTINGS_STORE_QML: &str = include_str!("../../shell/components/SettingsStore.qml");
+
+/// Parse the `_schema` table out of `SettingsStore.qml`. Strict on purpose: a
+/// row this cannot read is a key the gate cannot check, so it panics rather
+/// than skipping.
+fn parse_settings_store_schema(src: &str) -> Vec<QmlSettingKey> {
+    const MARKER: &str = "readonly property var _schema: [";
+    let src = blank_qml_comment_lines(src);
+    let open = src
+        .find(MARKER)
+        .expect("SettingsStore.qml must declare `readonly property var _schema: [`")
+        + MARKER.len();
+
+    // Walk to the `]` that closes the array (depth 1 on entry).
+    let mut depth = 1i32;
+    let mut close = None;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &src[open..close.expect("SettingsStore.qml: unterminated `_schema` array")];
+
+    // Each row is one brace-delimited object, and none of them nests braces.
+    let mut rows: Vec<&str> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' => {
+                if depth == 0 {
+                    start = i + 1;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                assert!(
+                    depth >= 0,
+                    "SettingsStore.qml: unbalanced `}}` in `_schema`"
+                );
+                if depth == 0 {
+                    rows.push(&body[start..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "SettingsStore.qml: unterminated `_schema` row");
+    assert_eq!(
+        rows.len(),
+        body.matches("key:").count(),
+        "SettingsStore.qml: the `_schema` parser found {} rows but {} `key:` fields — a row \
+         it cannot see is a key this gate cannot check",
+        rows.len(),
+        body.matches("key:").count()
+    );
+
+    rows.iter()
+        .map(|row| {
+            const K: &str = "key: \"";
+            let at = row.find(K).unwrap_or_else(|| {
+                panic!("SettingsStore.qml: `_schema` row with no `key:` — {row}")
+            }) + K.len();
+            let end = at
+                + row[at..].find('"').unwrap_or_else(|| {
+                    panic!("SettingsStore.qml: unterminated key literal — {row}")
+                });
+            QmlSettingKey {
+                key: row[at..end].to_string(),
+                no_save: row.contains("noSave: true"),
+            }
+        })
+        .collect()
+}
+
+/// The repo root — `panel/`'s parent. The gate reaches outside the crate on
+/// purpose: `settings.json` is one contract spanning the shell, the daemon and
+/// the panel, so a gate that could only see `panel/` would miss most of it.
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("CARGO_MANIFEST_DIR (panel/) must have a parent")
+        .to_path_buf()
+}
+
+/// Every key a QML settings page renders a control for: any `shell/settings/`
+/// page that reads `SettingsStore.<key>` or calls its `set<Key>(` setter.
+fn qml_control_keys(keys: &[String]) -> std::collections::BTreeSet<String> {
+    let dir = repo_root().join("shell/settings");
+    let mut sources: Vec<String> = Vec::new();
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("readdir entry").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("qml") {
+            sources.push(
+                std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display())),
+            );
+        }
+    }
+    assert!(
+        !sources.is_empty(),
+        "no .qml settings pages under {} — the control scan would pass vacuously",
+        dir.display()
+    );
+
+    let mut out = std::collections::BTreeSet::new();
+    for key in keys {
+        let mut setter = String::from("SettingsStore.set");
+        let mut chars = key.chars();
+        if let Some(first) = chars.next() {
+            setter.extend(first.to_uppercase());
+            setter.push_str(chars.as_str());
+        }
+        setter.push('(');
+        let read = format!("SettingsStore.{key}");
+        if sources
+            .iter()
+            .any(|s| s.contains(&read) || s.contains(&setter))
+        {
+            out.insert(key.clone());
+        }
+    }
+    out
+}
+
+/// The panel's typed schema must stay the QML store's schema minus the two
+/// daemon-owned mirrors — the "KEEP IN SYNC" note above [`SCHEMA`] with an
+/// assertion behind it. Drift here is how a key ends up editable on one
+/// surface and invisible on the other.
+#[test]
+fn panel_settings_schema_matches_the_qml_settings_store() {
+    let qml_keys = parse_settings_store_schema(SETTINGS_STORE_QML);
+
+    let expected: Vec<&str> = qml_keys
+        .iter()
+        .filter(|k| !k.no_save)
+        .map(|k| k.key.as_str())
+        .collect();
+    let actual: Vec<&str> = crate::pages::settings::SCHEMA
+        .iter()
+        .map(|f| f.key)
+        .collect();
+
+    for key in &expected {
+        assert!(
+            actual.contains(key),
+            "SettingsStore.qml declares `{key}` but panel SCHEMA does not — the panel cannot \
+             edit a key it has no field for. Add it to SCHEMA, or mark it `noSave` in the QML \
+             schema if the daemon owns it."
+        );
+    }
+    for key in &actual {
+        assert!(
+            expected.contains(key),
+            "panel SCHEMA has a field for `{key}` but SettingsStore.qml's `_schema` does not \
+             declare it — the store will drop the value on its next read-back."
+        );
+    }
+
+    // `noSave` keys are the daemon-owned mirrors, and the panel must agree they
+    // are read-only rather than render a typed input that cannot stick.
+    for k in qml_keys.iter().filter(|k| k.no_save) {
+        assert!(
+            crate::pages::settings::DAEMON_OWNED_KEYS.contains(&k.key.as_str()),
+            "`{}` is `noSave` in SettingsStore.qml (daemon-owned) but is not in the panel's \
+             DAEMON_OWNED_KEYS, so the panel would offer to write a key the store never sends",
+            k.key
+        );
+    }
+}
+
+/// THE gate. Every key `SettingsStore.qml` declares must have a row in
+/// [`settings_consumer_table`]; every row must name a file that still contains
+/// its needle; and a key declared consumer-free must render NO control on
+/// either surface.
+///
+/// This is what stops the failure mode that has now shipped three times: a
+/// control that saves a key nothing reads, so the UI reports an effect that
+/// never happens.
+#[test]
+fn every_settings_key_has_a_named_consumer() {
+    let declared: Vec<String> = parse_settings_store_schema(SETTINGS_STORE_QML)
+        .into_iter()
+        .map(|k| k.key)
+        .collect();
+    let table = settings_consumer_table();
+
+    // 1. The table is exactly the declared key set.
+    for key in &declared {
+        assert!(
+            table.iter().any(|(k, _)| k == key),
+            "settings key `{key}` is declared in SettingsStore.qml but has no row in \
+             settings_consumer_table(). Add one naming what reads it — or, if nothing does \
+             and nothing should, ReadBy::Nobody with the reason (and remove its \
+             controls)."
+        );
+    }
+    for (key, _) in &table {
+        assert!(
+            declared.iter().any(|d| d == key),
+            "settings_consumer_table() has a row for `{key}`, which SettingsStore.qml no \
+             longer declares — drop the row"
+        );
+    }
+
+    // 2. Where a control for each key is rendered.
+    let panel_controls: Vec<&str> = crate::pages::settings::SCHEMA
+        .iter()
+        .map(|f| f.key)
+        .collect();
+    let shell_controls = qml_control_keys(&declared);
+
+    // 3. Each attribution must still be true of the file it names.
+    let root = repo_root();
+    for (key, read_by) in &table {
+        let attribution = match read_by {
+            // The classification is load-bearing, not decorative: a `Daemon`
+            // row must name daemon (or protocol) source and a `Qml` row must
+            // name a .qml file, so a key cannot be filed under the wrong side
+            // of the IPC boundary and still pass.
+            ReadBy::Daemon(a) => {
+                assert!(
+                    a.file.starts_with("daemon/") || a.file.starts_with("protocol/"),
+                    "`{key}` is classified daemon-consumed but attributed to {}, which is not                      daemon source. Use ReadBy::Qml for a shell-side consumer.",
+                    a.file
+                );
+                a
+            }
+            ReadBy::Qml(a) => {
+                assert!(
+                    a.file.ends_with(".qml"),
+                    "`{key}` is classified QML-consumed but attributed to {}, which is not a                      .qml file. Use ReadBy::Daemon for a daemon-side consumer.",
+                    a.file
+                );
+                a
+            }
+            ReadBy::Nobody(why) => {
+                assert!(
+                    !why.trim().is_empty(),
+                    "`{key}` is declared read-by-nobody with an empty justification"
+                );
+                let panel = panel_controls.contains(key);
+                let shell = shell_controls.contains(*key);
+                assert!(
+                    !panel && !shell,
+                    "`{key}` is declared read-by-nobody ({why}) but renders a control \
+                     (panel SCHEMA: {panel}, shell/settings: {shell}). That is the exact bug \
+                     this gate exists for — the UI would report an effect nothing applies. \
+                     Wire it, or remove the control."
+                );
+                continue;
+            }
+        };
+
+        let path = root.join(attribution.file);
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "`{key}` is attributed to {}, which cannot be read ({e}). Point the row at the \
+                 file that consumes the key.",
+                attribution.file
+            )
+        });
+        // Only the PRODUCTION half of a Rust file counts. A needle that appears
+        // solely inside `#[cfg(test)]` proves nothing about what ships, and this
+        // is not hypothetical: `cecAutoSwitchOnPowerOn` was first attributed to
+        // `cec_auto_switch_on_power_on(`, a string occurring in daemon/src/cec.rs
+        // ONLY inside a comment in that file's own test module. The row passed
+        // while nothing in production read the key — the exact class of false
+        // attribution this gate exists to prevent.
+        let production = match src.find("\n#[cfg(test)]") {
+            Some(i) if attribution.file.ends_with(".rs") => &src[..i],
+            _ => &src[..],
+        };
+        assert!(
+            production.contains(attribution.needle),
+            "`{key}` is attributed to {}, whose production code no longer contains `{}`. Either \
+             the consumer moved (update the row) or it was deleted — in which case the control \
+             that writes `{key}` now reports an effect nothing applies. Effect was: {}",
+            attribution.file,
+            attribution.needle,
+            attribution.effect
+        );
+    }
+
+    // 4. Sanity: the control scan must actually find controls, or assertion 3's
+    //    Nobody arm would be toothless.
+    assert!(
+        shell_controls.len() > 10,
+        "the shell settings-page control scan found only {} keys — it has probably stopped \
+         matching, which would let a read-by-nobody key keep a live control",
+        shell_controls.len()
+    );
+}
