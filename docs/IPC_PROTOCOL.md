@@ -14,7 +14,7 @@ The input/backend daemon (`tv-shell-input`, Rust source in `daemon/`) communicat
 
 The daemon removes any existing socket file on startup and creates a new one. Clients connect, send one command per line, and read the response. The `subscribe` command is the exception — it holds the connection open and streams events.
 
-Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, `webapp-list`, `webapp-add`, `get-notifications`, `record-notification`, `set-notifications`, the shell's `shell-state` push, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, `net-throughput`, `net-ping`, and `power-battery`, the Phase 4 query replies `hypr-active`, `hypr-clients`, `hypr-monitors`, and `sunshine-status`, the CEC query replies `cec-scan`, `cec-health`, and `cec-test`, and the `capabilities` handshake. JSON only ever appears as such a body — never as the framing itself.
+Commands and responses are **bare newline-delimited text**. A few commands carry a compact single-line JSON *body* (as a request argument and/or response): `get-bindings`, `get-pads`, `list-input-devices`, `list-apps`, `get-config`, `set-config`, `record-launch`, `get-recents`, `webapp-list`, `webapp-add`, `get-notifications`, `record-notification`, `set-notifications`, the shell's `shell-state` push, the Phase 3 query replies `bt-list`, `net-status`, `net-wifi-list`, `net-throughput`, `net-ping`, and `power-battery`, the Phase 4 query replies `hypr-active`, `hypr-clients`, `hypr-monitors`, and `sunshine-status`, the display-mode replies `hypr-display-state`, `hypr-set-mode`, `hypr-set-vrr`, `hypr-display-confirm` and `hypr-display-revert`, the CEC query replies `cec-scan`, `cec-health`, and `cec-test`, and the `capabilities` handshake. JSON only ever appears as such a body — never as the framing itself.
 
 ## Client-to-Daemon Commands
 
@@ -1268,6 +1268,125 @@ List all Hyprland monitors. Sends `j/monitors` to Hyprland's request socket.
 
 An empty result (or any IPC failure) is `[]`. On a non-Linux build:
 `error:unsupported on this platform\n`.
+
+### Display mode (resolution / refresh / VRR)
+
+Five commands that **write** compositor state, routed through the same Hyprland
+actor as the reads above. They exist for the panel's Devices ▸ Display & Audio
+controls; the pure line-rewriting and config-file logic they use is
+`daemon/src/display_mode.rs`.
+
+Three properties are worth stating before the reference, because they are the
+whole design:
+
+1. **Every change is provisional.** `hypr-set-mode` and `hypr-set-vrr` apply
+   immediately and arm a **15-second revert timer inside the daemon**. If no
+   `hypr-display-confirm` arrives, the previous `monitor=` line is re-applied
+   automatically. The shell's display is a TV with no keyboard — a mode it
+   cannot lock would otherwise be unrecoverable without SSH — and the timer
+   lives in the daemon rather than the client because a revert that depends on
+   a browser tab staying open is not a safety net. (If the daemon itself dies
+   inside the window, the timer dies with it; nothing was persisted, so a
+   compositor restart still restores the configured line.)
+2. **Only a confirm persists.** `hypr-display-confirm` writes the change to
+   `~/.config/tv-shell/hyprland-local.conf` — the per-machine override
+   `config/hyprland.conf` already `source`s — and nothing else writes anything.
+3. **A change rewrites one field of the existing `monitor=` line**, never
+   composes a fresh one. `hypr-monitors` reports mode, position and scale but
+   **not** `bitdepth`, `cm`, `sdrbrightness` or `sdrsaturation`, so a rebuilt
+   line would silently drop a 10-bit HDR setup while reporting success. The
+   base line comes from `hyprland-local.conf` when it declares one, and is
+   synthesized from the live read only for an output the file never mentions.
+
+Only one change may be pending at a time: applying a second while one is
+unconfirmed is `error:a display change on '<output>' is already awaiting
+confirmation — confirm or revert it first`.
+
+On a non-Linux build all five reply `error:unsupported on this platform\n`.
+
+#### `hypr-display-state`
+
+Everything the panel's controls need in one round trip.
+
+**Response:** a compact single-line JSON object:
+
+```json
+{"displays":[{"name":"HDMI-A-1","description":"LG C2","currentMode":"3840x2160@120","currentLabel":"3840 × 2160 @ 120 Hz","currentFormat":"XRGB2101010","hdr":true,"dpmsStatus":true,"vrrActive":true,"configuredLine":"HDMI-A-1,3840x2160@120,0x0,2,vrr,1,bitdepth,10,cm,hdr","configuredVrr":1,"modes":[{"value":"3840x2160@120","label":"3840 × 2160 @ 120 Hz","current":true}]}],"pending":null,"revertSeconds":15,"configPath":"/home/u/.config/tv-shell/hyprland-local.conf","configPresent":true}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `displays[].name` / `description` | string | As `hypr-monitors` |
+| `displays[].currentMode` | string \| null | `WIDTHxHEIGHT@REFRESH`, or `null` when the output reports no usable mode |
+| `displays[].currentLabel` | string \| null | The same mode, formatted for display |
+| `displays[].currentFormat` / `hdr` / `dpmsStatus` | — | As `hypr-monitors` |
+| `displays[].vrrActive` | bool | What Hyprland reports as active **now**. Not the configured value: mode `2` reads back inactive whenever nothing is fullscreen |
+| `displays[].configuredLine` | string \| null | The output's `monitor=` value in `hyprland-local.conf`, or `null` when it declares none |
+| `displays[].configuredVrr` | number \| null | The `vrr` argument on that line (`0`/`1`/`2`), or `null` |
+| `displays[].modes` | array | `{value,label,current}` — the output's `availableModes`, parseable entries only, de-duplicated by rounded refresh and ordered largest-and-fastest first. This is the same list `hypr-set-mode` validates against |
+| `pending` | object \| null | `{monitor,applied,previous,secondsRemaining}` while a change awaits confirmation |
+| `revertSeconds` | number | The confirm window |
+| `configPath` / `configPresent` | string / bool | Where a confirm would write, and whether that file exists yet |
+
+An IPC failure degrades to an empty `displays` array rather than erroring.
+
+#### `hypr-set-mode <output> <WIDTHxHEIGHT@REFRESH>`
+
+Apply a mode and arm the revert timer. The mode must be one the output reports
+in `availableModes` (compared with Hyprland's own rounding tolerance, so
+`3840x2160@120` matches a reported `3840x2160@119.99800Hz`); anything else is
+rejected before a keyword is issued. Position, scale and every extra argument
+on the line are preserved.
+
+**Response:** `{"ok":true,"monitor":"HDMI-A-1","applied":"<monitor= value>","previous":"<monitor= value>","fromConfig":true,"revertSeconds":15}`, or
+`{"ok":true,"monitor":"…","applied":"…","unchanged":true}` when the request
+would change nothing (no timer is armed in that case).
+
+**Errors:** `error:usage: hypr-set-mode <output> <WIDTHxHEIGHT@REFRESH>`,
+`error:no such output '<name>'`, `error:output '<name>' does not report mode
+<mode> as available`, or the compositor's own rejection.
+
+#### `hypr-set-vrr <output> <0|1|2>`
+
+Set that output's own `vrr` argument — `0` off, `1` on, `2` fullscreen only —
+and arm the revert timer. Written **per-output rather than as `misc:vrr`**,
+because Hyprland's per-monitor `vrr` overrides the global one and the reference
+config for this shell ships exactly such a line, so `keyword misc:vrr` would be
+a no-op on a configured output. A line with no `vrr` argument gains one. The
+resolution field is untouched, so a VRR change cannot move the display off its
+current mode.
+
+**Response:** the same shape as `hypr-set-mode`.
+
+**Errors:** `error:usage: hypr-set-vrr <output> <0|1|2>` (including for a value
+above `2` — a usage error, never a clamp), `error:no such output '<name>'`.
+
+#### `hypr-display-confirm`
+
+Keep the pending change and write it to `hyprland-local.conf`. Only the one
+`monitor=` line for that output is rewritten (or appended when the file
+declares none); indentation, trailing comments and every other line survive
+byte-identical.
+
+**Response:** `{"ok":true,"monitor":"…","line":"…","persisted":true,"configPath":"…"}`.
+
+A failed write does **not** un-confirm — the mode is live and the caller asked
+to keep it — and is reported honestly as
+`{"ok":true,…,"persisted":false,"persistError":"…","configPath":"…"}`: kept for
+this session, gone on the next compositor restart.
+
+**Errors:** `error:no display change is awaiting confirmation`.
+
+#### `hypr-display-revert`
+
+Re-apply the previous `monitor=` line immediately instead of waiting for the
+timer.
+
+**Response:** `{"ok":true,"monitor":"…","reverted":"<monitor= value>","cause":"manual"}`.
+
+**Errors:** `error:no display change is awaiting confirmation`, or the
+compositor's own rejection (logged at `error` — the display may be left on the
+provisional mode).
 
 ### Sunshine session detection (`reqwest`)
 

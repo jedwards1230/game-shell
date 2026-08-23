@@ -388,6 +388,11 @@ async fn dispatch_stateless(
             Some(health::handle_sunshine_status(host, port).await)
         }
         Command::SunshineStatusUsage => Some(protocol::resp_sunshine_status_usage()),
+        // Display-mode usage errors are stateless: the command never reaches
+        // the Hyprland actor, so the reply is the same with or without a
+        // compositor.
+        Command::HyprSetModeUsage => Some(protocol::resp_hypr_set_mode_usage()),
+        Command::HyprSetVrrUsage => Some(protocol::resp_hypr_set_vrr_usage()),
         // Wake-on-LAN: send a magic packet to a streaming host whose Steam row is
         // showing the "Wake host" card. Stateless + cross-platform (UDP
         // broadcast). Missing host routes to `WolUsage`; an unresolvable MAC
@@ -846,6 +851,10 @@ async fn dispatch(
         // Phase 4 Sunshine is stateless (consumed by `dispatch_stateless`).
         | Command::SunshineStatus { .. }
         | Command::SunshineStatusUsage
+        // Display-mode usage errors are stateless (consumed by `dispatch_stateless`);
+        // the four real commands go to the Hyprland actor via `dispatch_dbus`.
+        | Command::HyprSetModeUsage
+        | Command::HyprSetVrrUsage
         // Wake-on-LAN is stateless (consumed by `dispatch_stateless`).
         | Command::Wol { .. }
         | Command::WolUsage
@@ -910,6 +919,11 @@ async fn dispatch(
         | Command::HyprActive
         | Command::HyprClients
         | Command::HyprMonitors
+        | Command::HyprDisplayState
+        | Command::HyprSetMode { .. }
+        | Command::HyprSetVrr { .. }
+        | Command::HyprDisplayConfirm
+        | Command::HyprDisplayRevert
         // CEC commands fall through to dispatch_dbus (unsupported response) — not reached.
         | Command::CecScan
         | Command::CecDevice(_)
@@ -972,6 +986,31 @@ pub(crate) async fn dispatch_dbus(dbus: &DbusSenders, cmd: &Command) -> Option<S
         Command::HyprActive => request_dbus(&dbus.hypr, HyprReq::Active).await,
         Command::HyprClients => request_dbus(&dbus.hypr, HyprReq::Clients).await,
         Command::HyprMonitors => request_dbus(&dbus.hypr, HyprReq::Monitors).await,
+        // Display mode (resolution / refresh / VRR). Routed through the same
+        // actor as the reads because it owns the compositor socket AND the
+        // pending confirm-or-revert change — see `hyprland`'s display-mode
+        // section for why that timer lives in the daemon rather than the panel.
+        Command::HyprDisplayState => request_dbus(&dbus.hypr, HyprReq::DisplayState).await,
+        Command::HyprSetMode { monitor, mode } => {
+            let (monitor, mode) = (monitor.clone(), mode.clone());
+            request_dbus(&dbus.hypr, move |reply| HyprReq::SetMode {
+                monitor,
+                mode,
+                reply,
+            })
+            .await
+        }
+        Command::HyprSetVrr { monitor, vrr } => {
+            let (monitor, vrr) = (monitor.clone(), *vrr);
+            request_dbus(&dbus.hypr, move |reply| HyprReq::SetVrr {
+                monitor,
+                vrr,
+                reply,
+            })
+            .await
+        }
+        Command::HyprDisplayConfirm => request_dbus(&dbus.hypr, HyprReq::DisplayConfirm).await,
+        Command::HyprDisplayRevert => request_dbus(&dbus.hypr, HyprReq::DisplayRevert).await,
         // HDMI-CEC (#94): the `cec` field exists only under `feature = "cec"`,
         // so the live arms are feature-gated; the default Linux build keeps the
         // `resp_unsupported()` fallthrough (libcec isn't linked there).
@@ -1047,6 +1086,11 @@ pub(crate) async fn dispatch_dbus(_dbus: &DbusSenders, cmd: &Command) -> Option<
         | Command::HyprActive
         | Command::HyprClients
         | Command::HyprMonitors
+        | Command::HyprDisplayState
+        | Command::HyprSetMode { .. }
+        | Command::HyprSetVrr { .. }
+        | Command::HyprDisplayConfirm
+        | Command::HyprDisplayRevert
         | Command::CecScan
         | Command::CecDevice(_)
         | Command::CecPowerOn(_)

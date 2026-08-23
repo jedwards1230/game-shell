@@ -180,7 +180,7 @@ them, fail-closed when nothing is declared — see PANEL.md's
 | Page | From | Notes |
 |---|---|---|
 | **Controllers** | Controllers | ✅ landed at `/devices/controllers` in phase 1 — already single-subject; phase 3 added Settings' `Input` group (`controllerDebug`, `rumbleEnabled`), which is the same subject |
-| **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | ✅ landed in phase 3 at `/devices/display-audio`; phase 4 added Tools' two power probes beside the `Power` group |
+| **Display & Audio** | Settings (Display, Night Light, Power, Audio groups) | ✅ landed in phase 3 at `/devices/display-audio`; phase 4 added Tools' two power probes beside the `Power` group; a **Display mode** section (resolution / refresh / VRR) was added later — the page's first controls that are Hyprland compositor state rather than a `settings.json` slice, with their own IPC path and a confirm-or-revert timer ([PANEL.md § Display mode](PANEL.md#display-mode-resolution-refresh-vrr)) |
 | **CEC** | CEC + Settings (CEC group) | ✅ landed in phase 3 — config and actions on one page. The `settings.json` group stays visibly distinct from the `[cec].osd_name` `config.toml` editor beneath it |
 | **Network** | Tools (Network, Bluetooth) | ✅ landed in phase 4 at `/devices/network`. Node tier: these commands map to no declared `Feature` |
 

@@ -195,6 +195,35 @@ pub enum Command {
     /// READ.
     HyprMonitors,
 
+    // --- Display mode: resolution / refresh / VRR (see `crate::display_mode`) ---
+    /// `hypr-display-state` -> compact JSON `{monitors,configured,pending,
+    /// revertSeconds,configPath,configPresent}`: everything the panel's
+    /// Display & Audio controls need in one round trip.
+    HyprDisplayState,
+    /// `hypr-set-mode <NAME> <WIDTHxHEIGHT@REFRESH>` -> apply the mode to that
+    /// output and arm the confirm-or-revert timer. The mode must be one the
+    /// output reports in `availableModes`.
+    HyprSetMode {
+        monitor: String,
+        mode: String,
+    },
+    /// `hypr-set-mode` with a missing/incomplete `<name> <mode>` body.
+    HyprSetModeUsage,
+    /// `hypr-set-vrr <NAME> <0|1|2>` -> set that output's own `vrr` argument
+    /// (0 off, 1 on, 2 fullscreen only) and arm the confirm-or-revert timer.
+    /// Per-output rather than `misc:vrr`, which a configured output overrides.
+    HyprSetVrr {
+        monitor: String,
+        vrr: u8,
+    },
+    /// `hypr-set-vrr` with a missing/incomplete or out-of-range body.
+    HyprSetVrrUsage,
+    /// `hypr-display-confirm` -> keep the pending change and persist it to
+    /// `hyprland-local.conf`. The only path that writes to disk.
+    HyprDisplayConfirm,
+    /// `hypr-display-revert` -> restore the previous `monitor=` line now.
+    HyprDisplayRevert,
+
     // --- Phase 4: Sunshine session detection (reqwest) ---
     /// `sunshine-status <host> <port>` -> compact JSON object
     /// `{online,paired,currentApp,httpsPort}` parsed from Sunshine's
@@ -577,6 +606,9 @@ impl Command {
             "hypr-active" => Command::HyprActive,
             "hypr-clients" => Command::HyprClients,
             "hypr-monitors" => Command::HyprMonitors,
+            "hypr-display-state" => Command::HyprDisplayState,
+            "hypr-display-confirm" => Command::HyprDisplayConfirm,
+            "hypr-display-revert" => Command::HyprDisplayRevert,
             // Phase 4 HDMI-CEC bare commands (no body).
             "cec-scan" => Command::CecScan,
             "cec-active-source" => Command::CecActiveSource,
@@ -704,6 +736,36 @@ impl Command {
                 // whitespace-separated tokens. A missing/incomplete body is a
                 // usage error. `command_body` enforces the word boundary so
                 // e.g. `sunshine-statusX` is not mistaken for the command.
+                // `hypr-set-mode <name> <WxH@R>`: two whitespace-separated
+                // tokens. The mode is validated against the output's own
+                // `availableModes` by the handler, not here — parsing only
+                // establishes that both tokens are present.
+                if let Some(body) = command_body(cmd, "hypr-set-mode") {
+                    let mut toks = body.split_whitespace();
+                    return match (toks.next(), toks.next()) {
+                        (Some(monitor), Some(mode)) => Command::HyprSetMode {
+                            monitor: monitor.to_string(),
+                            mode: mode.to_string(),
+                        },
+                        _ => Command::HyprSetModeUsage,
+                    };
+                }
+                // `hypr-set-vrr <name> <0|1|2>`: an out-of-range or
+                // non-numeric second token is a usage error rather than a
+                // silently clamped value — this writes a compositor keyword.
+                if let Some(body) = command_body(cmd, "hypr-set-vrr") {
+                    let mut toks = body.split_whitespace();
+                    return match (toks.next(), toks.next()) {
+                        (Some(monitor), Some(vrr)) => match vrr.parse::<u8>() {
+                            Ok(v) if v <= 2 => Command::HyprSetVrr {
+                                monitor: monitor.to_string(),
+                                vrr: v,
+                            },
+                            _ => Command::HyprSetVrrUsage,
+                        },
+                        _ => Command::HyprSetVrrUsage,
+                    };
+                }
                 if let Some(body) = command_body(cmd, "sunshine-status") {
                     let mut toks = body.split_whitespace();
                     return match (toks.next(), toks.next()) {
@@ -1472,6 +1534,17 @@ pub fn cec_unavailable_json(reason: &str, since_millis: u64) -> String {
     cec_health_json("unavailable", Some(reason), since_millis, None)
 }
 
+/// Usage line for `hypr-set-mode` issued without a `<name> <mode>` body.
+pub fn resp_hypr_set_mode_usage() -> String {
+    "error:usage: hypr-set-mode <output> <WIDTHxHEIGHT@REFRESH>".to_string()
+}
+
+/// Usage line for `hypr-set-vrr` issued without a `<name> <0|1|2>` body (or
+/// with a value outside that range).
+pub fn resp_hypr_set_vrr_usage() -> String {
+    "error:usage: hypr-set-vrr <output> <0|1|2>".to_string()
+}
+
 /// Usage line for `sunshine-status` issued without a `<host> <port>` body.
 pub fn resp_sunshine_status_usage() -> String {
     "error:usage: sunshine-status <host> <port>".to_string()
@@ -2131,6 +2204,70 @@ mod tests {
         assert_eq!(Command::parse("  hypr-monitors  "), Command::HyprMonitors);
         // Word boundary: a longer word is NOT hypr-monitors.
         assert_eq!(Command::parse("hypr-monitorsX"), Command::Unknown);
+    }
+
+    #[test]
+    fn parses_the_bare_display_mode_commands() {
+        assert_eq!(
+            Command::parse("hypr-display-state"),
+            Command::HyprDisplayState
+        );
+        assert_eq!(
+            Command::parse("  hypr-display-confirm  "),
+            Command::HyprDisplayConfirm
+        );
+        assert_eq!(
+            Command::parse("hypr-display-revert"),
+            Command::HyprDisplayRevert
+        );
+        assert_eq!(Command::parse("hypr-display-stateX"), Command::Unknown);
+    }
+
+    #[test]
+    fn parses_hypr_set_mode_body() {
+        assert_eq!(
+            Command::parse("hypr-set-mode HDMI-A-1 3840x2160@120"),
+            Command::HyprSetMode {
+                monitor: "HDMI-A-1".into(),
+                mode: "3840x2160@120".into(),
+            }
+        );
+        // Both tokens are required; the mode itself is validated by the
+        // handler against the output's own availableModes.
+        assert_eq!(
+            Command::parse("hypr-set-mode HDMI-A-1"),
+            Command::HyprSetModeUsage
+        );
+        assert_eq!(Command::parse("hypr-set-mode"), Command::HyprSetModeUsage);
+        // Word boundary.
+        assert_eq!(Command::parse("hypr-set-modeX a b"), Command::Unknown);
+    }
+
+    #[test]
+    fn parses_hypr_set_vrr_body_and_rejects_out_of_range() {
+        for (n, want) in [(0u8, "0"), (1, "1"), (2, "2")] {
+            assert_eq!(
+                Command::parse(&format!("hypr-set-vrr HDMI-A-1 {want}")),
+                Command::HyprSetVrr {
+                    monitor: "HDMI-A-1".into(),
+                    vrr: n,
+                }
+            );
+        }
+        // 3 is not a Hyprland VRR mode — a usage error, never a clamp.
+        assert_eq!(
+            Command::parse("hypr-set-vrr HDMI-A-1 3"),
+            Command::HyprSetVrrUsage
+        );
+        assert_eq!(
+            Command::parse("hypr-set-vrr HDMI-A-1 on"),
+            Command::HyprSetVrrUsage
+        );
+        assert_eq!(
+            Command::parse("hypr-set-vrr HDMI-A-1"),
+            Command::HyprSetVrrUsage
+        );
+        assert_eq!(Command::parse("hypr-set-vrrX a 1"), Command::Unknown);
     }
 
     #[test]

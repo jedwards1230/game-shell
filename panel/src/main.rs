@@ -288,6 +288,30 @@ fn build_router(state: SharedState) -> Router {
                 "/devices/display-audio/power/battery",
                 post(pages::display_audio::power_battery),
             )
+            // The Hyprland display-mode section of the same page. Node tier
+            // for the same reason the two probes above are: these are IPC
+            // commands that map to no declared `Feature`. Deliberately NOT
+            // intersected with `allow_dangerous` — see `pages::display_mode`.
+            .route(
+                "/devices/display-audio/mode",
+                get(pages::display_mode::section),
+            )
+            .route(
+                "/devices/display-audio/mode/apply",
+                post(pages::display_mode::apply),
+            )
+            .route(
+                "/devices/display-audio/mode/vrr",
+                post(pages::display_mode::vrr),
+            )
+            .route(
+                "/devices/display-audio/mode/confirm",
+                post(pages::display_mode::confirm),
+            )
+            .route(
+                "/devices/display-audio/mode/revert",
+                post(pages::display_mode::revert),
+            )
             .route("/remote/navigation", get(pages::navigation::page))
             .route("/remote/navigation/intent", post(pages::navigation::intent))
             .route("/remote/navigation/key", post(pages::navigation::key))
