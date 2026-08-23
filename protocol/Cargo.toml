@@ -4,6 +4,9 @@ name = "tv-shell-protocol"
 # under its own tag series, and nothing reports its `CARGO_PKG_VERSION`. A
 # plausible-looking `0.1.0` here would be a version that can't distinguish two
 # builds — the exact failure this workspace just removed from host/daemon.
+# Where to look instead for a node's version: the daemon/host `agent_version`
+# in `Capabilities` (`daemon/src/ipc.rs`, `host/src/main.rs`), which their
+# release workflows stamp. See docs/MULTI_NODE_PANEL.md §5.
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true

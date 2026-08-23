@@ -274,15 +274,45 @@ is which box is acceptable as the holder of desktop-2's token, and whether a
 sleeping htpc-1 taking the sidecar's UI down with it is acceptable. Unresolved
 here on purpose; it is a deployment decision, not a design one.
 
-### 5. Fix the version while you're here
+### 5. Versioning: what each crate reports, and why the panel reports nothing
 
-`Capabilities.agent_version` must carry the real release version. Today
-`daemon_version` and `host_version` come from `env!("CARGO_PKG_VERSION")`, every
-crate is still `version = "0.1.0"`, and no release workflow writes the tag into
-`Cargo.toml` — so both the HA entities and any capability handshake would report
-`0.1.0` forever while `input-v0.2.2` / `host-v0.6.0` are deployed. Inject the tag
-at build time or bump `Cargo.toml` in the release flow; a version that can't
-distinguish two releases is worse than absent, because it invites trust.
+**Resolved — the panel is deliberately versionless.** An earlier draft of this
+section claimed "every crate is still `version = "0.1.0"`" and asked for the tag
+to be injected at build time. Both halves were wrong, and the record is corrected
+here.
+
+What is actually true:
+
+- **`daemon` and `host` carry real released versions.** Their release workflows
+  (`release-input.yml`, `release-host.yml`) stamp the computed tag into
+  `Cargo.toml` before `cargo build`, so `env!("CARGO_PKG_VERSION")` is accurate
+  *in a release build*. `Capabilities.agent_version` is set from it at
+  `daemon/src/ipc.rs:552` and `host/src/main.rs:571`.
+- **`panel` and `protocol` are pinned `0.0.0` on purpose.** Neither is
+  distributed as a release artifact; the panel is compiled on-box by
+  `scripts/install.sh` / `/dev/build`, and `protocol` is an internal path-only
+  crate. A `panel-v*` tag stream would stamp a number into a release artifact
+  nobody installs, while the deployed panel kept reporting the manifest value —
+  fixed in appearance, unchanged in fact.
+- **The panel never reports a version at all.** `panel/` contains no
+  `CARGO_PKG_VERSION` reference; the panel only ever *consumes* `agent_version`
+  from the nodes it talks to. So its `0.0.0` is not a value anyone sees — there is
+  no panel-side handshake for it to leak into.
+
+So, to answer "what is deployed":
+
+| Question | Look at |
+|---|---|
+| Which panel build is running? | `build-info`'s **sha + branch** — the only thing that identifies a source-built binary |
+| Which daemon/host is a node running? | that node's **`agent_version`** in `Capabilities` |
+
+**Caveat on `agent_version`, worth knowing before you trust it.** Because the
+release workflows stamp `Cargo.toml` *without committing it*, any **source-built**
+deploy reports the manifest's checked-in value, which is the *previous* release.
+A box built from `main` can therefore advertise a **lower** version than one
+running the release artifact, while actually being newer. The label answers
+"which release artifact is this", not "which code is this" — for the latter, use
+sha + branch.
 
 ---
 

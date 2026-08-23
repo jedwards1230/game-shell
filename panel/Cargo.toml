@@ -4,6 +4,10 @@ name = "tv-shell-panel"
 # source on-device) and nothing reads its `CARGO_PKG_VERSION`. If a stream is
 # ever added, give it the host/daemon treatment — a release workflow that stamps
 # the tag here — rather than hand-maintaining a number nothing verifies.
+# Where to look instead: `build-info`'s sha + branch identifies a source-built
+# panel. This crate emits no version at all — there is no `CARGO_PKG_VERSION`
+# reference anywhere in `panel/`; the panel only consumes `agent_version` from
+# the nodes it talks to. See docs/MULTI_NODE_PANEL.md §5.
 version = "0.0.0"
 edition.workspace = true
 # Not inherited from the workspace (1.75): axum/reqwest/askama transitives pull
