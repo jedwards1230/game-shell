@@ -637,7 +637,7 @@ SettingsPageBase {
         }
 
         Text {
-            text: "Overscan drives the shell safe-area margin (applied at next restart)."
+            text: "Insets the shell by this percent so nothing lands in the area a TV crops. Applies immediately."
             font.pixelSize: Theme.fontHint
             color: Theme.textMuted
         }

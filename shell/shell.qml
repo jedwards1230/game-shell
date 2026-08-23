@@ -629,7 +629,31 @@ ShellRoot {
 
             Components.ShellLayout {
                 id: layout
+
+                // #416: safe-area overscan. The persisted `overscan` percent
+                // insets the shell's content rect so nothing lands in the
+                // region a TV that overscans crops away. Per-axis on purpose (a
+                // percent of each dimension, not of one of them), and measured
+                // off `parent` — the window's content item — so the margins
+                // never feed back into this item's own size. The exposed border
+                // is then the PanelWindow's `color`: Theme.background whenever
+                // the shell owns the screen.
+                //
+                // This is the ONLY consumer of the key. Delete these bindings
+                // and the Overscan control on Settings > Display (and the
+                // panel's Display group) goes back to reporting an effect that
+                // nothing applies — which is what it did until #416. The
+                // settings-consumer gate in panel/src/tests.rs names this file
+                // for exactly that reason.
+                readonly property int overscanX: Math.round(parent.width * Components.SettingsStore.overscan / 100)
+                readonly property int overscanY: Math.round(parent.height * Components.SettingsStore.overscan / 100)
+
                 anchors.fill: parent
+                anchors.leftMargin: layout.overscanX
+                anchors.rightMargin: layout.overscanX
+                anchors.topMargin: layout.overscanY
+                anchors.bottomMargin: layout.overscanY
+
                 Component.onCompleted: {
                     root._layout = layout;
                     root._layout.focusHome();
