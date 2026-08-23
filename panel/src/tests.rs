@@ -5201,7 +5201,13 @@ fn settings_consumer_table() -> Vec<(&'static str, ReadBy)> {
             "cecAutoSwitchOnPowerOn",
             daemon(
                 "daemon/src/cec.rs",
-                "cec_auto_switch_on_power_on(",
+                // The worker-loop call, NOT `cec_auto_switch_on_power_on(` — that
+                // name appears in this crate only inside a comment in cec.rs's
+                // own `#[cfg(test)]` block, so it would satisfy this row without
+                // any production code reading the key. `note_auto_switch(` is the
+                // real consumer: defined at cec.rs:996 and called from
+                // `blocking_worker` at 1598/1617, both above the 1924 test boundary.
+                "note_auto_switch(",
                 "switches the TV/AVR input when a device powers on (#415)",
             ),
         ),
@@ -5209,7 +5215,10 @@ fn settings_consumer_table() -> Vec<(&'static str, ReadBy)> {
             "cecDefaultInput",
             daemon(
                 "daemon/src/cec.rs",
-                "cec_default_input(",
+                // #415 reads this through `CecBehavior`, not a bare
+                // `cec_default_input(` call, so the field access is the honest
+                // proof: cec.rs:976/983 (focus target) and 1062 (wake sequence).
+                "behavior.default_input",
                 "the logical address the auto-switch selects (#415)",
             ),
         ),
@@ -5541,11 +5550,22 @@ fn every_settings_key_has_a_named_consumer() {
                 attribution.file
             )
         });
+        // Only the PRODUCTION half of a Rust file counts. A needle that appears
+        // solely inside `#[cfg(test)]` proves nothing about what ships, and this
+        // is not hypothetical: `cecAutoSwitchOnPowerOn` was first attributed to
+        // `cec_auto_switch_on_power_on(`, a string occurring in daemon/src/cec.rs
+        // ONLY inside a comment in that file's own test module. The row passed
+        // while nothing in production read the key — the exact class of false
+        // attribution this gate exists to prevent.
+        let production = match src.find("\n#[cfg(test)]") {
+            Some(i) if attribution.file.ends_with(".rs") => &src[..i],
+            _ => &src[..],
+        };
         assert!(
-            src.contains(attribution.needle),
-            "`{key}` is attributed to {}, which no longer contains `{}`. Either the consumer \
-             moved (update the row) or it was deleted — in which case the control that writes \
-             `{key}` now reports an effect nothing applies. Effect was: {}",
+            production.contains(attribution.needle),
+            "`{key}` is attributed to {}, whose production code no longer contains `{}`. Either \
+             the consumer moved (update the row) or it was deleted — in which case the control \
+             that writes `{key}` now reports an effect nothing applies. Effect was: {}",
             attribution.file,
             attribution.needle,
             attribution.effect
