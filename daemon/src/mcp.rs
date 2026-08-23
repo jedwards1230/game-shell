@@ -1415,6 +1415,18 @@ mod tests {
              `ShellLayout.openSettings` intercepts, it is not a settings page at all \
              — serve it from `open_widgets` instead."
         );
+
+        // Set equality above already fails when either side gains or loses a
+        // slug, so this count is not redundant with it — it guards the case set
+        // equality cannot see: a parser that silently under-reads BOTH sources
+        // (a restructured `sections` block, a reformatted `as_str`) and agrees
+        // with itself on a subset. Bump it deliberately when a page is added.
+        assert_eq!(
+            qml_settings_pages().len(),
+            12,
+            "expected the 12 pages SettingsApp.qml registers — if you added or \
+             removed one, update this count in the same change"
+        );
     }
 
     /// The other half of the same drift: a slug ShellLayout steals before
