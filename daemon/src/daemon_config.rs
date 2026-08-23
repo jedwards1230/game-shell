@@ -212,8 +212,8 @@ pub struct MqttConfig {
     /// The device identity. EXPLICIT ONLY — never derived from hostname, OS, or
     /// IP. Required whenever `broker` is set; startup FAILS if it is missing.
     pub device_id: Option<String>,
-    /// MQTT username (conventionally `tv-shell-<device_id>`). Must be set together with
-    /// `password_file`, or neither.
+    /// MQTT username (conventionally `tv-shell-<device_id>`). Must be set
+    /// together with `password_file`, or neither.
     pub username: Option<String>,
     /// 0600 file under the config dir, resolved like every other token file.
     pub password_file: Option<String>,

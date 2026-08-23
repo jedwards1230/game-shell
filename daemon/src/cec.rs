@@ -372,9 +372,9 @@ fn reopen_connection(
         // so a reopen that registers only the command callback silently drops CEC
         // remote input: nav from the TV/AVR remote dies and STAYS dead until the
         // daemon restarts, with nothing logged. That is not a rare path — every
-        // transmit failure on a stale bus reopens (observed twice within 15 minutes
-        // on a deployed box), so in practice the remote stopped working almost immediately
-        // and looked like a hardware fault.
+        // transmit failure on a stale bus reopens (observed twice within 15
+        // minutes on a deployed box), so in practice the remote stopped working
+        // almost immediately and looked like a hardware fault.
         if let Some(key_tx) = key_tx {
             builder = attach_key_press_callback(builder, key_tx);
         }
