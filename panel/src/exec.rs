@@ -118,12 +118,17 @@ impl std::error::Error for ExecError {}
 /// operations.
 pub struct Recovery {
     lock: Mutex<()>,
-    /// The elevation helper for system-scope restarts. Always `"sudo"` in
-    /// production; a test seam so the fail-closed path can be exercised
-    /// without a real `sudo` on the machine running the suite (and, more to
-    /// the point, without a machine that has NOPASSWD ALL quietly turning the
-    /// test into a real restart).
-    sudo: String,
+    /// The elevation helper for system-scope restarts, as an argv PREFIX —
+    /// always exactly `["sudo"]` in production, pinned by
+    /// [`tests::the_production_elevation_prefix_is_exactly_sudo`].
+    ///
+    /// A test seam, so the fail-closed path can be exercised without a real
+    /// `sudo` on the machine running the suite (and, more to the point,
+    /// without a machine that has NOPASSWD ALL quietly turning the test into
+    /// a real restart). It is a prefix rather than a bare program name so the
+    /// fake can be reached *through* an interpreter — see
+    /// [`Recovery::with_sudo`].
+    sudo: Vec<String>,
 }
 
 impl Default for Recovery {
@@ -136,16 +141,31 @@ impl Recovery {
     pub fn new() -> Self {
         Self {
             lock: Mutex::new(()),
-            sudo: "sudo".to_string(),
+            sudo: vec!["sudo".to_string()],
         }
     }
 
-    /// See [`Recovery::sudo`].
+    /// Point the elevation prefix somewhere other than `sudo`. See
+    /// [`Recovery::sudo`].
+    ///
+    /// Takes an argv PREFIX rather than a program name so a caller can pass
+    /// `["sh", "<script>"]`. That is not a stylistic choice: a test that
+    /// execs a script it just wrote races `ETXTBSY`. `fork` copies the
+    /// still-open write fd into every concurrently spawning child, and the
+    /// kernel refuses `execve` on a file any process holds open for writing —
+    /// so the exec fails, intermittently, in proportion to how many other
+    /// tests are spawning at that moment. Running the fake as `sh <script>`
+    /// makes `execve` target `/bin/sh`, which no test wrote, and leaves the
+    /// script itself only ever *read*. See tv-shell#428.
     #[cfg(test)]
-    pub fn with_sudo(sudo: impl Into<String>) -> Self {
+    pub fn with_sudo<I, S>(prefix: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         Self {
             lock: Mutex::new(()),
-            sudo: sudo.into(),
+            sudo: prefix.into_iter().map(Into::into).collect(),
         }
     }
 
@@ -191,7 +211,7 @@ impl Recovery {
                 )
                 .await
             }
-            UnitScope::System => run(
+            UnitScope::System => run_prefixed(
                 &self.sudo,
                 &["-n", "systemctl", "restart", target.unit().as_str()],
                 SYSTEMCTL_TIMEOUT,
@@ -413,6 +433,26 @@ async fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, 
     }
 }
 
+/// [`run`], with `prefix` supplying the program and any leading arguments.
+///
+/// Split out so [`Recovery::sudo`] can be an argv prefix while the caller
+/// still passes its own arguments as one literal slice — which is what
+/// `tests::the_only_mutating_systemctl_argv_is_a_restart_target` scans.
+async fn run_prefixed(
+    prefix: &[String],
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, ExecError> {
+    let Some((program, leading)) = prefix.split_first() else {
+        // Unreachable via `new()`; a caller-facing error rather than a panic
+        // so an empty seam can never read as a successful restart.
+        return Err(ExecError::Spawn("empty elevation argv prefix".to_string()));
+    };
+    let mut argv: Vec<&str> = leading.iter().map(String::as_str).collect();
+    argv.extend_from_slice(args);
+    run(program, &argv, timeout).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,8 +484,44 @@ mod tests {
 
     /// A stand-in for `sudo` that records the argv it was called with and
     /// refuses exactly the way `sudo -n` does with no matching sudoers rule.
-    /// Returns `(script path, marker path)`.
-    fn fake_sudo(name: &str, refuse: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+    ///
+    /// Owns its temp directory and removes it on drop — one leaked directory
+    /// per invocation is what this used to do (tv-shell#428).
+    struct FakeSudo {
+        dir: std::path::PathBuf,
+        script: std::path::PathBuf,
+        marker: std::path::PathBuf,
+    }
+
+    impl FakeSudo {
+        /// The argv prefix that runs this fake: `sh <script>`.
+        ///
+        /// **The script path is deliberately not exposed on its own.** Handing
+        /// out only the `sh`-prefixed form is what keeps a future test from
+        /// reintroducing the direct-exec `ETXTBSY` race — there is no accessor
+        /// that would let it. See [`Recovery::with_sudo`].
+        fn argv(&self) -> [String; 2] {
+            ["sh".to_string(), self.script.to_string_lossy().into_owned()]
+        }
+
+        /// The argv the fake was last invoked with, or `""` if never invoked.
+        fn recorded(&self) -> String {
+            std::fs::read_to_string(&self.marker).unwrap_or_default()
+        }
+
+        /// Whether the fake was invoked at all.
+        fn was_invoked(&self) -> bool {
+            self.marker.exists()
+        }
+    }
+
+    impl Drop for FakeSudo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn fake_sudo(name: &str, refuse: bool) -> FakeSudo {
         let dir = std::env::temp_dir().join(format!(
             "tv-shell-panel-sudo-{}-{name}-{}",
             std::process::id(),
@@ -470,12 +546,19 @@ mod tests {
             )
         };
         std::fs::write(&script, body).unwrap();
+        // Still marked executable: `sh <script>` does not require it, but a
+        // mode-0644 fake would silently pass for the wrong reason if the
+        // prefix ever regressed to a direct exec.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        (script, marker)
+        FakeSudo {
+            dir,
+            script,
+            marker,
+        }
     }
 
     /// **The behaviour htpc-1 exercises today**: a unit is in `managed_units`,
@@ -483,8 +566,8 @@ mod tests {
     /// as [`ExecError::NotPermitted`] — not `Ok`, not a generic failure.
     #[tokio::test]
     async fn a_system_scope_restart_with_no_sudoers_rule_fails_closed() {
-        let (script, marker) = fake_sudo("refuse", true);
-        let recovery = Recovery::with_sudo(script.to_string_lossy().into_owned());
+        let fake = fake_sudo("refuse", true);
+        let recovery = Recovery::with_sudo(fake.argv());
         let err = recovery
             .restart(&target("sshd", "sshd.service", "system"))
             .await
@@ -499,16 +582,19 @@ mod tests {
             other => panic!("expected NotPermitted, got {other:?}"),
         }
         // And it really did try, with the exact argv the sudoers rule matches.
-        let argv = std::fs::read_to_string(&marker).unwrap();
-        assert_eq!(argv.trim(), "-n systemctl restart sshd.service");
+        assert_eq!(
+            fake.recorded().trim(),
+            "-n systemctl restart sshd.service",
+            "the argv must stay exactly what the sudoers rule matches"
+        );
     }
 
     /// `systemctl --user` needs no elevation, and routing it through `sudo`
     /// would break the one thing that keeps working with the daemon down.
     #[tokio::test]
     async fn a_user_scope_restart_never_touches_sudo() {
-        let (script, marker) = fake_sudo("unused", false);
-        let recovery = Recovery::with_sudo(script.to_string_lossy().into_owned());
+        let fake = fake_sudo("unused", false);
+        let recovery = Recovery::with_sudo(fake.argv());
         // A unit that does not exist: the point is which binary is spawned,
         // and `systemctl --user restart` on a missing unit is inert.
         let _ = recovery
@@ -519,8 +605,26 @@ mod tests {
             ))
             .await;
         assert!(
-            !marker.exists(),
+            !fake.was_invoked(),
             "a user-scope restart must not invoke the elevation helper"
+        );
+
+        // The seam is only safe because production never uses it. Widening
+        // `sudo` from a program name to an argv prefix widened what a caller
+        // *could* put there, so pin the production value rather than trusting
+        // that `with_sudo` stays `#[cfg(test)]`.
+    }
+
+    /// The elevation prefix a real node runs with is exactly `sudo` — no
+    /// interpreter, no extra flags, nothing the sudoers rule would stop
+    /// matching.
+    #[test]
+    fn the_production_elevation_prefix_is_exactly_sudo() {
+        assert_eq!(
+            Recovery::new().sudo,
+            vec!["sudo".to_string()],
+            "production must elevate through bare `sudo`; the argv prefix is a \
+             test seam and must never carry anything else"
         );
     }
 
