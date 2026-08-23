@@ -185,7 +185,7 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     /// Build a transport for the sidecar at `base` (e.g.
-    /// `"http://192.168.8.153:47995"`) authenticating with `token`, using
+    /// `"http://192.0.2.10:47995"`) authenticating with `token`, using
     /// [`DEFAULT_TIMEOUT`].
     ///
     /// **The `reqwest::Client` is built with NO timeout of its own**, and that

@@ -442,9 +442,9 @@ pub fn builtin_target(key: &str) -> Option<RestartTarget> {
 ///
 /// ```toml
 /// [[panel.nodes]]
-/// id = "desktop-2"
-/// base_url = "http://192.168.8.153:47995"
-/// sidecar_token_file = "~/.config/tv-shell/desktop-2-sidecar-token"
+/// id = "gaming-pc"
+/// base_url = "http://192.0.2.10:47995"
+/// sidecar_token_file = "~/.config/tv-shell/gaming-pc-sidecar-token"
 /// ```
 ///
 /// Nested under `[panel]` because `config.toml` is shared with the daemon —
@@ -465,7 +465,7 @@ pub struct RawRemoteNode {
     /// is read from the handshake, never from here.
     pub id: String,
     /// Base URL of the sidecar's HTTP listener, e.g.
-    /// `"http://192.168.8.153:47995"`.
+    /// `"http://192.0.2.10:47995"`.
     pub base_url: String,
     /// Path to a 0600 file under the config dir holding the sidecar's bearer
     /// token. Required: every sidecar route but `/art/{appid}` is bearer-auth'd
@@ -882,7 +882,7 @@ fn validate_base_url(url: &str, id: &str) -> anyhow::Result<String> {
             anyhow::anyhow!(
                 "config: [[panel.nodes]] {id:?} has base_url {url:?}, which is not an \
                  http:// or https:// URL; refusing to start — write the sidecar's \
-                 full listener URL, e.g. \"http://192.168.8.153:47995\""
+                 full listener URL, scheme included, e.g. \"http://<sidecar-host>:47995\""
             )
         })?;
     let authority = authority.trim_end_matches('/');

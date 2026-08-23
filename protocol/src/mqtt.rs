@@ -6,7 +6,7 @@
 //!
 //! | device | `device_id` | crate | `status` shape |
 //! |---|---|---|---|
-//! | the TV client | `htpc-1` | `tv-shell-input` (`daemon/`) | [`ShellSnapshot`] |
+//! | the TV client | configured, e.g. `tv-box` | `tv-shell-input` (`daemon/`) | [`ShellSnapshot`] |
 //! | the gaming PC (dual-boot, ONE machine) | `desktop` | `tv-shell-host` (`host/`) | [`crate::StatusResponse`] |
 //!
 //! One retained message on one topic per device, so a consumer never sees a torn
@@ -203,8 +203,8 @@ impl TryFrom<String> for DeviceId {
 ///
 /// `Macos` and `Unknown` exist only so [`DeviceOs::current`] is **total** and can
 /// never panic — the host crate is CI-built on macOS. In production only `linux`
-/// (htpc-1, and the desktop's CachyOS boot) and `windows` (the desktop's Windows
-/// boot) are ever emitted.
+/// (the shell node, and a dual-boot desktop's Linux side) and `windows` (that
+/// desktop's Windows side) are ever emitted.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceOs {
@@ -300,7 +300,8 @@ fn unknown_ownership() -> String {
     "unknown".to_string()
 }
 
-/// htpc-1's status shape — the daemon has no single serde type for `GET /status`.
+/// The shell node's status shape — the daemon has no single serde type for
+/// `GET /status`.
 ///
 /// The daemon's HTTP status body is a `#[serde(flatten)]` of two daemon-local
 /// structs assembled per-request, and [`crate::StatusResponse`] is the *host's*

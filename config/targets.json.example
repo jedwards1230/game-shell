@@ -1,1 +1,1 @@
-[{"name":"Desktop","host":"192.168.1.10","app":"Desktop","resolution":"3840x2160","fps":120,"codec":"HEVC","hdr":true}]
+[{"name":"Desktop","host":"192.0.2.10","app":"Desktop","resolution":"3840x2160","fps":120,"codec":"HEVC","hdr":true}]

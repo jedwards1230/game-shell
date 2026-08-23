@@ -21,8 +21,9 @@
 //! entity unique_id     : tv-shell-<device_id>-<entity_key>
 //! ```
 //!
-//! This daemon's `device_id` is `htpc-1`. It is **explicitly configured, never
-//! derived** — see [`crate::daemon_config::DaemonConfig::mqtt_device_id`].
+//! This daemon's `device_id` is **explicitly configured, never derived** — not
+//! the hostname, not the IP, not anything the box can guess about itself. See
+//! [`crate::daemon_config::DaemonConfig::mqtt_device_id`].
 //!
 //! ## Why `published_at` / `seq` / the floor heartbeat exist
 //!
