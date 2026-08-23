@@ -1,4 +1,4 @@
-//! MCP server for the tv-shell daemon, built on the official `rmcp` 1.7.0 crate.
+//! MCP server for the tv-shell daemon, built on the official `rmcp` 3.1.2 crate.
 //!
 //! **Opt-in**: the server only starts when `[mcp].bind` in `config.toml` is set
 //! to a `host:port` address. When unset, no socket is opened.
@@ -45,8 +45,8 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, ErrorData as McpError, Implementation, ListResourcesResult,
-        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource,
-        ResourceContents, ServerCapabilities, ServerInfo,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
     },
     schemars::{self, JsonSchema},
     service::{RequestContext, RoleServer},
@@ -408,7 +408,7 @@ impl ServerHandler for TvShellMcp {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         if uri != SCREENSHOT_RESOURCE_URI {
             return Err(McpError::resource_not_found(
@@ -427,11 +427,15 @@ impl ServerHandler for TvShellMcp {
         // block — read live (a dev_deploy can move HEAD under the daemon).
         let meta = bridge_core::capture_meta().await;
         let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_owned());
+        // rmcp 3.x widened this return to the `ReadResourceResponse` enum so a
+        // handler can also answer "input required"; `ReadResourceResult` is
+        // still the plain-contents variant and converts in.
         Ok(ReadResourceResult::new(vec![
             ResourceContents::blob(b64, SCREENSHOT_RESOURCE_URI).with_mime_type("image/png"),
             ResourceContents::text(meta_json, SCREENSHOT_RESOURCE_URI)
                 .with_mime_type("application/json"),
-        ]))
+        ])
+        .into())
     }
 }
 
@@ -879,7 +883,7 @@ pub async fn serve(
 
     // Fix 3: Configure the host allowlist correctly.
     //
-    // rmcp 1.7.0 does NOT support a "*" wildcard — it does literal string
+    // rmcp does NOT support a "*" wildcard — it does literal string
     // matching. An empty allowed_hosts list means "allow all hosts" (see
     // rmcp source: host_is_allowed returns true when the list is empty).
     //

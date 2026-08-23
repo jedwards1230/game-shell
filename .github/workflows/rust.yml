@@ -47,7 +47,7 @@ jobs:
         run: rustup component add rustfmt clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: .
 
@@ -111,7 +111,7 @@ jobs:
         run: rustup component add rustfmt clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: .
           key: panel
@@ -183,7 +183,7 @@ jobs:
         run: rustup component add clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: .
           key: cec
@@ -206,7 +206,7 @@ jobs:
         run: cargo build --release -p tv-shell-input --features cec,mcp
 
       - name: Test (--features cec,mcp)
-        id: test
+        id: test_mcp
         run: cargo test -p tv-shell-input --features cec,mcp
 
       # Acceptance gate (#179): the static build must NOT pull in the system
@@ -248,4 +248,5 @@ jobs:
             echo "| Build (cec, release) | ${{ steps.build.outcome }} |"
             echo "| No system libcec (ldd) | ${{ steps.ldd.outcome }} |"
             echo "| Test (cec) | ${{ steps.test.outcome }} |"
+            echo "| Test (cec,mcp) | ${{ steps.test_mcp.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
