@@ -1064,7 +1064,8 @@ wire path — no new variants.
 
 | Target | Effect |
 |--------|--------|
-| `settings:<page>` | Open the Settings panel on the named page. `<page>` is one of the section id slugs: `audio`, `bluetooth`, `network`, `display`, `controllers`, `keybindings`, `avcontrol`, `appearance`, `accessibility`, `power`, plus the provider id (e.g. `streaming` or the active provider's own id) when a streaming provider is configured. |
+| `settings:<page>` | Open the Settings panel on the named page. `<page>` is one of the section id slugs registered in `shell/settings/SettingsApp.qml`: `audio`, `bluetooth`, `network`, `display`, `wallpaper`, `controllers`, `keybindings`, `avcontrol`, `webapps`, `accessibility`, `power`, `system`. |
+| `settings:widgets`<br>`settings:moonlight`<br>`settings:streaming` | **Not settings pages.** `ShellLayout.openSettings` intercepts these three before delegating to Settings: `widgets` opens the top-level Widgets surface, and `moonlight`/`streaming` open it scoped to the Moonlight widget's config. They keep the `settings:` namespace for wire compatibility; over MCP they are served by the `open_widgets` tool, not `open_settings`. |
 | `overlay:volume` | Open the volume QAM popover from idle. |
 | `overlay:network` | Open the network QAM popover from idle. |
 | `overlay:session` | Open the power/session drawer from idle. |

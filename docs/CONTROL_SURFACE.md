@@ -246,6 +246,7 @@ conditionally, `mcp.rs:669`).
 | `navigate` | `key` (up/down/left/right/select/back) | write | `Control::Key` |
 | `key` | `key` (up/down/left/right/select/back) | write | **alias of `navigate`** — same handler/schema; named to match the HTTP/IPC `key` verb |
 | `open_settings` | `page` (`SettingsPage` enum) | write | `settings:<page>` |
+| `open_widgets` | `widget` (optional `WidgetTarget` enum) | write | `settings:widgets`, or `settings:<widget>` for a deep-link |
 | `open_overlay` | `target` (volume/network/session) | write | `overlay:<target>` |
 | `launch_app` | `wm_class` (StartupWMClass) | write | `app:<wm_class>` |
 | `list_apps` | — | read-only | XDG `.desktop` scan → `[{name,wm_class,comment}]` |
@@ -275,7 +276,16 @@ URIs return a JSON-RPC `resource_not_found` (-32002).
 - `shell_action` accepts only bare verbs from the closed vocabulary (`home`,
   `home-tap`, `home-hold`, `menu`, `settings`, `power`). Deep-links are rejected
   at the MCP layer — use `open_settings` / `open_overlay` / `launch_app` instead.
-- `open_settings.page` is a typed `SettingsPage` enum (not a free string).
+- `open_settings.page` is a typed `SettingsPage` enum (not a free string), and it
+  mirrors `shell/settings/SettingsApp.qml`'s section registry exactly. Nothing the
+  compiler sees spans QML and Rust, so `settings_page_enum_matches_qml_registry`
+  (`daemon/src/mcp.rs`) parses the QML at test time and fails the suite on drift.
+- `open_widgets` exists because the Widgets surface is **not** a settings page.
+  `ShellLayout.openSettings` intercepts `widgets` / `moonlight` / `streaming` before
+  Settings is ever asked and pushes the top-level Widgets screen instead. That
+  intercept is the only IPC path into `WidgetsApp`, so the tool rides the existing
+  `settings:` deep-link rather than inventing a `widgets:` namespace — what changed
+  is the MCP surface, which no longer advertises those three slugs as settings pages.
 - `get_ui_state` reports compositor-level window focus (class + title + whether
   quickshell is focused) — NOT QML-internal state. Use `take_screenshot` for
   in-shell view state.
