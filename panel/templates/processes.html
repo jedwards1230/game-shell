@@ -10,7 +10,11 @@
   <p class="banner banner-error">Hyprland data unavailable — daemon unreachable or the Hyprland actor is down.</p>
   {% endif %}
   <h3>Active window</h3>
+  {% if hypr_active_empty %}
+  <p class="degraded-msg">No window is focused — the shell itself is on screen.</p>
+  {% else %}
   <pre>{{ hypr_active }}</pre>
+  {% endif %}
   <h3>Clients</h3>
   {% if hypr_clients_error.is_empty() %}
     {% if hypr_clients_rows.is_empty() %}
