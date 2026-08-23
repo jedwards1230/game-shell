@@ -16,7 +16,7 @@
 //! Degradation: `GET /controllers` gathers every section independently (like
 //! `pages::processes`) — one section's IPC failure shows an inline
 //! "unavailable" note without blanking the others; every action form is
-//! always rendered (like `pages::tools`) and reports its own daemon-
+//! always rendered (like `pages::navigation`) and reports its own daemon-
 //! unreachable error inline rather than failing page load. The route itself
 //! is always 200, never a 500.
 
@@ -70,7 +70,7 @@ const RUMBLE_MS_MAX: u64 = 3000;
 
 // ---------------------------------------------------------------------------
 // Shared small helpers — each page keeps its own copy of this trio rather
-// than a shared utility module (mirrors `pages::tools`/`pages::processes`/
+// than a shared utility module (mirrors `pages::navigation`/`pages::processes`/
 // `pages::dev`, per the file-ownership contract).
 // ---------------------------------------------------------------------------
 

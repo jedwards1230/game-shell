@@ -23,7 +23,7 @@
 //!
 //! Degradation: `GET /cec` makes exactly one eager IPC call (`cec-health`,
 //! explicitly read-only and cheap per `docs/IPC_PROTOCOL.md`); topology/scan
-//! and switching are lazy, htmx-triggered, mirroring `pages::tools`'s
+//! and switching are lazy, htmx-triggered, mirroring `pages::navigation`'s
 //! no-page-load-IPC philosophy for anything that touches the bus. Always 200,
 //! never a 500.
 

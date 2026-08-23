@@ -74,21 +74,41 @@ failure, not a review comment.
 **Landed** in `panel/src/capabilities.rs`. Four tiers, one `Gate` value each,
 resolved from a snapshot taken **once at startup**:
 
+> Route paths below are post-IA (`docs/PANEL_IA.md`). The pre-IA paths this
+> section used to name — `/settings/*`, `/media/*`, `/tools/*` — no longer
+> exist; the page paths among them 303-redirect, while the old *action* paths
+> (`/tools/raw`, `/media/wallpaper/*`, `/processes/updates/apply`,
+> `/tools/sys/controllerdb-*`) were deleted outright and 404.
+
 | Tier | Registered when | Routes |
 |---|---|---|
-| Recovery | always | dashboard, processes + updates, media page + wallpaper files, logs, dev page, unit restarts, nav dot, login, assets |
-| Node | the handshake succeeded | the Tools console (`/tools/*` minus `raw` and the controller-DB pair) |
-| Capability | the named `Feature` is declared | `cec` → `/cec/*`; `controllers` → `/controllers/*` + `/tools/sys/controllerdb-*`; `widgets` → `/widgets/*`; `settings_store` → `/settings/*` + `/media/wallpaper/select`; `web_apps` → `/media/webapp/*`; `screenshot` → `/dev/screenshot*` |
-| Danger | `[panel].allow_dangerous`, **intersected** with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy`; `/dev/reboot`, `/dev/suspend`, `/processes/updates/apply`, `/tools/raw` are the panel's own exec tier and carry no capability gate |
+| Recovery | always | Overview + its tiles, System ▸ Processes / Updates / Logs, System ▸ Services incl. unit restarts, Dev ▸ Recovery, nav dot, login, assets, and the pre-IA redirects |
+| Node | the handshake succeeded | Remote ▸ Navigation and Remote ▸ Launcher, Devices ▸ Network, and Dev ▸ Console's probe surface (minus `raw`) |
+| Capability | the named `Feature` is declared | `cec` → `/devices/cec/*`; `controllers` → `/devices/controllers/*`; `widgets` → `/shell/widgets/*`; `settings_store` → `/shell/appearance/*`, `/shell/apps/save`, `/shell/advanced/*`, `/devices/display-audio/*`, `/devices/cec/config`, `/devices/controllers/settings`, and the wallpaper surface; `web_apps` → the web-app registry under `/shell/apps`; `screenshot` → `/dev/screenshot*` |
+| Danger | `[panel].allow_dangerous`, **intersected** with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy`; `/dev/reboot`, `/dev/suspend`, `/system/updates/apply`, `/dev/console/raw` are the panel's own exec tier and carry no capability gate |
+
+There are **nine** `Gate` variants, not four tiers of hand-written conditions:
+`Recovery`, `Node`, `Cec`, `Controllers`, `Widgets`, `SettingsStore`, `WebApps`,
+`Screenshot`, `DevDeploy`. The `gates!` macro generates `Gate::ALL` from the
+same variant list as the enum, so exhaustiveness is **structural** — a variant
+cannot be added and left out.
 
 **The gate must be checked against what the node actually emits.**
 `daemon/src/ipc.rs::features()` deliberately never emits `wallpapers`,
 `processes`, `system_updates`, `steam_library` or `game_launch` — so gating
-`/media/wallpaper/*`, `/processes` or `/processes/updates/*` on the matching
-`Feature` would have deleted those working pages from htpc-1. They are recovery
-tier because the panel serves them itself, out of its own filesystem and exec
-tier. `Feature::Logs` describes the *daemon's* `GET /dev/logs`, so the panel's
-`/logs` page — `journalctl` via direct exec — is recovery tier too.
+System ▸ Processes or System ▸ Updates on the matching `Feature` would have
+deleted those working pages from htpc-1. They are recovery tier because the
+panel serves them itself, out of its own filesystem and exec tier.
+`Feature::Logs` describes the *daemon's* `GET /dev/logs`, so the panel's
+System ▸ Logs page — `journalctl` via direct exec — is recovery tier too.
+
+**Wallpaper is the deliberate exception, and it moved.** It reads like it
+belongs above (panel-local filesystem, no daemon needed), and before the IA
+refresh it was recovery tier for exactly that reason. #412 moved the whole
+wallpaper surface under `Gate::SettingsStore` so the Shell group can vanish
+cleanly in recovery mode rather than leaving a one-page shell. The cost —
+wallpaper upload is unavailable with the daemon down — was accepted knowingly;
+see PANEL.md. Do not "fix" this back.
 
 **A failed handshake falls back to the EMPTY set**, i.e. recovery tier only —
 fail-closed, and identical to the daemon-independent set, so the panel keeps
@@ -102,8 +122,9 @@ with health explicitly excluded (a wedged CEC adapter does not drop `cec`).
 Enforced by test, not convention: `panel/src/tests.rs` parses `build_router`
 and attributes every route to its registration block, then asserts that against
 the hand-maintained `route_table()`; every unconditional `post` must appear in
-`RECOVERY_TIER_MUTATING` **with a written reason**; and a live-router test pins
-that htpc-1's declared set still registers exactly today's 90 routes.
+`RECOVERY_TIER_MUTATING` (**5** entries, each **with a written reason**); and a
+live-router test pins that htpc-1's declared set still registers exactly today's
+**108** routes.
 
 ### 2. A transport trait replaces the concrete clients — **landed**
 
@@ -153,8 +174,8 @@ The complete blocker list, verified against the tree:
 | Blocker | Where |
 |---|---|
 | `tokio::net::UnixStream` | `ipc.rs:25`, `ipc.rs:49` |
-| `libc::getuid()` | `config.rs:477` |
-| `libc::gethostname()` | `pages/cec.rs:689` |
+| `libc::getuid()` | `config.rs:1069` |
+| `libc::gethostname()` | `pages/cec.rs:705` |
 | `tokio::net::UnixListener` | `ipc.rs` + `tests.rs` — **test-only** |
 
 `libc` is declared under `[target.'cfg(unix)'.dependencies]`, so the two `libc`
