@@ -84,7 +84,7 @@
 # registered at all (404) and their buttons are not rendered:
 #   POST /dev/deploy, /dev/build, /dev/reboot, /dev/suspend,
 #   /system/updates/apply (sudo pacman -Syu),
-#   /tools/raw (the arbitrary-IPC console)
+#   /dev/console/raw (the arbitrary-IPC console)
 # Every unit-restart route stays available — /system/services/restart/{key},
 # /dev/restart-daemon, /dev/restart-shell and /devices/cec/recover/restart-daemon all
 # drive the same systemd units, and recovery is the reason the panel exists.

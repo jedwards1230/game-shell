@@ -1,7 +1,7 @@
 # Panel Information Architecture — Redesign
 
-Status: **landed** (all six phases, #405–#410 — with one carve-out: phase 5's
-ansible-side sudoers generation has not shipped, see [Phasing](#phasing)). This
+Status: **landed** (all six phases, #405–#410, including phase 5's ansible-side
+sudoers generation — see [Phasing](#phasing)). This
 document is now a **record of what was built and why**, not a proposal.
 [PANEL.md](PANEL.md) remains the living doc for what the panel *does*; this one
 keeps the reasoning, and — deliberately — the places where building it proved
@@ -15,9 +15,11 @@ reasoning that was wrong is the part worth keeping. Three are load-bearing:
 - **Five of the six `allow_dangerous` controls are in Dev, not all six.**
   `POST /system/updates/apply` is the exception and stays under System ▸
   Updates. See [Dev](#dev).
-- **`scope = "system"` restarts fail closed on every node today.** The
-  `htpc_common` sudoers generation is ansible-side work that has not landed.
-  See [Privilege](#privilege) and [Phasing](#phasing).
+- **`scope = "system"` restarts work on htpc-1 and fail closed elsewhere.** The
+  `htpc_common` sudoers generation shipped in
+  [`jedwards1230/homelab-ansible#271`](https://github.com/jedwards1230/homelab-ansible/pull/271)
+  and is deployed there; a node whose role run has not applied it still fails
+  closed, by design. See [Privilege](#privilege) and [Phasing](#phasing).
 
 ## The problem
 
@@ -232,10 +234,11 @@ were exact duplicates of the Controllers page's own.
 
 ## Services (new)
 
-> ✅ **Landed in phase 5**, with one documented exception: the sudoers
-> generation under [Privilege](#privilege) is ansible-side work that has not
-> shipped, so system-scope restarts fail closed on every node today. Everything
-> else below is built — see PANEL.md's
+> ✅ **Landed in phase 5**, both halves. The panel side shipped in #412; the
+> sudoers generation under [Privilege](#privilege) shipped in
+> [`jedwards1230/homelab-ansible#271`](https://github.com/jedwards1230/homelab-ansible/pull/271)
+> and is applied to htpc-1. A node whose role run has not applied it fails
+> closed, which is the intended behaviour rather than a gap — see PANEL.md's
 > [Restartable units](PANEL.md#restartable-units-panelmanaged_units).
 
 The gap that prompted this: there is no way to see whether `sshd` is running, let
@@ -339,7 +342,7 @@ tracked on #409, not on this table.
 | **2** ✅ landed | Split **Processes** → Services (shell only, three built-in units) + Processes + Updates. | 1 | #406 |
 | **3** ✅ landed | Dissolve **Settings** → Shell/Appearance, Shell/Apps, Shell/Advanced, Devices/Display & Audio, Devices/CEC — plus the `Input` group onto Devices/Controllers. Saves are now scoped to the groups the submitting form rendered. | 1 | #407 |
 | **4** ✅ landed | Dissolve **Media** and **Tools** → Shell/Appearance + Shell/Apps, Devices/Network, Devices/Display & Audio, Remote/Navigation + Remote/Launcher, Dev/Screenshot + Dev/Console. Six duplicate routes deleted rather than moved. | 1, 3 | #408 |
-| **5** ⚠️ partly landed | Services: read any unit; `managed_units` config; danger-tier confirms. **The ansible-side sudoers generation did NOT land** — see below. | 2 | #409 |
+| **5** ✅ landed | Services: read any unit; `managed_units` config; danger-tier confirms. Panel half in #412; ansible-side sudoers generation in [homelab-ansible#271](https://github.com/jedwards1230/homelab-ansible/pull/271), applied to htpc-1. | 2 | #409 |
 | **6** ✅ landed | Overview rebuilt as pure read-only tiles with deep links. Gained a system-services tile on its own 30s poll; the three poll targets now fill one grid. | 2-5 | #410 |
 
 Phase 1 was deliberately mechanical — it changed navigation without changing any
@@ -351,13 +354,18 @@ either scope, `[panel].managed_units` is parsed and validated at load (a bad
 `key`/`unit`/`scope`, or a key colliding with a built-in, aborts startup),
 restart is allowlist-only and resolved server-side, and the confirms are
 scope-derived. The **ansible half was explicitly out of scope for that PR** and
-has not landed: the `htpc_common` role in `jedwards1230/homelab-ansible` still
-generates no per-unit sudoers lines. The consequence is worth stating plainly
-rather than discovering: **on every node today, including htpc-1, a
-`scope = "system"` restart fails closed** — `sudo -n` refuses and the page
-reports "NOT PERMITTED on this node", naming the unit and the missing sudoers
-line. Reading those units works, and `scope = "user"` restarts work. Phase 5
-closes when the role ships the lines, generated from the same list that renders
+shipped separately in
+[`jedwards1230/homelab-ansible#271`](https://github.com/jedwards1230/homelab-ansible/pull/271):
+`tv_shell_panel_managed_units` renders both the `managed_units` table and
+`/etc/sudoers.d/tv-shell-panel` from one list, so config and privilege cannot
+drift. It is applied to htpc-1 (sshd, NetworkManager, bluetooth).
+
+**On a node whose role run has not applied those lines, a `scope = "system"`
+restart fails closed** — `sudo -n` refuses and the page reports "NOT PERMITTED
+on this node", naming the unit and the missing sudoers line. That is the
+designed behaviour, not an outstanding gap. Reading those units works, and
+`scope = "user"` restarts work. Phase 5 is closed; the lines are generated from
+the same list that renders
 `managed_units` so the two cannot drift.
 
 ## Open questions

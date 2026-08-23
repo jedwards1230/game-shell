@@ -684,7 +684,7 @@ fn config_path() -> PathBuf {
 }
 
 /// Public counterpart of [`config_path`] for pages that need to read (but
-/// never write) `config.toml` directly — e.g. the Settings page's read-only
+/// never write) `config.toml` directly — e.g. Shell ▸ Advanced's read-only
 /// config.toml viewer. Kept as a separate function (rather than making
 /// `config_path` `pub`) so it's obvious at a glance that this is a
 /// deliberately-exposed read path, not the loader's internals.
