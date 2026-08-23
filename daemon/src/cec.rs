@@ -1579,7 +1579,6 @@ fn blocking_worker(
                     let _ =
                         events_tx.send(Event::CecDevice(protocol::cec_device_json(*addr, word)));
                 }
-                note_auto_switch(&conn, &mut watch, &mut health, &events_tx, &owner, &devices);
                 // Health refresh side effect (#19): so the QML 30s `cec-scan`
                 // poll keeps the status line fresh with no user action. A
                 // non-empty sweep means polls round-tripped (the adapter
@@ -1592,6 +1591,11 @@ fn blocking_worker(
                 } else {
                     run_poll_probe(&conn, &mut health, &events_tx);
                 }
+                // AFTER the sweep's own health refresh, never before: the
+                // auto-switch is a transmit whose outcome must be the LAST word
+                // on this round, or a non-empty sweep's unconditional
+                // `note_health(true)` would mask a switch that just failed.
+                note_auto_switch(&conn, &mut watch, &mut health, &events_tx, &owner, &devices);
                 let body = devices
                     .iter()
                     .map(|(a, w)| protocol::cec_device_json(*a, w))
