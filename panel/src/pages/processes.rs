@@ -81,6 +81,15 @@ struct ProcessesTemplate {
     chrome: Chrome,
     hypr_available: bool,
     hypr_active: String,
+    /// Whether [`Self::hypr_active`] is the daemon's "nothing focused" answer.
+    ///
+    /// Hyprland reports no active window as an empty JSON object, which
+    /// `pretty_or_raw` faithfully renders as a literal `{}` — technically
+    /// honest and useless to read. The Clients section right below already
+    /// renders a sentence in the same situation ("No Hyprland clients
+    /// reported"); this lets Active window match it instead of being the one
+    /// place the panel shows the operator raw JSON punctuation.
+    hypr_active_empty: bool,
     hypr_clients_rows: Vec<HyprClientView>,
     hypr_clients_error: String,
     hypr_monitors: String,
@@ -130,10 +139,14 @@ pub async fn render_page(state: &AppState) -> String {
         Err(e) => (Vec::new(), format!("ps failed: {e}")),
     };
 
+    let hypr_active = pretty_or_raw(active_res);
+    let hypr_active_empty = is_empty_json_object(&hypr_active);
+
     let tmpl = ProcessesTemplate {
         chrome: Chrome::new(&state.caps, "system.processes"),
         hypr_available,
-        hypr_active: pretty_or_raw(active_res),
+        hypr_active_empty,
+        hypr_active,
         hypr_clients_rows,
         hypr_clients_error,
         hypr_monitors: pretty_or_raw(monitors_res),
@@ -142,6 +155,19 @@ pub async fn render_page(state: &AppState) -> String {
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
+}
+
+/// Whether `s` is an empty JSON object — Hyprland's "nothing is focused".
+///
+/// Parses rather than string-matching, so it holds regardless of how
+/// `pretty_or_raw` spaced the braces, and so a genuine payload can never be
+/// mistaken for empty. A non-object (an error string, say) is never "empty":
+/// those must keep rendering verbatim, since the text IS the diagnostic.
+fn is_empty_json_object(s: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| v.as_object().map(|o| o.is_empty()))
+        .unwrap_or(false)
 }
 
 fn pretty_or_raw(res: Result<String, TransportError>) -> String {
@@ -157,6 +183,34 @@ fn pretty_or_raw(res: Result<String, TransportError>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a genuinely empty object counts as "nothing focused". The two
+    /// directions matter differently: a false positive hides a real active
+    /// window, and a false negative is the `{}` this replaced. An error string
+    /// must never read as empty — for those the text IS the diagnostic.
+    #[test]
+    fn only_an_empty_json_object_reads_as_no_active_window() {
+        for empty in ["{}", "  {}  ", "{\n}\n"] {
+            assert!(
+                is_empty_json_object(empty),
+                "{empty:?} should read as no active window"
+            );
+        }
+        for present in [
+            r#"{"class":"tv.plex.Plex"}"#,
+            r#"{"class":""}"#,
+            "[]",
+            "null",
+            "",
+            "transport error: connection refused",
+            "{ not json",
+        ] {
+            assert!(
+                !is_empty_json_object(present),
+                "{present:?} must NOT be swallowed as an empty active window"
+            );
+        }
+    }
 
     #[test]
     fn parse_top_processes_skips_header_and_splits_columns() {
