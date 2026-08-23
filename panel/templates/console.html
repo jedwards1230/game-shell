@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Console — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Console</h1>
+<p class="muted">
+  The raw IPC line console: sends any single command from the daemon's vocabulary
+  (<code>docs/IPC_PROTOCOL.md</code>) and shows the raw reply. It sits in Dev because it drives
+  the entire vocabulary — every other page's guarded flow can be bypassed from here.
+</p>
+
+<div id="console-result"></div>
+
+{% if !allow_dangerous %}
+<p class="banner">
+  <strong>The raw IPC console is disabled.</strong>
+  It drives the entire IPC vocabulary, so it counts as a dangerous action and
+  <code>POST /dev/console/raw</code> is not registered on this node.
+  Set <code>allow_dangerous = true</code> in the <code>[panel]</code> section of
+  <code>~/.config/tv-shell/config.toml</code> and restart
+  <code>tv-shell-panel.service</code> to enable it.
+</p>
+{% else %}
+<div class="raw-console-panel">
+  <p class="muted">
+    Escape hatch: sends any single IPC line and shows the raw reply.
+    <code>set-config</code>, <code>set-binding</code>, <code>grab</code>,
+    <code>release</code>, and <code>handoff</code> belong to other pages'
+    guarded flows — sending them here still works, with a warning and a
+    stronger confirm prompt.
+  </p>
+  <form id="console-raw-form" hx-post="/dev/console/raw" hx-disabled-elt="find button" hx-target="#console-result" hx-swap="innerHTML" class="inline-form"
+        hx-confirm="Send this raw IPC command to the daemon? It may mutate state.">
+    <input type="text" id="console-raw-cmd" name="cmd" class="field-wide" placeholder="e.g. sys-status" required>
+    <button class="btn-mutate" type="submit">Send</button>
+  </form>
+</div>
+<script>
+// Strengthen the confirm prompt when the raw command's leading verb belongs
+// to another page's guarded flow (set-config/set-binding/grab/release/
+// handoff) — the same vocabulary as WARN_COMMANDS server-side in
+// pages::console. We intercept htmx's own confirm flow (rather than adding a
+// second window.confirm on top of hx-confirm) so there is still exactly one
+// dialog, just with sharper wording for these verbs.
+(function () {
+  var GUARDED = /^(set-config|set-binding|grab|release|handoff)\b/;
+  document.body.addEventListener('htmx:confirm', function (evt) {
+    if (!evt.target || evt.target.id !== 'console-raw-form') {
+      return;
+    }
+    var cmdInput = document.getElementById('console-raw-cmd');
+    var cmd = cmdInput ? cmdInput.value.trim() : '';
+    if (!GUARDED.test(cmd)) {
+      return; // let htmx show its normal hx-confirm text
+    }
+    evt.preventDefault();
+    var verb = cmd.split(/\s+/, 1)[0];
+    var msg =
+      verb + ' bypasses its owning page\'s guarded flow and can change live ' +
+      'state (input grab, gamepad bindings, or settings.json) immediately. ' +
+      'Send it anyway?';
+    if (window.confirm(msg)) {
+      evt.detail.issueRequest(true);
+    }
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

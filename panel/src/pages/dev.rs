@@ -1,15 +1,17 @@
-//! `/dev` — the operator recovery page: deploy/build/restart/reboot/suspend
+//! `/dev/recovery` — the operator recovery page: deploy/build/restart/reboot/suspend
 //! actions. Deploy/build/restart-daemon/restart-shell prefer the daemon HTTP
 //! bridge and fall back to direct exec when the bridge is unconfigured or
 //! unreachable (deploy has no exec equivalent — it needs the daemon's own
 //! git checkout). Reboot/suspend always go through direct exec. All
 //! destructive exec calls are single-flighted inside [`crate::exec::Recovery`].
+//!
+//! The screenshot viewer used to live here too; `docs/PANEL_IA.md` phase 4
+//! split it onto its own page ([`crate::pages::screenshot`]), leaving this one
+//! with a single subject — recovering the box.
 
 use askama::Template;
-use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::Form;
 use serde::Deserialize;
 
@@ -35,12 +37,9 @@ struct DevTemplate {
     /// pair `build_router` registers `/dev/deploy` + `/dev/build` on. Rendering
     /// those two forms on either half alone would produce buttons that 404.
     deploy_enabled: bool,
-    /// The node's `screenshot` capability — same reasoning for the screenshot
-    /// panel, whose two routes proxy the daemon bridge's `/screenshot`.
-    screenshot_enabled: bool,
 }
 
-/// `GET /dev` — probes daemon reachability (bridge `dev_status`, else IPC
+/// `GET /dev/recovery` — probes daemon reachability (bridge `dev_status`, else IPC
 /// `status`) and renders the action panel with an up/down banner.
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
     Html(render_page(&state).await)
@@ -51,46 +50,44 @@ pub async fn render_page(state: &AppState) -> String {
     let daemon_chip_html = render_unit_chip(state, "daemon", config::daemon_unit(), false).await;
     let shell_chip_html = render_unit_chip(state, "shell", config::shell_unit(), false).await;
     let tmpl = DevTemplate {
-        chrome: Chrome::new(&state.caps, "dev"),
+        chrome: Chrome::new(&state.caps, "dev.recovery"),
         daemon_up,
         bridge_configured: state.cfg.http_bridge_base.is_some(),
         daemon_chip_html,
         shell_chip_html,
         allow_dangerous: state.cfg.allow_dangerous,
         deploy_enabled: state.cfg.allow_dangerous && state.caps.allows(Gate::DevDeploy),
-        screenshot_enabled: state.caps.allows(Gate::Screenshot),
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
 }
 
-/// Map a raw `systemctl is-active` string to a colored dot class + a short
-/// status word — color always paired with explicit text (#6), same mapping
-/// as `pages::dashboard`/`pages::processes` (each page keeps its own copy —
-/// see `pages::controllers`'s doc comment for why).
-fn unit_dot(state: &str) -> (&'static str, &'static str) {
-    match state {
-        "active" => ("dot-ok", "active"),
-        "failed" => ("dot-error", "failed"),
-        "activating" => ("dot-warn", "activating"),
-        "deactivating" => ("dot-warn", "deactivating"),
-        "inactive" => ("dot-neutral", "inactive"),
-        _ => ("dot-neutral", "unknown"),
-    }
-}
-
-/// Render a `<span id="dev-{id}-chip">` dot+word status chip for `unit`.
+/// Render a `<span id="dev-{id}-chip">` dot+word status chip for `unit`,
+/// using the shared [`super::units::unit_dot`] mapping.
+///
+/// The dot and its label live inside ONE `.unit-chip` (`white-space:
+/// nowrap`): the dot is an inline-block and the label is ordinary text, so
+/// without that wrapper the line breaks between them and leaves an orphan dot
+/// at the end of the previous line. The id sits on the chip rather than on
+/// the dot because an OOB swap replaces the whole element — the label has to
+/// come with it.
+///
 /// `oob` adds `hx-swap-oob="true"` so this can be bolted onto another
 /// action's response (#7 — post-action verification: after
 /// restart/build/deploy, the operator sees the unit actually came back
 /// without a manual page reload) as well as rendered inline on normal page
 /// load (`oob = false`).
-async fn render_unit_chip(state: &AppState, id: &str, unit: String, oob: bool) -> String {
+async fn render_unit_chip(
+    state: &AppState,
+    id: &str,
+    unit: crate::config::UnitName,
+    oob: bool,
+) -> String {
     let raw = state.recovery.unit_active(&unit).await;
-    let (dot_class, word) = unit_dot(&raw);
+    let (dot_class, word) = super::units::unit_dot(&raw);
     let oob_attr = if oob { " hx-swap-oob=\"true\"" } else { "" };
     format!(
-        r#"<span class="dot {dot_class}" id="dev-{id}-chip"{oob_attr} title="{unit}: {raw}">{word}</span>"#
+        r#"<span class="unit-chip" id="dev-{id}-chip"{oob_attr} title="{unit}: {raw}"><span class="dot {dot_class}"></span>{id} {word}</span>"#
     )
 }
 
@@ -246,100 +243,6 @@ async fn render_suspend(state: &AppState) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Screenshot viewer (M3)
-// ---------------------------------------------------------------------------
-
-#[derive(Template)]
-#[template(path = "dev_screenshot.html")]
-struct DevScreenshotTemplate {
-    ok: bool,
-    message: String,
-    sha: String,
-    branch: String,
-    version: String,
-    captured_at: String,
-    cache_bust: u128,
-}
-
-/// `POST /dev/screenshot/capture` — calls the bridge screenshot endpoint to
-/// confirm reachability and read provenance, then (on success) renders an
-/// `<img>` pointing at the `GET /dev/screenshot` proxy route. The `<img>` tag
-/// is only ever emitted when this call already succeeded, so a daemon-down
-/// or bridge-unconfigured state degrades to a banner — never a broken image.
-pub async fn screenshot_capture(State(state): State<SharedState>) -> impl IntoResponse {
-    Html(render_screenshot_capture(&state).await)
-}
-
-pub async fn render_screenshot_capture(state: &AppState) -> String {
-    match state.bridge.screenshot().await {
-        Ok(shot) => {
-            let tmpl = DevScreenshotTemplate {
-                ok: true,
-                message: String::new(),
-                sha: shot.sha,
-                branch: shot.branch,
-                version: shot.version,
-                captured_at: shot.captured_at,
-                cache_bust: now_millis(),
-            };
-            tmpl.render().unwrap_or_else(|e| {
-                format!("<p class=\"banner banner-error\">render error: {e}</p>")
-            })
-        }
-        Err(e) => {
-            let reason = if e.is_configured() {
-                "unreachable"
-            } else {
-                "not configured"
-            };
-            let tmpl = DevScreenshotTemplate {
-                ok: false,
-                message: format!("HTTP bridge {reason} — see the banner above. ({e})"),
-                sha: String::new(),
-                branch: String::new(),
-                version: String::new(),
-                captured_at: String::new(),
-                cache_bust: 0,
-            };
-            tmpl.render().unwrap_or_else(|e| {
-                format!("<p class=\"banner banner-error\">render error: {e}</p>")
-            })
-        }
-    }
-}
-
-fn now_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-/// `GET /dev/screenshot` — proxies the daemon's `GET /screenshot` PNG bytes
-/// (`Content-Type: image/png`). Only ever linked from the DOM after
-/// [`screenshot_capture`] has already confirmed the bridge is reachable, so
-/// a direct hit here (bridge down between the two calls) degrades to a
-/// `503` text body rather than corrupting an `<img>` tag's expected type.
-pub async fn screenshot_png(State(state): State<SharedState>) -> Response {
-    match state.bridge.screenshot().await {
-        Ok(shot) => {
-            let mut resp = Response::new(Body::from(shot.png));
-            *resp.status_mut() = StatusCode::OK;
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("image/png"),
-            );
-            resp
-        }
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("screenshot unavailable: {e}"),
-        )
-            .into_response(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,11 +272,27 @@ mod tests {
         })
     }
 
-    #[test]
-    fn unit_dot_maps_active_and_failed_to_distinct_colors() {
-        assert_eq!(unit_dot("active"), ("dot-ok", "active"));
-        assert_eq!(unit_dot("failed"), ("dot-error", "failed"));
-        assert_eq!(unit_dot("something-unexpected"), ("dot-neutral", "unknown"));
+    /// The dot and its label must ship inside one `.unit-chip`, or the label
+    /// wraps to the next line and orphans the dot (`docs/PANEL_IA.md`
+    /// § Two known rendering bugs).
+    #[tokio::test]
+    async fn unit_chip_keeps_the_dot_and_its_label_in_one_nowrap_element() {
+        let state = hermetic_state();
+        let chip = render_unit_chip(&state, "daemon", crate::config::daemon_unit(), false).await;
+        let chip_open = chip
+            .find(r#"<span class="unit-chip""#)
+            .expect("a .unit-chip wrapper");
+        let dot_open = chip
+            .find(r#"<span class="dot "#)
+            .expect("a dot span inside the chip");
+        assert!(
+            chip_open < dot_open && chip.trim_end().ends_with("</span>"),
+            "the dot and its label must sit inside one nowrap chip: {chip}"
+        );
+        assert!(
+            chip.contains("daemon "),
+            "the chip carries its own label so an OOB swap does not orphan it: {chip}"
+        );
     }
 
     #[tokio::test]
@@ -389,8 +308,8 @@ mod tests {
             "expected an OOB shell unit chip refresh: {html}"
         );
         assert!(
-            html.contains(r#"id="nav-daemon-status""#),
-            "expected an OOB nav-dot refresh: {html}"
+            html.contains(r#"id="daemon-status""#),
+            "expected an OOB drawer-footer dot refresh: {html}"
         );
     }
 

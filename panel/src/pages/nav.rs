@@ -1,7 +1,7 @@
-//! Global daemon-reachability dot in `base.html`'s topnav. Deliberately its
-//! own tiny module rather than owned by any one page — `base.html`/nav is
-//! M1 territory per the page-ownership contract, and this partial is nav
-//! chrome, not a page.
+//! Global daemon-reachability dot in `base.html`'s drawer footer.
+//! Deliberately its own tiny module rather than owned by any one page —
+//! `base.html`/nav is M1 territory per the page-ownership contract, and this
+//! partial is nav chrome, not a page.
 
 use std::time::Duration;
 
@@ -15,8 +15,9 @@ use crate::state::{AppState, SharedState};
 /// can never make the ~10s polling loop pile up requests.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
-/// `GET /nav/daemon-status` — the topnav's polled partial (`hx-trigger="load,
-/// every 10s"`, `hx-swap="innerHTML"` on the containing span).
+/// `GET /nav/daemon-status` — the drawer footer's polled partial
+/// (`hx-trigger="load, every 10s"`, `hx-swap="innerHTML"` on the containing
+/// span).
 pub async fn daemon_status_dot(State(state): State<SharedState>) -> impl IntoResponse {
     Html(render_dot(&state).await)
 }
@@ -39,7 +40,7 @@ pub async fn render_dot(state: &AppState) -> String {
 }
 
 /// [`render_dot`]'s content wrapped as an htmx out-of-band swap fragment,
-/// targeting the topnav's `#nav-daemon-status` span directly (rather than
+/// targeting the drawer footer's `#daemon-status` span directly (rather than
 /// waiting up to the normal 10s poll interval) — used by
 /// `pages::dev`'s post-action verification (#7) so a restart/build/deploy
 /// response updates the nav dot immediately instead of leaving it stale
@@ -51,6 +52,6 @@ pub async fn render_dot(state: &AppState) -> String {
 pub async fn render_oob(state: &AppState) -> String {
     let inner = render_dot(state).await;
     format!(
-        r#"<span class="nav-daemon-status" id="nav-daemon-status" hx-swap-oob="true" hx-get="/nav/daemon-status" hx-trigger="load, every 10s" hx-swap="innerHTML">{inner}</span>"#
+        r#"<span class="daemon-status" id="daemon-status" hx-swap-oob="true" hx-get="/nav/daemon-status" hx-trigger="load, every 10s" hx-swap="innerHTML">{inner}</span>"#
     )
 }

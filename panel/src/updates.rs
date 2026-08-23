@@ -285,6 +285,28 @@ pub enum JobSnapshot {
 pub struct UpdatesState {
     cache: Mutex<Option<CachedCheck>>,
     job: Mutex<UpdateJob>,
+    /// argv the apply job spawns. Always `sudo -n pacman -Syu --noconfirm` in
+    /// production — this is a **test seam**, and it exists for the same reason
+    /// [`crate::exec::Recovery::with_sudo`] does.
+    ///
+    /// Without it, any test that reaches [`start_apply`] runs a real
+    /// `sudo -n pacman -Syu --noconfirm`. That is inert in CI only by accident
+    /// (the image has neither `sudo` nor `pacman`, so the spawn fails), but
+    /// htpc-1 has NOPASSWD sudo for exactly this command **by design** — see
+    /// `docs/PANEL.md` § "Deployment prerequisite" — and dev boxes run Arch.
+    /// On either, `cargo test -p tv-shell-panel` would begin an unattended
+    /// full system upgrade. A test must never be one `cargo test` away from
+    /// that, so the argv is injectable and the test points it at a fake.
+    apply_command: Vec<String>,
+}
+
+/// The production apply argv. Single definition so the seam cannot drift from
+/// what actually ships.
+fn default_apply_command() -> Vec<String> {
+    ["sudo", "-n", "pacman", "-Syu", "--noconfirm"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 impl Default for UpdatesState {
@@ -292,6 +314,24 @@ impl Default for UpdatesState {
         Self {
             cache: Mutex::new(None),
             job: Mutex::new(UpdateJob::Idle),
+            apply_command: default_apply_command(),
+        }
+    }
+}
+
+impl UpdatesState {
+    /// Test-only constructor pointing the apply job at `argv` instead of
+    /// `sudo -n pacman -Syu --noconfirm`. See [`UpdatesState::apply_command`].
+    #[cfg(test)]
+    pub fn with_apply_command<I, S>(argv: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            cache: Mutex::new(None),
+            job: Mutex::new(UpdateJob::Idle),
+            apply_command: argv.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -428,8 +468,24 @@ async fn finish_job(updates: &UpdatesState, success: bool, extra_lines: Vec<Stri
 /// function's `child` drops — mirrors `crate::exec::run`'s documented
 /// timeout-kill guarantee.
 async fn run_apply_job(app: Arc<AppState>) {
-    let mut cmd = Command::new("sudo");
-    cmd.args(["-n", "pacman", "-Syu", "--noconfirm"])
+    // argv comes from state so tests can point it at a fake — see
+    // `UpdatesState::apply_command`. Production is always
+    // `sudo -n pacman -Syu --noconfirm`.
+    let argv = app.updates.apply_command.clone();
+    let (program, args) = match argv.split_first() {
+        Some(split) => split,
+        None => {
+            finish_job(
+                &app.updates,
+                false,
+                vec!["apply command is empty — nothing to run".to_string()],
+            )
+            .await;
+            return;
+        }
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -597,7 +653,12 @@ mod tests {
             node: Arc::new(crate::ipc::IpcTransport::new(sock)),
             bridge: Arc::new(crate::bridge::BridgeClient::new(None, None)),
             recovery: crate::exec::Recovery::new(),
-            updates: UpdatesState::default(),
+            // NOT UpdatesState::default() — that argv is a real
+            // `sudo -n pacman -Syu --noconfirm`, and on htpc-1 or any Arch dev
+            // box this test would start an unattended system upgrade. `sleep`
+            // also outlives the assertions below, so the Running state cannot
+            // race to Done before they run.
+            updates: UpdatesState::with_apply_command(["sleep", "30"]),
         });
 
         assert!(matches!(
@@ -613,5 +674,71 @@ mod tests {
 
         // Single-flight: a second start while still Running is refused.
         assert!(start_apply(&app).await.is_err());
+    }
+
+    /// The seam must not let production drift away from what actually ships.
+    ///
+    /// `UpdatesState::default()` is what `AppState` builds at runtime, so this
+    /// pins the exact privileged argv. If someone widens it — drops `-n` so
+    /// sudo can prompt, or swaps the package manager — this fails rather than
+    /// the change reaching a box silently.
+    #[test]
+    fn the_default_apply_command_is_the_privileged_pacman_argv() {
+        let state = UpdatesState::default();
+        assert_eq!(
+            state.apply_command,
+            vec!["sudo", "-n", "pacman", "-Syu", "--noconfirm"],
+            "the production apply argv changed; `-n` is what keeps sudo from \
+             blocking on a password prompt with no tty"
+        );
+    }
+
+    /// The hazard this seam exists for: no test may run the real thing.
+    ///
+    /// The dangerous combination is `UpdatesState::default()` **plus** a call
+    /// to `start_apply` in the same test: that spawns the real
+    /// `sudo -n pacman -Syu --noconfirm`, and htpc-1 has NOPASSWD sudo for
+    /// exactly that command by design, so `cargo test -p tv-shell-panel` on a
+    /// deploy or Arch dev box would begin an unattended system upgrade.
+    ///
+    /// Constructing the default alone is harmless (the cache tests do it and
+    /// never spawn anything), so this greps per test function for the pair
+    /// rather than banning the constructor outright — a blanket ban would just
+    /// train people to work around it.
+    #[test]
+    fn no_test_spawns_the_real_apply_command() {
+        let src = include_str!("updates.rs");
+        let tests = src
+            .split_once("mod tests {")
+            .expect("this module has a tests block")
+            .1;
+        // Split on the fn-item boundary these tests all use. Crude, but it is
+        // the source of this very file — if the shape changes, this test is
+        // right there to be updated.
+        for block in tests.split("\n    #[") {
+            let name = block
+                .lines()
+                .find(|l| l.contains("fn "))
+                .map(|l| l.trim())
+                .unwrap_or("<unknown>");
+            // Skip this test's own body: it necessarily contains both needles
+            // as string literals, and a guard that audits itself always fails.
+            if name.contains("no_test_spawns_the_real_apply_command") {
+                continue;
+            }
+            let code: String = block
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let builds_default = code.contains("UpdatesState::default()");
+            let starts_apply = code.contains("start_apply(");
+            assert!(
+                !(builds_default && starts_apply),
+                "`{name}` builds UpdatesState::default() AND calls start_apply — \
+                 that runs a real `sudo -n pacman -Syu --noconfirm`. Use \
+                 UpdatesState::with_apply_command([...]) to point it at a fake."
+            );
+        }
     }
 }

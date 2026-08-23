@@ -1,15 +1,19 @@
-<div class="tile-grid">
-  <a class="tile" href="/processes#updates">
-    <h3>Updates</h3>
-    {% if reboot_needed %}
-    <p><span class="dot dot-error"></span>{{ pending_count }} pending &middot; reboot needed</p>
-    {% else if pending_count > 0 %}
-    <p><span class="dot dot-warn"></span>{{ pending_count }} pending</p>
-    {% else %}
-    <p><span class="dot dot-ok"></span>up to date</p>
-    {% endif %}
-    {% if !error.is_empty() %}
-    <p class="muted">{{ error }}</p>
-    {% endif %}
-  </a>
-</div>
+{# Overview's slow (300s) tile fragment — one bare tile, no `.tile-grid`
+   wrapper: the grid lives in `dashboard.html` and this swaps into a
+   `display: contents` slot inside it. Read-only, like everything on Overview;
+   the Refresh and Apply buttons live on System ▸ Updates, which this links to. #}
+<a class="tile" href="/system/updates">
+  <h3>Updates</h3>
+  {% if reboot_needed %}
+  {# The chip keeps the dot with the count it colors; the trailing clause may
+     wrap, because a nowrap on the whole line would overflow a 220px column. #}
+  <p class="tile-value"><span class="unit-chip"><span class="dot dot-error"></span>{{ pending_count }} pending</span> &middot; reboot needed</p>
+  {% else if pending_count > 0 %}
+  <p class="tile-value"><span class="unit-chip"><span class="dot dot-warn"></span>{{ pending_count }} pending</span></p>
+  {% else %}
+  <p class="tile-value"><span class="unit-chip"><span class="dot dot-ok"></span>up to date</span></p>
+  {% endif %}
+  {% if !error.is_empty() %}
+  <p class="muted">{{ error }}</p>
+  {% endif %}
+</a>

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Launcher — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Launcher</h1>
+<p class="muted">
+  What is installed on the box and what was played recently. Listing the apps renders a Launch
+  button per row. What <em>can</em> launch — the prewarm list and the web-app registry — is
+  Shell ▸ Apps.
+</p>
+
+<div id="launcher-result">
+  <p class="degraded-msg">Loading installed apps…</p>
+</div>
+
+<section class="tools-section">
+  <div class="button-row">
+    {# Auto-loads on arrival. Without this the page is a heading and two
+       buttons — it reads as broken rather than idle, and listing apps is the
+       reason anyone opens it. `load` fires once; the button stays for an
+       explicit refresh. Same pattern the Overview tiles use, and the route is
+       Node-gated, so this only fires where a node actually answered. #}
+    <form hx-post="/remote/launcher/list" hx-trigger="load, submit" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+      <button class="btn-probe" type="submit">List apps</button>
+    </form>
+    <form hx-post="/remote/launcher/recents" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+      <button class="btn-probe" type="submit">Recents</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

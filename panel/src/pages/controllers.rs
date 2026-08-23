@@ -1,14 +1,22 @@
-//! `/controllers` — the gamepad fleet: pads (battery/rumble/test), grab-state
+//! `/devices/controllers` — the gamepad fleet: pads (battery/rumble/test), grab-state
 //! management (`grab`/`release`/`handoff`), a button-binding editor
 //! (`get-bindings`/`set-binding`/`capture-next`/`capture-cancel`), read-only
 //! per-game/per-player binding layers, `set-active-game`, the controller
-//! database (`controllerdb-status`/`-refresh`), and a collapsed diagnostic
-//! `list-input-devices` enumerator.
+//! database (`controllerdb-status`/`-refresh`), a collapsed diagnostic
+//! `list-input-devices` enumerator, and — since `docs/PANEL_IA.md` phase 3 —
+//! the `Input` slice of `settings.json` (`controllerDebug`, `rumbleEnabled`).
+//!
+//! That last form posts to `POST /devices/controllers/settings/save`, which is
+//! registered in `main.rs`'s `Gate::SettingsStore` block while this page is in
+//! the `Gate::Controllers` one — a block condition may not AND two
+//! capabilities. So the form renders only when
+//! `caps.allows(Gate::SettingsStore)`; the panel never draws a control for a
+//! route that was not registered.
 //!
 //! Degradation: `GET /controllers` gathers every section independently (like
 //! `pages::processes`) — one section's IPC failure shows an inline
 //! "unavailable" note without blanking the others; every action form is
-//! always rendered (like `pages::tools`) and reports its own daemon-
+//! always rendered (like `pages::navigation`) and reports its own daemon-
 //! unreachable error inline rather than failing page load. The route itself
 //! is always 200, never a 500.
 
@@ -22,9 +30,14 @@ use axum::Form;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::capabilities::Chrome;
+use crate::capabilities::{Chrome, Gate};
+use crate::pages::settings::{self, GroupView};
 use crate::state::{AppState, SharedState};
 use crate::transport::NodeTransportExt;
+
+/// The `SettingField::group`s this page's settings form owns — rendered as its
+/// `__group` companions AND enforced server-side in [`save_settings`].
+const OWNED: &[&str] = &["Input"];
 
 // ---------------------------------------------------------------------------
 // Fixed vocabularies (docs/IPC_PROTOCOL.md § `set-binding` / Remappable
@@ -57,7 +70,7 @@ const RUMBLE_MS_MAX: u64 = 3000;
 
 // ---------------------------------------------------------------------------
 // Shared small helpers — each page keeps its own copy of this trio rather
-// than a shared utility module (mirrors `pages::tools`/`pages::processes`/
+// than a shared utility module (mirrors `pages::navigation`/`pages::processes`/
 // `pages::dev`, per the file-ownership contract).
 // ---------------------------------------------------------------------------
 
@@ -433,6 +446,12 @@ struct ControllersTemplate {
     per_player_json: String,
     config_error: String,
     controllerdb_text: String,
+    /// `POST /devices/controllers/settings/save` and `/shell/advanced` are
+    /// registered — never render a control pointing at either otherwise.
+    settings_enabled: bool,
+    /// One hidden `__group` input per entry — see `settings::build_patch`.
+    settings_scope: Vec<&'static str>,
+    settings_groups: Vec<GroupView>,
 }
 
 pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
@@ -460,17 +479,45 @@ pub async fn render_page(state: &AppState) -> String {
     let fleet_section_html = render_fleet_section(state, false).await;
     let bindings_section_html = render_bindings_section(state, None).await;
 
+    let settings_enabled = state.caps.allows(Gate::SettingsStore);
+    let settings_groups = match (settings_enabled, &config_res) {
+        // Reuses the `get-config` this page already made — the Input group is
+        // two booleans out of the same document the binding layers come from.
+        (true, Ok(cfg)) => settings::build_groups(cfg, OWNED),
+        _ => Vec::new(),
+    };
+
     let tmpl = ControllersTemplate {
-        chrome: Chrome::new(&state.caps, "controllers"),
+        chrome: Chrome::new(&state.caps, "devices.controllers"),
         fleet_section_html,
         bindings_section_html,
         per_game_json,
         per_player_json,
         config_error,
         controllerdb_text,
+        settings_enabled,
+        settings_scope: OWNED.to_vec(),
+        settings_groups,
     };
     tmpl.render()
         .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
+}
+
+// ---------------------------------------------------------------------------
+// POST /devices/controllers/settings/save — the Input settings group
+// ---------------------------------------------------------------------------
+
+/// `POST /devices/controllers/settings/save` — the `Input` group of
+/// `settings.json` (`controllerDebug`, `rumbleEnabled`) and nothing else.
+///
+/// Registered in `main.rs`'s `Gate::SettingsStore` block, not the
+/// `Gate::Controllers` one that carries this page: a block condition may name
+/// only one capability, and `set-config` is the one this route actually needs.
+pub async fn save_settings(
+    State(state): State<SharedState>,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> impl IntoResponse {
+    Html(settings::render_save(&state, OWNED, &pairs).await)
 }
 
 // ---------------------------------------------------------------------------

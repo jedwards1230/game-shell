@@ -2,7 +2,7 @@
 {% block title %}Logs — tv-shell panel{% endblock %}
 {% block content %}
 <h1>Logs</h1>
-<form class="log-controls" hx-get="/logs/view" hx-target="#log-panels" hx-swap="innerHTML">
+<form class="log-controls" hx-get="/system/logs/view" hx-target="#log-panels" hx-swap="innerHTML">
   <label>Lines
     <input type="number" name="lines" value="200" min="1" max="1000">
   </label>
@@ -16,8 +16,13 @@
   <button type="submit">Refresh</button>
 </form>
 <div class="log-presets">
-  <button type="button" hx-get="/logs/view?filter=error" hx-target="#log-panels" hx-swap="innerHTML">Errors only</button>
-  <button type="button" hx-get="/logs/view?hide_icons=on" hx-target="#log-panels" hx-swap="innerHTML">Hide icon noise</button>
+  {# "Hide icon noise" is deliberately NOT a preset button. It used to be one,
+     duplicating the checkbox above with the same label — and the preset was
+     the worse of the two, because a preset replaces the whole query and so
+     silently discarded whatever lines/filter the operator had set. The
+     checkbox composes with them instead. "Errors only" stays a preset: it has
+     no checkbox equivalent, and discarding the filter is the point of it. #}
+  <button type="button" hx-get="/system/logs/view?filter=error" hx-target="#log-panels" hx-swap="innerHTML">Errors only</button>
 </div>
 <!-- Focus controls live OUTSIDE #log-panels — its innerHTML is replaced on
      every refresh/preset click, so a toggle button placed inside it (or a
@@ -28,7 +33,7 @@
   <button type="button" id="log-focus-shell-btn" onclick="tvShellToggleLogFocus('shell')">Focus Shell</button>
   <button type="button" id="log-focus-daemon-btn" onclick="tvShellToggleLogFocus('daemon')">Focus Daemon</button>
 </div>
-<div id="log-panels" hx-get="/logs/view" hx-trigger="load" hx-swap="innerHTML">
+<div id="log-panels" hx-get="/system/logs/view" hx-trigger="load" hx-swap="innerHTML">
   <p class="muted">Loading…</p>
 </div>
 <script>

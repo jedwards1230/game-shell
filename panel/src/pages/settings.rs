@@ -1,24 +1,27 @@
-//! `/settings` — typed forms over `settings.json` via the daemon's
-//! `get-config`/`set-config` IPC commands (shallow merge; the daemon remains
-//! the sole writer of `settings.json`), plus a read-only view of the
-//! daemon-owned binding keys, a read-only `config.toml` viewer, and a raw
-//! JSON escape hatch for keys this page doesn't model as typed fields.
+//! The `settings.json` schema shared by every page that owns a slice of it.
 //!
-//! Degradation: when the daemon is unreachable, `GET /settings` still
-//! returns 200 with a clear "unreachable" banner and no forms (mirrors
-//! `pages::dev`'s up/down banner) — never a 500.
+//! **Not a page.** The Settings page was dissolved in `docs/PANEL_IA.md`
+//! phase 3; what is left here is the typed schema (mirroring the QML-owned
+//! keys `SettingsStore.qml` persists), the form renderer, and the scoped
+//! `set-config` patch builder that the five surviving save routes share:
+//!
+//! | Route | Groups |
+//! |---|---|
+//! | `POST /shell/appearance/save` | `Appearance` |
+//! | `POST /shell/apps/save` | `Apps` |
+//! | `POST /devices/display-audio/save` | `Display`, `Night Light`, `Power`, `Audio` |
+//! | `POST /devices/cec/config` | `CEC` |
+//! | `POST /devices/controllers/settings/save` | `Input` |
+//!
+//! Splitting one form into five is what makes [`build_patch`]'s group scoping
+//! load-bearing rather than cosmetic — see its doc comment.
 
 use std::collections::HashMap;
 
 use askama::Template;
-use axum::extract::State;
-use axum::response::{Html, IntoResponse};
-use axum::Form;
-use serde::Deserialize;
 use serde_json::Value;
 
-use crate::capabilities::{CapabilitySnapshot, Chrome};
-use crate::state::{AppState, SharedState};
+use crate::state::AppState;
 use crate::transport::NodeTransportExt;
 
 // ---------------------------------------------------------------------------
@@ -49,13 +52,16 @@ pub enum FieldKind {
     StrList,
     /// An object-valued key that doesn't fit a simple form field (e.g. a
     /// nested map). Never rendered as a typed input and never emitted in the
-    /// typed save patch — editable only via the raw JSON escape hatch.
+    /// typed save patch — editable only via the raw JSON escape hatch on
+    /// Shell ▸ Advanced.
     Complex,
 }
 
 pub struct SettingField {
     pub key: &'static str,
     pub label: &'static str,
+    /// The page-facing grouping, and the unit of [`build_patch`]'s scoping —
+    /// a save only ever touches the groups its form declared.
     pub group: &'static str,
     pub kind: FieldKind,
     pub default: &'static str,
@@ -105,6 +111,17 @@ pub const SCHEMA: &[SettingField] = &[
         group: "Appearance",
         kind: FieldKind::Float,
         default: "1.0",
+    },
+    // Written by the wallpaper grid on Shell ▸ Appearance, never by a typed
+    // input — see `CUSTOM_EDITOR_KEYS`. It lived in `Display` until phase 4,
+    // which put a raw path text field on Devices ▸ Display & Audio while its
+    // real editor was on another page.
+    SettingField {
+        key: "wallpaperPath",
+        label: "Wallpaper image path (empty = none)",
+        group: "Appearance",
+        kind: FieldKind::Str,
+        default: "",
     },
     SettingField {
         key: "controllerDebug",
@@ -160,13 +177,6 @@ pub const SCHEMA: &[SettingField] = &[
             max: None,
         },
         default: "2",
-    },
-    SettingField {
-        key: "wallpaperPath",
-        label: "Wallpaper image path (empty = none)",
-        group: "Display",
-        kind: FieldKind::Str,
-        default: "",
     },
     SettingField {
         key: "nightLightEnabled",
@@ -267,44 +277,52 @@ pub const SCHEMA: &[SettingField] = &[
 /// `perGameBindings`/`perPlayerBindings` are the per-game/per-player override
 /// layers documented in `docs/IPC_PROTOCOL.md` (`daemon/src/config.rs`); and
 /// `webApps` is the web-app registry (`docs/WEB_APPS.md`) — daemon-owned from
-/// P0, with the registry IPC arriving in P1. Rendered read-only here — the
-/// Controllers page owns resolved bindings, and web-app management follows the
-/// registry IPC — and NEVER emitted in a typed or raw save patch this page
-/// constructs itself (the raw JSON escape hatch can still touch them if an
-/// operator explicitly types them in, same as any other key).
-const DAEMON_OWNED_KEYS: &[&str] = &[
+/// P0, with the registry IPC arriving in P1. Rendered read-only on Shell ▸
+/// Advanced — the Controllers page owns resolved bindings, and web-app
+/// management follows the registry IPC — and NEVER emitted in a typed or raw
+/// save patch the panel constructs itself (the raw JSON escape hatch can still
+/// touch them if an operator explicitly types them in, same as any other key).
+pub const DAEMON_OWNED_KEYS: &[&str] = &[
     "keyBindings",
     "perGameBindings",
     "perPlayerBindings",
     "webApps",
 ];
 
+/// Schema keys whose page renders a **bespoke editor** for them instead of a
+/// typed input, so [`build_groups`] must not also render the generic field.
+///
+/// `wallpaperPath` is the only one: Shell ▸ Appearance's wallpaper grid writes
+/// it (`POST /shell/appearance/wallpaper/select`), and a raw path text field
+/// beside the grid would be a second, worse editor for the same key —
+/// bypassing the containment checks the picker enforces.
+///
+/// Omitting a key from the rendered form omits it from the submitted form and
+/// therefore from the patch. That is safe **because it is a `FieldKind::Str`**:
+/// non-`Bool` kinds are only written when present, and the daemon's shallow
+/// merge leaves an unmentioned key untouched. A `Bool` could not be handled
+/// this way — [`build_patch`] writes every in-scope `Bool` unconditionally, so
+/// dropping one from the form would write it `false`.
+pub const CUSTOM_EDITOR_KEYS: &[&str] = &["wallpaperPath"];
+
+/// The hidden form field each split settings form emits — once per
+/// [`SettingField::group`] it renders — so [`build_patch`] knows which slice
+/// of the schema the submission actually covers.
+pub const GROUP_FIELD: &str = "__group";
+
 // ---------------------------------------------------------------------------
 // View models
 // ---------------------------------------------------------------------------
 
-struct FieldView {
-    key: &'static str,
-    label: &'static str,
-    input_html: String,
+pub struct FieldView {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub input_html: String,
 }
 
-struct GroupView {
-    name: &'static str,
-    fields: Vec<FieldView>,
-}
-
-#[derive(Template)]
-#[template(path = "settings.html")]
-struct SettingsTemplate {
-    chrome: Chrome,
-    daemon_up: bool,
-    groups: Vec<GroupView>,
-    complex_notes_html: String,
-    daemon_owned_json: String,
-    config_toml: String,
-    config_toml_path: String,
-    raw_json: String,
+pub struct GroupView {
+    pub name: &'static str,
+    pub fields: Vec<FieldView>,
 }
 
 #[derive(Template)]
@@ -314,7 +332,8 @@ struct SettingsResultTemplate {
     message: String,
 }
 
-fn result_html(ok: bool, message: &str) -> String {
+/// The shared save-result partial every settings form swaps in.
+pub fn result_html(ok: bool, message: &str) -> String {
     let tmpl = SettingsResultTemplate {
         ok,
         message: message.to_string(),
@@ -324,69 +343,23 @@ fn result_html(ok: bool, message: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// GET /settings
+// Form rendering
 // ---------------------------------------------------------------------------
 
-/// `GET /settings` — fetches the current settings document via `get-config`
-/// and renders grouped typed forms, or a degraded banner (still HTTP 200)
-/// when the daemon is unreachable.
-pub async fn page(State(state): State<SharedState>) -> impl IntoResponse {
-    Html(render_page(&state).await)
-}
-
-pub async fn render_page(state: &AppState) -> String {
-    match state.node.get_config().await {
-        Ok(cfg) => render_ok(&state.caps, &cfg),
-        Err(_e) => render_degraded(&state.caps),
-    }
-}
-
-fn render_ok(caps: &CapabilitySnapshot, cfg: &Value) -> String {
-    let chrome = Chrome::new(caps, "settings");
-    let (config_toml, config_toml_path) = read_config_toml();
-    let tmpl = SettingsTemplate {
-        chrome,
-        daemon_up: true,
-        groups: build_groups(cfg),
-        complex_notes_html: complex_notes_html(),
-        daemon_owned_json: daemon_owned_json(cfg),
-        config_toml,
-        config_toml_path,
-        // Pretty-printed for editing; `render_save_raw` accepts this
-        // unchanged (`serde_json::from_str` tolerates whitespace) and
-        // `NodeTransportExt::set_config` already compacts it back to a single line
-        // before it ever reaches the daemon.
-        raw_json: serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".to_string()),
-    };
-    tmpl.render()
-        .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
-}
-
-fn render_degraded(caps: &CapabilitySnapshot) -> String {
-    let chrome = Chrome::new(caps, "settings");
-    let (config_toml, config_toml_path) = read_config_toml();
-    let tmpl = SettingsTemplate {
-        chrome,
-        daemon_up: false,
-        groups: Vec::new(),
-        complex_notes_html: String::new(),
-        daemon_owned_json: String::new(),
-        config_toml,
-        config_toml_path,
-        raw_json: String::new(),
-    };
-    tmpl.render()
-        .unwrap_or_else(|e| format!("<p class=\"banner banner-error\">render error: {e}</p>"))
-}
-
-/// Build the grouped typed-form view model from the current settings
-/// document, in `SCHEMA` order (first appearance of a group name wins its
-/// position). `Complex`-kind fields are skipped — they're surfaced only via
-/// `complex_notes_html` and the raw JSON escape hatch.
-fn build_groups(cfg: &Value) -> Vec<GroupView> {
+/// Build the grouped typed-form view model for `scope` from the current
+/// settings document, in `SCHEMA` order (first appearance of a group name wins
+/// its position). Groups outside `scope` are skipped entirely; `Complex`-kind
+/// fields are never rendered — they are surfaced only via
+/// [`complex_notes_html`] and the raw JSON escape hatch on Shell ▸ Advanced —
+/// and neither are the [`CUSTOM_EDITOR_KEYS`], which their page edits its own
+/// way.
+pub fn build_groups(cfg: &Value, scope: &[&str]) -> Vec<GroupView> {
     let mut groups: Vec<GroupView> = Vec::new();
     for f in SCHEMA {
-        if matches!(f.kind, FieldKind::Complex) {
+        if matches!(f.kind, FieldKind::Complex)
+            || CUSTOM_EDITOR_KEYS.contains(&f.key)
+            || !scope.contains(&f.group)
+        {
             continue;
         }
         let field = FieldView {
@@ -506,8 +479,8 @@ fn escape_attr(s: &str) -> String {
 }
 
 /// A pre-rendered (safe-to-inline) note listing the `Complex`-kind schema
-/// keys, for the "edit these via raw JSON instead" callout.
-fn complex_notes_html() -> String {
+/// keys, for Shell ▸ Advanced's "edit these via raw JSON instead" callout.
+pub fn complex_notes_html() -> String {
     let keys: Vec<&str> = SCHEMA
         .iter()
         .filter(|f| matches!(f.kind, FieldKind::Complex))
@@ -520,8 +493,8 @@ fn complex_notes_html() -> String {
 }
 
 /// Pretty-printed JSON of just the daemon-owned keys present in `cfg`, for
-/// the read-only bindings viewer.
-fn daemon_owned_json(cfg: &Value) -> String {
+/// Shell ▸ Advanced's read-only bindings viewer.
+pub fn daemon_owned_json(cfg: &Value) -> String {
     let mut obj = serde_json::Map::new();
     for key in DAEMON_OWNED_KEYS {
         if let Some(v) = cfg.get(*key) {
@@ -532,9 +505,10 @@ fn daemon_owned_json(cfg: &Value) -> String {
 }
 
 /// Read `config.toml` read-only for display. Missing/unreadable file yields
-/// an honest placeholder rather than an error — this page never writes it
-/// (the edit path is deferred; see `docs/PANEL.md`).
-fn read_config_toml() -> (String, String) {
+/// an honest placeholder rather than an error — the panel never writes it
+/// from Shell ▸ Advanced (the one targeted exception anywhere is the CEC
+/// page's `[cec].osd_name` editor; see `docs/PANEL.md`).
+pub fn read_config_toml() -> (String, String) {
     let path = crate::config::config_toml_path();
     let path_str = path.display().to_string();
     match std::fs::read_to_string(&path) {
@@ -544,22 +518,16 @@ fn read_config_toml() -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /settings/save — typed form
+// The scoped save
 // ---------------------------------------------------------------------------
 
-/// `POST /settings/save` — parses a submitted form against `SCHEMA` and
-/// `set-config`s the resulting patch. Checkbox absence maps to explicit
-/// `false`; an invalid enum/int/float value fails validation and returns an
-/// error partial without writing anything.
-pub async fn save(
-    State(state): State<SharedState>,
-    Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    Html(render_save(&state, &form).await)
-}
-
-pub async fn render_save(state: &AppState, form: &HashMap<String, String>) -> String {
-    match build_patch(form) {
+/// Run one settings form's save: build the scoped patch, then `set-config` it.
+///
+/// `owned` is the route's OWN group list — a compile-time constant on the page
+/// module, never anything the client can influence. The submitted `__group`
+/// companions must be a non-empty subset of it.
+pub async fn render_save(state: &AppState, owned: &[&str], pairs: &[(String, String)]) -> String {
+    match build_patch(owned, pairs) {
         Ok(patch) => match state.node.set_config(&patch).await {
             Ok(()) => result_html(true, "Settings saved."),
             Err(e) => result_html(false, &format!("Save failed: {e}")),
@@ -568,16 +536,71 @@ pub async fn render_save(state: &AppState, form: &HashMap<String, String>) -> St
     }
 }
 
-/// Build a `set-config` patch containing ONLY the non-`Complex` `SCHEMA`
-/// keys. Bool fields always get an entry (`form.contains_key` gates
-/// true/false, so an unchecked box is sent as explicit `false`); other
-/// fields are included only when present in `form` (a missing typed field
-/// leaves that key untouched via the shallow merge rather than guessing a
-/// value). Returns `Err(message)` on the first validation failure — no
-/// partial patch is ever sent.
-fn build_patch(form: &HashMap<String, String>) -> Result<Value, String> {
+/// The groups a submission declared, validated against the schema and against
+/// the route's own group list.
+///
+/// Fails closed on an empty set. That is the whole point: [`build_patch`]
+/// writes every `Bool` in scope as an explicit `true`/`false`, so a patch that
+/// defaulted to "all groups" when a form forgot its companions would silently
+/// clear the 10 checkboxes belonging to the other pages.
+fn submitted_groups<'a>(
+    owned: &[&'a str],
+    pairs: &[(String, String)],
+) -> Result<Vec<&'a str>, String> {
+    let mut out: Vec<&'a str> = Vec::new();
+    for (k, v) in pairs {
+        if k != GROUP_FIELD {
+            continue;
+        }
+        let name = v.trim();
+        if !SCHEMA.iter().any(|f| f.group == name) {
+            return Err(format!(
+                "unknown settings group {name:?} — not a group in the settings schema"
+            ));
+        }
+        let owned_name = owned.iter().find(|g| **g == name).ok_or_else(|| {
+            format!("settings group {name:?} is not owned by the form that was submitted")
+        })?;
+        if !out.contains(owned_name) {
+            out.push(owned_name);
+        }
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "no {GROUP_FIELD} submitted — a settings form must declare the schema \
+             groups it owns; refusing to patch every group"
+        ));
+    }
+    Ok(out)
+}
+
+/// Build a `set-config` patch from a submitted form, as `(name, value)` pairs
+/// so the repeated [`GROUP_FIELD`] companions survive (a `HashMap` extractor
+/// would keep only the last one).
+///
+/// **Scoped to the submitted groups.** Each page carries only its own slice of
+/// [`SCHEMA`], so the patch must too: a `SCHEMA` entry whose `group` was not
+/// declared by the form is skipped entirely and left untouched by the daemon's
+/// shallow merge.
+///
+/// Within a submitted group the old behaviour is unchanged and deliberate:
+/// `Bool` fields ALWAYS get an entry (`contains_key` gates true/false, so an
+/// unchecked box is written as explicit `false`), while other kinds are
+/// included only when present in the form. Returns `Err(message)` on the first
+/// validation failure — no partial patch is ever sent.
+pub fn build_patch(owned: &[&str], pairs: &[(String, String)]) -> Result<Value, String> {
+    let groups = submitted_groups(owned, pairs)?;
+    let form: HashMap<&str, &str> = pairs
+        .iter()
+        .filter(|(k, _)| k != GROUP_FIELD)
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
     let mut patch = serde_json::Map::new();
     for f in SCHEMA {
+        if !groups.contains(&f.group) {
+            continue;
+        }
         match f.kind {
             FieldKind::Complex => continue,
             FieldKind::Bool => {
@@ -585,7 +608,7 @@ fn build_patch(form: &HashMap<String, String>) -> Result<Value, String> {
             }
             FieldKind::Enum(allowed) => {
                 if let Some(v) = form.get(f.key) {
-                    if !allowed.contains(&v.as_str()) {
+                    if !allowed.contains(v) {
                         return Err(format!(
                             "invalid value for {}: {:?} (allowed: {})",
                             f.key,
@@ -593,7 +616,7 @@ fn build_patch(form: &HashMap<String, String>) -> Result<Value, String> {
                             allowed.join(", ")
                         ));
                     }
-                    patch.insert(f.key.to_string(), Value::String(v.clone()));
+                    patch.insert(f.key.to_string(), Value::String((*v).to_string()));
                 }
             }
             FieldKind::Int { min, max } => {
@@ -628,7 +651,7 @@ fn build_patch(form: &HashMap<String, String>) -> Result<Value, String> {
             }
             FieldKind::Str => {
                 if let Some(v) = form.get(f.key) {
-                    patch.insert(f.key.to_string(), Value::String(v.clone()));
+                    patch.insert(f.key.to_string(), Value::String((*v).to_string()));
                 }
             }
             FieldKind::StrList => {
@@ -645,39 +668,4 @@ fn build_patch(form: &HashMap<String, String>) -> Result<Value, String> {
         }
     }
     Ok(Value::Object(patch))
-}
-
-// ---------------------------------------------------------------------------
-// POST /settings/raw — raw JSON escape hatch
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct RawForm {
-    raw_json: String,
-}
-
-/// `POST /settings/raw` — validates the submitted text is a JSON *object*
-/// server-side before writing anything (client-side JS in `settings.html`
-/// does the same check for immediate feedback, but this is the
-/// authoritative gate). A parse failure or non-object body returns a 200
-/// error partial; nothing is sent to the daemon in either case.
-pub async fn save_raw(
-    State(state): State<SharedState>,
-    Form(form): Form<RawForm>,
-) -> impl IntoResponse {
-    Html(render_save_raw(&state, &form.raw_json).await)
-}
-
-pub async fn render_save_raw(state: &AppState, raw: &str) -> String {
-    match serde_json::from_str::<Value>(raw) {
-        Ok(v) if v.is_object() => match state.node.set_config(&v).await {
-            Ok(()) => result_html(true, "Raw JSON merged into settings.json."),
-            Err(e) => result_html(false, &format!("Save failed: {e}")),
-        },
-        Ok(_) => result_html(
-            false,
-            "Invalid: raw JSON must be an object, e.g. {\"key\":value} — not an array or scalar.",
-        ),
-        Err(e) => result_html(false, &format!("Invalid JSON: {e}")),
-    }
 }

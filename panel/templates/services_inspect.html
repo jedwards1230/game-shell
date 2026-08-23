@@ -1,0 +1,33 @@
+{# Three outcomes, not two. `resolved == false` means the INPUT was rejected —
+   there is no unit to say anything about, so a bare banner is the whole answer.
+   Once the name and scope parse there IS a unit, and whether it is restartable
+   is a `[panel].managed_units` fact that holds even when the read failed: a
+   `systemctl` that will not spawn says nothing about the allowlist. #}
+{% if !resolved %}
+<p class="banner banner-error">{{ error }}</p>
+{% else %}
+<div class="unit-inspect">
+  <h3>{{ id }} <span class="muted">({{ scope }})</span></h3>
+  {% if error != "" %}
+  <p class="banner banner-error">{{ error }}</p>
+  {% else if !found %}
+  <p class="banner banner-warn">systemd does not know this unit in the <code>{{ scope }}</code> scope{% if load_state != "" %} (<code>{{ load_state }}</code>){% endif %}. Check the name, or try the other scope.</p>
+  {% else %}
+  {% if description != "" %}<p class="muted">{{ description }}</p>{% endif %}
+  <table>
+    <tbody>
+      <tr><th>State</th><td><span class="unit-chip"><span class="dot {{ dot_class }}"></span>{{ state_word }}</span>{% if active_state != state_word %} <span class="muted">({{ active_state }})</span>{% endif %}{% if sub_state != "" %} <span class="muted">/ {{ sub_state }}</span>{% endif %}</td></tr>
+      <tr><th>Enabled</th><td>{% if enabled_state != "" %}{{ enabled_state }}{% else %}<span class="muted">—</span>{% endif %}</td></tr>
+      <tr><th>Active since</th><td>{% if active_since != "" %}{{ active_since }}{% else %}<span class="muted">—</span>{% endif %}</td></tr>
+      <tr><th>Load state</th><td>{{ load_state }}</td></tr>
+      {% if failure_reason != "" %}<tr><th>Failure</th><td>{{ failure_reason }}</td></tr>{% endif %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if restart_key != "" %}
+  <p class="muted">This unit is on the restart allowlist as <code>{{ restart_key }}</code> — restart it from the table above.</p>
+  {% else %}
+  <p class="muted">Read-only: this unit is not in the restart allowlist, so the panel cannot restart it.</p>
+  {% endif %}
+</div>
+{% endif %}

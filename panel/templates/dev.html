@@ -1,14 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Dev — tv-shell panel{% endblock %}
+{% block title %}Recovery — tv-shell panel{% endblock %}
 {% block content %}
-<h1>Dev</h1>
+{# Titled for the PAGE, not the group: Dev has three pages as of phase 4
+   (Recovery / Screenshot / Console) and the sub-nav names the group, so this
+   h1 names what is on THIS page. #}
+<h1>Recovery</h1>
 <p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
   Daemon: {% if daemon_up %}up{% else %}down{% endif %}
   · Bridge: {% if bridge_configured %}configured{% else %}not configured{% endif %}
 </p>
 <p class="muted">
-  Unit state (systemd, refreshes after every action below): daemon
-  {{ daemon_chip_html|safe }} · shell {{ shell_chip_html|safe }}
+  Unit state (systemd, refreshes after every action below):
+  {{ daemon_chip_html|safe }} · {{ shell_chip_html|safe }}
 </p>
 
 <div id="dev-result"></div>
@@ -76,13 +79,5 @@
   (<code>[http].bind</code>) or a dev-enabled MCP server is configured.
 </p>
 {% endif %}
-{% endif %}
-
-{% if screenshot_enabled %}
-<div class="dev-screenshot">
-  <h3>Screenshot <span class="tier">Bridge</span></h3>
-  <button hx-post="/dev/screenshot/capture" hx-disabled-elt="this" hx-target="#dev-screenshot-result" hx-swap="innerHTML">Load screenshot</button>
-  <div id="dev-screenshot-result"></div>
-</div>
 {% endif %}
 {% endblock %}

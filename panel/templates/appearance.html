@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Appearance — tv-shell panel{% endblock %}
+{% block content %}
+<h1>Appearance</h1>
+<p class="muted">Theme, auto-theme schedule, motion, text scale and the wallpaper — how the QML shell looks, stored in <code>settings.json</code>.</p>
+<p class="banner {% if daemon_up %}banner-ok{% else %}banner-error{% endif %}">
+  {% if daemon_up %}
+    Daemon: up — these settings can be read and written
+  {% else %}
+    Daemon unreachable — wallpaper files are still listed below, but reading and writing settings
+    (including picking a wallpaper) needs the daemon. See the <a href="/dev/recovery">Recovery</a> page.
+  {% endif %}
+</p>
+
+<div id="settings-result"></div>
+
+{% if daemon_up %}
+<form hx-post="/shell/appearance/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
+  {# Scopes the save to this page's schema groups. Without these the patch
+     would carry every Bool in the schema and clear the other pages' toggles —
+     see pages::settings::build_patch. #}
+  {% for group in scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
+  {% for group in groups %}
+  <section class="settings-group">
+    {% for field in group.fields %}
+    <div class="field-row">
+      <label for="{{ field.key }}">{{ field.label }}</label>
+      {{ field.input_html|safe }}
+    </div>
+    {% endfor %}
+  </section>
+  {% endfor %}
+  <button type="submit">Save appearance</button>
+</form>
+{% else %}
+<p class="degraded-msg">The appearance form is unavailable while the daemon is unreachable — it is the only writer of <code>settings.json</code>.</p>
+{% endif %}
+
+<section class="tools-section">
+  <h2>Wallpaper</h2>
+  <p class="muted">
+    Images live in <code>{{ wallpapers_dir }}</code> and appear on the TV under
+    Settings ▸ Wallpaper. Accepted: JPG, PNG, WebP, BMP — up to {{ max_upload_mb }} MB each.
+    Picking one writes <code>wallpaperPath</code>, which is why this grid is its editor and there
+    is no raw path field in the form above.
+  </p>
+
+  <div id="wallpaper-result"></div>
+
+  <form hx-post="/shell/appearance/wallpaper/upload" hx-encoding="multipart/form-data"
+        hx-disabled-elt="find button" hx-target="#wallpaper-result" hx-swap="innerHTML"
+        class="inline-form">
+    <input type="file" name="files" accept=".jpg,.jpeg,.png,.webp,.bmp" multiple required>
+    <button type="submit">Upload</button>
+  </form>
+
+  {# The two markers below delimit the fragment pages::appearance::
+     render_wallpaper_list_oob slices out of a re-render of this page for its
+     out-of-band swap. Moving or renaming either one silently empties every
+     post-action grid refresh — see that function's doc comment. #}
+  <div id="wallpaper-list">
+    <!--wallpaper-list-start-->
+    {% if wallpapers.is_empty() %}
+    <p class="muted">No wallpapers yet — upload one above.</p>
+    {% endif %}
+    {# The None tile renders even with an empty grid: it is the only control
+       that CLEARS `wallpaperPath`, and hiding it stranded anyone whose
+       configured path no longer resolves to a file on the box. #}
+    <div class="wallpaper-grid">
+      <div class="wallpaper-tile {% if !any_selected %}wallpaper-selected{% endif %}">
+        <div class="wallpaper-none">None<br><span class="muted">(solid colour)</span></div>
+        <div class="wallpaper-actions">
+          <form hx-post="/shell/appearance/wallpaper/select" hx-disabled-elt="find button"
+                hx-target="#wallpaper-result" hx-swap="innerHTML" class="inline-form">
+            <input type="hidden" name="name" value="">
+            <button type="submit">{% if !any_selected %}Active{% else %}Use{% endif %}</button>
+          </form>
+        </div>
+      </div>
+      {% for w in wallpapers %}
+      <div class="wallpaper-tile {% if w.selected %}wallpaper-selected{% endif %}">
+        <img src="/shell/appearance/wallpaper/file?name={{ w.name|urlencode }}" alt="{{ w.name }}" loading="lazy">
+        <div class="wallpaper-name" title="{{ w.name }}">{{ w.name }}</div>
+        <div class="wallpaper-actions">
+          <form hx-post="/shell/appearance/wallpaper/select" hx-disabled-elt="find button"
+                hx-target="#wallpaper-result" hx-swap="innerHTML" class="inline-form">
+            <input type="hidden" name="name" value="{{ w.name }}">
+            <button type="submit">{% if w.selected %}Active{% else %}Use{% endif %}</button>
+          </form>
+          <form hx-post="/shell/appearance/wallpaper/delete" hx-disabled-elt="find button"
+                hx-target="#wallpaper-result" hx-swap="innerHTML" class="inline-form"
+                hx-confirm="Delete {{ w.name }} from the box? This removes the file.">
+            <input type="hidden" name="name" value="{{ w.name }}">
+            <button class="danger" type="submit">Delete</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <!--wallpaper-list-end-->
+  </div>
+</section>
+{% endblock %}

@@ -2,35 +2,7 @@
 {% block title %}Processes — tv-shell panel{% endblock %}
 {% block content %}
 <h1>Processes</h1>
-
-<div id="processes-result"></div>
-
-<section class="processes-section">
-  <h2>systemd units</h2>
-  <table>
-    <thead><tr><th>Unit</th><th>State</th><th></th></tr></thead>
-    <tbody>
-    {% for u in units %}
-    <tr>
-      <td>{{ u.label }} <span class="muted">({{ u.unit }})</span></td>
-      <td><span class="dot {{ u.dot_class }}"></span>{{ u.state_word }} <span class="muted">({{ u.state }})</span></td>
-      <td>
-        <form hx-post="/processes/restart/{{ u.key }}" hx-disabled-elt="find button" hx-target="#processes-result" hx-swap="innerHTML"
-              hx-confirm="{{ u.confirm }}" class="inline-form">
-          <button class="warn-action" type="submit">Restart</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</section>
-
-<section class="processes-section" id="updates">
-  <h2>System Updates</h2>
-  {{ updates_check_html|safe }}
-  {{ update_job_html|safe }}
-</section>
+<p class="muted">Read-only observation. Unit control lives on <a href="/system/services">Services</a>.</p>
 
 <section class="processes-section">
   <h2>Hyprland</h2>
@@ -38,7 +10,11 @@
   <p class="banner banner-error">Hyprland data unavailable — daemon unreachable or the Hyprland actor is down.</p>
   {% endif %}
   <h3>Active window</h3>
+  {% if hypr_active_empty %}
+  <p class="degraded-msg">No window is focused — the shell itself is on screen.</p>
+  {% else %}
   <pre>{{ hypr_active }}</pre>
+  {% endif %}
   <h3>Clients</h3>
   {% if hypr_clients_error.is_empty() %}
     {% if hypr_clients_rows.is_empty() %}
