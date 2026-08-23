@@ -1,19 +1,25 @@
 //! MCP server for the tv-shell daemon, built on the official `rmcp` 1.7.0 crate.
 //!
-//! **Opt-in**: the server only starts when the `TV_SHELL_MCP_BIND` environment
-//! variable is set to a `host:port` address. When unset, no socket is opened.
+//! **Opt-in**: the server only starts when `[mcp].bind` in `config.toml` is set
+//! to a `host:port` address. When unset, no socket is opened.
 //!
 //! **Auth**: bearer-token auth at parity with the HTTP bridge. Uses the same
-//! `TV_SHELL_HTTP_TOKEN` and `TV_SHELL_HTTP_AUTH_ENABLED` env vars so
+//! `[http].token_file` and `[http].auth_enabled` settings so
 //! operators only need one token. Applied via an axum middleware layer wrapping
 //! the `/mcp` route; constant-time comparison via `bridge_core::ct_eq_str`.
 //! If auth is enabled but no token is configured, all requests are rejected (fail
-//! closed). `TV_SHELL_MCP_ALLOWED_HOSTS` (comma-separated host[:port]) overrides
-//! the rmcp host allowlist.
+//! closed). `[mcp].allowed_hosts` (a list of host[:port]) overrides the rmcp
+//! host allowlist.
 //!
-//! **Dev tools**: `dev_deploy`, `dev_build`, and `dev_restart_daemon` are only
-//! registered when `TV_SHELL_MCP_DEV` is set (any non-empty value). This keeps
-//! the production tool surface minimal.
+//! **Dev tools**: `dev_deploy`, `dev_build`, and `dev_restart_daemon` are
+//! registered **unconditionally** and return an error unless `[mcp].dev = true`
+//! in `config.toml` (see `docs/CONTROL_SURFACE.md`). Registering them either way
+//! keeps the tool list stable across nodes; the gate is on invocation.
+//!
+//! They are a remote-code-execution surface by design — `dev_deploy` checks out
+//! an arbitrary git ref and `dev_build` compiles and installs it — so on a node
+//! that enables them the bearer token is as privileged as the account the daemon
+//! runs as. Enable deliberately.
 //!
 //! **Transport**: StreamableHttpService over axum, served at `/mcp`. The MCP
 //! endpoint is at `http://<bind>/mcp`.
@@ -667,14 +673,14 @@ impl TvShellMcp {
         }
     }
 
-    // ── Dev operations (gated on TV_SHELL_MCP_DEV) ─────────────────────────
+    // ── Dev operations (gated on [mcp].dev in config.toml) ────────────────
     // These are only *registered* when dev_enabled is true; the tool_router
     // includes them unconditionally at compile time but they return a clear
     // error when the dev flag is absent — this is the safest approach with the
     // current rmcp macro model (conditional registration is not yet supported).
 
     #[tool(
-        description = "DEV ONLY (requires TV_SHELL_MCP_DEV env var). \
+        description = "DEV ONLY (requires [mcp].dev = true in config.toml). \
             git fetch + checkout + reset to remote. Defaults to 'main'. \
             Use to pull a branch onto the device without a full re-deploy.",
         annotations(read_only_hint = false, destructive_hint = true)
@@ -685,7 +691,7 @@ impl TvShellMcp {
     ) -> CallToolResult {
         if !self.handles.dev_enabled {
             return CallToolResult::error(vec![ContentBlock::text(
-                "dev tools disabled — set TV_SHELL_MCP_DEV to enable",
+                "dev tools disabled — set [mcp].dev = true in config.toml and restart the daemon to enable",
             )]);
         }
         match bridge_core::dev_deploy(git_ref.as_deref()).await {
@@ -695,7 +701,7 @@ impl TvShellMcp {
     }
 
     #[tool(
-        description = "DEV ONLY (requires TV_SHELL_MCP_DEV env var). \
+        description = "DEV ONLY (requires [mcp].dev = true in config.toml). \
             Run scripts/build-daemon.sh and install the resulting binary. \
             This is a long-running operation (~15-60 seconds depending on cache).",
         annotations(read_only_hint = false, destructive_hint = true)
@@ -703,7 +709,7 @@ impl TvShellMcp {
     async fn dev_build(&self) -> CallToolResult {
         if !self.handles.dev_enabled {
             return CallToolResult::error(vec![ContentBlock::text(
-                "dev tools disabled — set TV_SHELL_MCP_DEV to enable",
+                "dev tools disabled — set [mcp].dev = true in config.toml and restart the daemon to enable",
             )]);
         }
         match bridge_core::dev_build().await {
@@ -713,7 +719,7 @@ impl TvShellMcp {
     }
 
     #[tool(
-        description = "DEV ONLY (requires TV_SHELL_MCP_DEV env var). \
+        description = "DEV ONLY (requires [mcp].dev = true in config.toml). \
             Re-exec the daemon process (picks up a newly built binary). \
             The MCP connection will drop immediately after the response.",
         annotations(read_only_hint = false, destructive_hint = true)
@@ -721,7 +727,7 @@ impl TvShellMcp {
     async fn dev_restart_daemon(&self) -> CallToolResult {
         if !self.handles.dev_enabled {
             return CallToolResult::error(vec![ContentBlock::text(
-                "dev tools disabled — set TV_SHELL_MCP_DEV to enable",
+                "dev tools disabled — set [mcp].dev = true in config.toml and restart the daemon to enable",
             )]);
         }
         bridge_core::request_reexec(&self.handles.reexec_flag, &self.handles.shutdown);
@@ -774,7 +780,7 @@ async fn auth_middleware(
 /// Bind an axum listener to `addr` and serve the MCP Streamable HTTP server
 /// on `/mcp` until the shared `shutdown` token is cancelled.
 ///
-/// Called from `main.rs` when `TV_SHELL_MCP_BIND` is set. The shared
+/// Called from `main.rs` when `[mcp].bind` is set. The shared
 /// CancellationToken is cancelled on SIGTERM/SIGINT or when a re-exec is
 /// requested — both paths call `bridge_core::request_reexec` which cancels
 /// the token. The MCP server then shuts down cleanly and the main loop
@@ -805,7 +811,7 @@ pub async fn serve(
     };
 
     // Treat an empty token as no token at all, so an operator who sets
-    // TV_SHELL_HTTP_TOKEN="" can never accidentally satisfy the auth check —
+    // an empty `[http].token_file` can never accidentally satisfy the auth check —
     // it fails closed (rejects all) instead of accepting `Bearer ` (empty).
     let token = token.filter(|t| !t.is_empty());
 
@@ -821,7 +827,7 @@ pub async fn serve(
     // Build auth state for the middleware.
     let auth_state = if !auth_enabled {
         tracing::warn!(
-            "mcp: AUTH DISABLED (TV_SHELL_HTTP_AUTH_ENABLED=0) — \
+            "mcp: AUTH DISABLED ([http].auth_enabled = false) — \
              any host on the network can send MCP commands without authentication"
         );
         AuthState {
@@ -832,9 +838,9 @@ pub async fn serve(
         match &token {
             None => {
                 tracing::warn!(
-                    "mcp: auth is ENABLED but TV_SHELL_HTTP_TOKEN is not set — \
-                     all MCP requests will be rejected with 401 (set the token or \
-                     disable auth with TV_SHELL_HTTP_AUTH_ENABLED=0)"
+                    "mcp: auth is ENABLED but no token is configured — \
+                     all MCP requests will be rejected with 401 (set [http].token_file, \
+                     or disable auth with [http].auth_enabled = false, in config.toml)"
                 );
                 AuthState {
                     expected_bearer: None,

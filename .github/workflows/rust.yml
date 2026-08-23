@@ -146,7 +146,10 @@ jobs:
             echo "| Test | ${{ steps.test.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Separate leg for the OPTIONAL `cec` feature (#94). The default `build` job
+  # Separate leg for the OPTIONAL `cec` and `mcp` features (#94). Together they
+  # are the set the deploy actually ships — scripts/build-daemon.sh and
+  # scripts/install.sh both default TV_SHELL_FEATURES to "cec,mcp" — so this leg
+  # is what keeps the shipped feature graph honest. The default `build` job
   # above stays C-free; this job exercises the libcec link. The `cec` feature
   # forwards `libcec-sys/static` (#179), so libcec-sys STATIC-links a prebuilt
   # libcec + p8-platform into the binary (fetched from ssalonen/libcec-static-
@@ -160,7 +163,7 @@ jobs:
   # The deploy host (gaming-client / CachyOS) has glibc 2.43, so Trixie matches
   # the runtime target. The default `build` job stays on bookworm (it never links
   # libcec).
-  cec:
+  cec-mcp:
     runs-on: ubuntu-latest
     container: rust:1-trixie
     steps:
@@ -185,13 +188,26 @@ jobs:
           workspaces: .
           key: cec
 
-      - name: Clippy (--features cec)
+      # `mcp` rides along with `cec` rather than getting its own job: this is
+      # the feature set that scripts/build-daemon.sh and scripts/install.sh
+      # actually deploy (TV_SHELL_FEATURES defaults to "cec,mcp"), so testing
+      # them together is testing what ships. mcp needs no extra system libs.
+      #
+      # Before this, `mcp` was compiled by NO job here and only ever built (not
+      # tested) by release-input.yml — which runs on push to main, i.e. AFTER
+      # merge. daemon/src/mcp.rs's tests ran nowhere automatically, so a break
+      # there passed ci-gate green and first failed at ship time.
+      - name: Clippy (--features cec,mcp)
         id: clippy
-        run: cargo clippy -p tv-shell-input --features cec --all-targets -- -D warnings
+        run: cargo clippy -p tv-shell-input --features cec,mcp --all-targets -- -D warnings
 
-      - name: Build (--features cec)
+      - name: Build (--features cec,mcp)
         id: build
-        run: cargo build --release -p tv-shell-input --features cec
+        run: cargo build --release -p tv-shell-input --features cec,mcp
+
+      - name: Test (--features cec,mcp)
+        id: test
+        run: cargo test -p tv-shell-input --features cec,mcp
 
       # Acceptance gate (#179): the static build must NOT pull in the system
       # libcec.so / libp8-platform.so — those are bundled into the binary. The
