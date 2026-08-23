@@ -206,7 +206,7 @@ jobs:
         run: cargo build --release -p tv-shell-input --features cec,mcp
 
       - name: Test (--features cec,mcp)
-        id: test
+        id: test_mcp
         run: cargo test -p tv-shell-input --features cec,mcp
 
       # Acceptance gate (#179): the static build must NOT pull in the system
@@ -248,4 +248,5 @@ jobs:
             echo "| Build (cec, release) | ${{ steps.build.outcome }} |"
             echo "| No system libcec (ldd) | ${{ steps.ldd.outcome }} |"
             echo "| Test (cec) | ${{ steps.test.outcome }} |"
+            echo "| Test (cec,mcp) | ${{ steps.test_mcp.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
