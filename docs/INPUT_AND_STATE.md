@@ -372,10 +372,15 @@ intents. Unknown leaves are a graceful no-op in QML (logged, no crash).
 | `overlay:session` | `onIntentOverlay` | Open the power/session drawer |
 | `app:<wmClass>` | `onIntentApp` | Match `_applications[].wmClass`, then `checkAndLaunchApp` |
 
-**Settings page ids** (order from `SettingsApp.sections`, `streaming` only when
-a provider is configured): `audio`, `bluetooth`, `network`, `display`,
-`controllers`, `keybindings`, `avcontrol`, `streaming` (provider id),
-`accessibility`, `power`, `system`.
+**Settings page ids** (order from `SettingsApp.sections`): `audio`, `bluetooth`,
+`network`, `display`, `wallpaper`, `controllers`, `keybindings`, `avcontrol`,
+`webapps`, `accessibility`, `power`, `system`.
+
+Three further leaves ride the `settings:` namespace but are **not** settings
+pages: `ShellLayout.openSettings` intercepts `widgets`, `moonlight` and
+`streaming` before delegating, pushing the top-level Widgets surface instead
+(`moonlight`/`streaming` scoped to the Moonlight widget's config). They never
+reach `SettingsApp.openPage`.
 
 `home-tap` / `home-hold` are the gamepad Home **neutrals** — the daemon emits
 them with no focus knowledge; QML (which owns focus) decides what each means.

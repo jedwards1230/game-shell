@@ -4,3 +4,7 @@ target/
 
 # Assembled module for headless QML tests (tests/qml/run.sh)
 tests/qml/.build/
+
+# Python bytecode (scripts/)
+__pycache__/
+*.py[cod]

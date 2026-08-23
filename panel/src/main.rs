@@ -518,7 +518,7 @@ fn build_router(state: SharedState) -> Router {
     // `bridge_configured` for the UI half, and says so before the click rather
     // than after it.
     //
-    // No htpc-1 impact either way — it sets `[http].bind`.
+    // No impact on a stock shell node either way — it sets `[http].bind`.
     //
     // `GET /dev/screenshot` is the PAGE as of phase 4 (it was the PNG proxy,
     // which moved to `/dev/screenshot/image` to free the path).

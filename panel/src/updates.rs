@@ -4,9 +4,9 @@
 //!
 //! **Read** is unprivileged: `checkupdates` (pacman-contrib) syncs its own
 //! copy of the pacman database and never touches the live one, so it needs
-//! no elevated privilege. **Apply** needs root — the panel's unprivileged
-//! user has NOPASSWD sudo on the deploy host (htpc-1), so `sudo -n pacman
-//! -Syu --noconfirm` runs without a password prompt (`-n` = never prompt,
+//! no elevated privilege. **Apply** needs root — a deploy host grants the
+//! panel's unprivileged user NOPASSWD sudo for exactly this command, so
+//! `sudo -n pacman -Syu --noconfirm` runs without a password prompt (`-n` = never prompt,
 //! fail closed instead of hanging on one).
 //!
 //! The apply job is a single-flighted `tokio::spawn`ed background task —
@@ -291,8 +291,8 @@ pub struct UpdatesState {
     ///
     /// Without it, any test that reaches [`start_apply`] runs a real
     /// `sudo -n pacman -Syu --noconfirm`. That is inert in CI only by accident
-    /// (the image has neither `sudo` nor `pacman`, so the spawn fails), but
-    /// htpc-1 has NOPASSWD sudo for exactly this command **by design** — see
+    /// (the image has neither `sudo` nor `pacman`, so the spawn fails), but a
+    /// deploy host grants NOPASSWD sudo for exactly this command **by design** — see
     /// `docs/PANEL.md` § "Deployment prerequisite" — and dev boxes run Arch.
     /// On either, `cargo test -p tv-shell-panel` would begin an unattended
     /// full system upgrade. A test must never be one `cargo test` away from

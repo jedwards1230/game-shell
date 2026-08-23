@@ -34,6 +34,22 @@
 //! are pure decision fns, unit-tested below; a skip performs zero transmits, so
 //! it replies `ok` and is excluded from the transmit health.
 //!
+//! **Focus target and auto-switch (#415).** Two settings decide WHERE the
+//! display ends up and WHEN we move it. `cecDefaultInput` names the logical
+//! address to focus: unset (the default) or our own address means claim the
+//! display for ourselves — the historical behaviour, byte for byte — and any
+//! other device means hand it that device via `send_power_on_devices`, the only
+//! "make X the active source" primitive cec-rs 12.0.1 exposes. Both the wake
+//! sequence and the auto-switch route through the one gate, [`apply_focus`].
+//! `cecAutoSwitchOnPowerOn` turns on the edge detector: every bus sweep is
+//! folded into a per-address power history and a KNOWN non-on -> `on` move on
+//! the TV or AVR runs the focus. A first observation is never an edge (a daemon
+//! starting beside an already-on TV must not read that as "it just came on"),
+//! and a source device powering on is claiming the display rather than offering
+//! it, so it is not a trigger. Both settings are consumed through the
+//! [`CecOps`] seam so the tests assert on the transmits produced, not on the
+//! readers called.
+//!
 //! **Remote input -> navigation.** When the `TV_SHELL_CEC_LIFECYCLE` flag is
 //! on, the worker registers a libcec key-press callback. Each TV/AVR remote
 //! button (a `CecUserControlCode`) arriving on the CEC bus is forwarded over a
@@ -288,35 +304,40 @@ fn power_status_word(ps: cec_rs::CecPowerStatus) -> &'static str {
     }
 }
 
-/// Build a compact-JSON device object for a single logical address, or `None`
-/// if the device is not present on the bus (power status Unknown means the
-/// device did not respond). cec-rs 12.0.1 wraps no per-device metadata query
-/// beyond power status, so the object carries only `logicalAddress` +
-/// `powerStatus`. The wire-format builder lives in `protocol.rs` (pure,
-/// unit-tested in the default leg); we pass it the already-mapped word.
-fn device_json(
+/// One device's presence on the bus: its logical address and current power word.
+///
+/// The sweep returns these rather than pre-rendered JSON so a single probe can
+/// serve THREE consumers — the `cec-scan` reply body, the `cec:device` push
+/// events, and the #415 power-on edge detector — without re-probing the blocking
+/// libcec bus. The wire-format builder ([`protocol::cec_device_json`]) is applied
+/// at the call sites that need a string.
+type DeviceObservation = (i32, &'static str);
+
+/// Probe one logical address, returning its power word, or `None` if the device
+/// is not present on the bus (power status Unknown means the device did not
+/// respond). cec-rs 12.0.1 wraps no per-device metadata query beyond power
+/// status, so an observation carries only the address + the word.
+fn device_power(
     conn: &cec_rs::CecConnection,
-    idx: i32,
     addr: cec_rs::CecLogicalAddress,
-) -> Option<String> {
+) -> Option<&'static str> {
     let ps = conn.get_device_power_status(addr);
     if matches!(ps, cec_rs::CecPowerStatus::Unknown) {
         return None;
     }
-    Some(protocol::cec_device_json(idx, power_status_word(ps)))
+    Some(power_status_word(ps))
 }
 
-/// Build a compact-JSON array of all active CEC devices by probing each of the
-/// 16 CEC logical addresses (`get_device_power_status`; Unknown ≡ absent).
-/// Probe every logical address once, returning the JSON object for each device
-/// that responds. Callers reuse this single sweep for both the `cec-scan`
-/// response body and the `cec:device` push events (avoids double-probing the
-/// blocking libcec bus on every scan).
-fn scan_devices(conn: &cec_rs::CecConnection) -> Vec<String> {
+/// Probe each of the 16 CEC logical addresses (`get_device_power_status`;
+/// Unknown ≡ absent) exactly once, returning an observation per responder.
+/// Callers reuse this single sweep for the `cec-scan` response body, the
+/// `cec:device` push events, and the auto-switch power-on edge detector (avoids
+/// double-probing the blocking libcec bus on every scan).
+fn scan_devices(conn: &cec_rs::CecConnection) -> Vec<DeviceObservation> {
     let mut entries = Vec::new();
     for (idx, addr) in LOGICAL_ADDRESSES.iter().enumerate() {
-        if let Some(obj) = device_json(conn, idx as i32, *addr) {
-            entries.push(obj);
+        if let Some(word) = device_power(conn, *addr) {
+            entries.push((idx as i32, word));
         }
     }
     entries
@@ -372,9 +393,9 @@ fn reopen_connection(
         // so a reopen that registers only the command callback silently drops CEC
         // remote input: nav from the TV/AVR remote dies and STAYS dead until the
         // daemon restarts, with nothing logged. That is not a rare path — every
-        // transmit failure on a stale bus reopens (observed twice within 15 minutes
-        // on htpc-1), so in practice the remote stopped working almost immediately
-        // and looked like a hardware fault.
+        // transmit failure on a stale bus reopens (observed twice within 15
+        // minutes on a deployed box), so in practice the remote stopped working
+        // almost immediately and looked like a hardware fault.
         if let Some(key_tx) = key_tx {
             builder = attach_key_press_callback(builder, key_tx);
         }
@@ -732,11 +753,8 @@ fn owner_set(cell: &OwnerCell, addr: cec_rs::CecLogicalAddress, source: &str) {
 /// `GET /status` can say whether the current owner is us. Cheap and
 /// transmit-free (a local libcec config read), so it is refreshed at every gate
 /// evaluation rather than cached once at open.
-fn our_address_tracked(
-    conn: &cec_rs::CecConnection,
-    cell: &OwnerCell,
-) -> cec_rs::CecLogicalAddress {
-    let ours = our_logical_address(conn);
+fn our_address_tracked<O: CecOps + ?Sized>(ops: &O, cell: &OwnerCell) -> cec_rs::CecLogicalAddress {
+    let ours = ops.our_address();
     cell.set_ours(logical_to_i32(ours));
     ours
 }
@@ -767,6 +785,245 @@ fn owner_tracking_callback(cell: OwnerCell) -> Box<cec_rs::FnCommand> {
 }
 
 // ---------------------------------------------------------------------------
+// The libcec surface the focus policy drives, behind a seam.
+// ---------------------------------------------------------------------------
+
+/// The four libcec operations the focus/auto-switch policy needs, behind a trait
+/// so the policy can be asserted on the ACTIONS IT PRODUCES rather than on the
+/// settings readers it happens to call.
+///
+/// This seam is the point of #415. The `cecAutoSwitchOnPowerOn` reader was fully
+/// unit-tested and had no caller — a suite that proves a getter parses a bool is
+/// indistinguishable from dead code with good manners. The tests at the bottom of
+/// this module drive a recording fake through [`auto_switch_on_power_on`] and
+/// [`wake_sequence_with`] and assert on the transmits that come out, so a
+/// regression that silently stops consuming a setting FAILS instead of staying
+/// green.
+///
+/// The real implementation is [`cec_rs::CecConnection`] itself, so the worker
+/// passes its live handle unchanged — the seam adds no indirection at runtime.
+trait CecOps {
+    /// `send_power_on_devices` — wakes `addr`, and for a source device is also
+    /// the only "make this device the active source" primitive cec-rs 12.0.1
+    /// exposes (`<Set Stream Path>` needs a physical address the crate does not
+    /// surface).
+    fn power_on(
+        &self,
+        addr: cec_rs::CecLogicalAddress,
+    ) -> Result<(), cec_rs::CecConnectionResultError>;
+    /// `set_active_source` — claim the display for ourselves.
+    fn claim_active_source(&self) -> Result<(), cec_rs::CecConnectionResultError>;
+    /// `get_device_power_status`, already mapped to its wire word.
+    fn power_word(&self, addr: cec_rs::CecLogicalAddress) -> &'static str;
+    /// Our own primary logical address, or `Unknown`.
+    fn our_address(&self) -> cec_rs::CecLogicalAddress;
+}
+
+impl CecOps for cec_rs::CecConnection {
+    fn power_on(
+        &self,
+        addr: cec_rs::CecLogicalAddress,
+    ) -> Result<(), cec_rs::CecConnectionResultError> {
+        self.send_power_on_devices(addr)
+    }
+
+    fn claim_active_source(&self) -> Result<(), cec_rs::CecConnectionResultError> {
+        self.set_active_source(cec_rs::CecDeviceType::PlaybackDevice)
+    }
+
+    fn power_word(&self, addr: cec_rs::CecLogicalAddress) -> &'static str {
+        power_status_word(self.get_device_power_status(addr))
+    }
+
+    fn our_address(&self) -> cec_rs::CecLogicalAddress {
+        our_logical_address(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Focus: point the display at the configured default input (#415).
+// ---------------------------------------------------------------------------
+
+/// Result of a focus attempt.
+#[derive(Debug, PartialEq, Eq)]
+enum FocusOutcome {
+    /// The ownership gate refused — ZERO transmits, so callers must not fold it
+    /// into the transmit health (recording a transmit that never happened would
+    /// corrupt what the AV Control page shows).
+    Skipped,
+    /// A transmit ran: `Ok(())`, or the wire error message.
+    Applied(Result<(), String>),
+}
+
+/// Point the display at the configured default input.
+///
+/// [`crate::config::FocusTarget::Ours`] — the unset, out-of-range, and
+/// self-addressed cases — claims active source exactly as before #415, so the
+/// DEFAULT configuration reproduces the old behaviour byte for byte. A
+/// configured OTHER device is handed the display via `power_on`, the only
+/// "make X the active source" primitive available (see [`CecOps::power_on`]).
+///
+/// Ownership-gated by [`may_claim_active_source`] against the passively-tracked
+/// cell, on the same terms as the wake claim: skip only on positive proof that a
+/// different real device holds the screen.
+///
+/// Either way the resulting owner is recorded LOCALLY. Our own claim never comes
+/// back through the receive callback, and a device we just handed the display to
+/// may confirm with `<Active Source>` only after a delay — recording it now keeps
+/// the next suspend's standby gate honest, and errs toward "we do not own the
+/// display", which makes standby skip rather than power off someone's show.
+fn apply_focus<O: CecOps + ?Sized>(
+    ops: &O,
+    owner: &OwnerCell,
+    default_input: i32,
+    source: &'static str,
+) -> FocusOutcome {
+    let observed = owner_get(owner);
+    let ours = our_address_tracked(ops, owner);
+    if !may_claim_active_source(observed, ours) {
+        tracing::info!(
+            "cec: focus SKIPPED ({source}) — {observed:?} holds active source (we are {ours:?}); not stealing the display"
+        );
+        return FocusOutcome::Skipped;
+    }
+
+    match crate::config::focus_target(default_input, logical_to_i32(ours)) {
+        crate::config::FocusTarget::Ours => match ops.claim_active_source() {
+            Ok(()) => {
+                owner_set(owner, ours, source);
+                FocusOutcome::Applied(Ok(()))
+            }
+            Err(e) => FocusOutcome::Applied(Err(format!("active-source failed: {e:?}"))),
+        },
+        crate::config::FocusTarget::Device(addr) => {
+            let Some(logical) = logical_from_i32(addr) else {
+                return FocusOutcome::Applied(Err(format!("invalid default input address {addr}")));
+            };
+            match ops.power_on(logical) {
+                Ok(()) => {
+                    owner_set(owner, logical, source);
+                    FocusOutcome::Applied(Ok(()))
+                }
+                Err(e) => FocusOutcome::Applied(Err(format!(
+                    "default-input power-on {addr} failed: {e:?}"
+                ))),
+            }
+        }
+    }
+}
+
+/// Last power word observed per logical address (index = the 0..=15 wire index),
+/// `None` where the address has never responded. Owned by the blocking worker
+/// and folded from the SAME bus sweep that answers `cec-scan`, so the auto-switch
+/// costs no extra probes.
+type PowerWatch = [Option<&'static str>; 16];
+
+/// The addresses whose power-on means "the display chain came up". A *source*
+/// device powering on is claiming the display for itself, not offering it, so it
+/// is deliberately not a trigger.
+const AUTO_SWITCH_TRIGGER_ADDRS: [i32; 2] = [TV_ADDR, AVR_ADDR];
+
+/// Fold a bus sweep into `watch` and, when the display chain just powered on AND
+/// the user enabled `cecAutoSwitchOnPowerOn`, apply the configured default input.
+///
+/// This is the consumer `cecAutoSwitchOnPowerOn` never had. Returns the address
+/// that triggered plus the focus outcome, or `None` when nothing fired — the
+/// overwhelmingly common case, which must perform ZERO transmits.
+///
+/// At most one switch per sweep: two devices coming up together is one event
+/// ("the AV chain powered on"), not two, and a second claim would be noise on a
+/// bus whose transmits are the scarce resource.
+fn auto_switch_on_power_on<O: CecOps + ?Sized>(
+    ops: &O,
+    watch: &mut PowerWatch,
+    owner: &OwnerCell,
+    lifecycle: bool,
+    behavior: &crate::config::CecBehavior,
+    observations: &[DeviceObservation],
+) -> Option<(i32, FocusOutcome)> {
+    let mut trigger = None;
+    // Fold EVERY observation, trigger or not: the watch must track the whole bus
+    // so a later power-on of an address we ignore this round still has a correct
+    // predecessor.
+    for (addr, word) in observations {
+        let previous = usize::try_from(*addr)
+            .ok()
+            .and_then(|i| watch.get(i).copied())
+            .flatten();
+        if trigger.is_none()
+            && crate::config::should_auto_switch_target(
+                lifecycle,
+                behavior,
+                &AUTO_SWITCH_TRIGGER_ADDRS,
+                *addr,
+                previous,
+                word,
+            )
+        {
+            trigger = Some(*addr);
+        }
+        if let Ok(i) = usize::try_from(*addr) {
+            if let Some(slot) = watch.get_mut(i) {
+                *slot = Some(*word);
+            }
+        }
+    }
+
+    let addr = trigger?;
+    tracing::info!(
+        "cec: auto-switch on power-on — {} came up, applying default input {}",
+        owner_label(addr),
+        behavior.default_input
+    );
+    Some((
+        addr,
+        apply_focus(
+            ops,
+            owner,
+            behavior.default_input,
+            "auto-switch on power-on",
+        ),
+    ))
+}
+
+/// Worker-side wrapper for [`auto_switch_on_power_on`]: read the behaviour
+/// settings, run the edge detector, and fold any transmit into the #19 health.
+///
+/// The settings read is skipped entirely while the lifecycle master flag is off
+/// (the gate would refuse anyway), so a dev/CI host does no per-scan file I/O —
+/// but the watch is still folded, so enabling the flag mid-session starts from
+/// honest history rather than a blank one.
+fn note_auto_switch(
+    conn: &cec_rs::CecConnection,
+    watch: &mut PowerWatch,
+    health: &mut protocol::CecHealthState,
+    events_tx: &broadcast::Sender<Event>,
+    owner: &OwnerCell,
+    observations: &[DeviceObservation],
+) {
+    let lifecycle = lifecycle_enabled();
+    let behavior = if lifecycle {
+        crate::config::CecBehavior::load(&crate::config::settings_path())
+    } else {
+        crate::config::CecBehavior::default()
+    };
+    let Some((_addr, outcome)) =
+        auto_switch_on_power_on(conn, watch, owner, lifecycle, &behavior, observations)
+    else {
+        return;
+    };
+    match outcome {
+        // Zero transmits — nothing to record (see [`FocusOutcome::Skipped`]).
+        FocusOutcome::Skipped => {}
+        FocusOutcome::Applied(Ok(())) => note_health(health, events_tx, true, ""),
+        FocusOutcome::Applied(Err(msg)) => {
+            tracing::warn!("cec: auto-switch failed: {msg}");
+            note_health(health, events_tx, false, &msg);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle sequences (blocking-worker context only — they touch libcec).
 // ---------------------------------------------------------------------------
 
@@ -786,14 +1043,32 @@ enum LifecycleOutcome {
 /// only inside the blocking worker (it issues blocking libcec calls). Emits a
 /// `cec:power` event per successful power-on so subscribers see the change.
 ///
-/// **Only the active-source claim is ownership-gated** ([`may_claim_active_source`]):
+/// **Only the focus step is ownership-gated** ([`may_claim_active_source`]):
 /// powering on a display nobody is using is benign and is exactly what the user
-/// asked for on wake — stealing a live input is the harm. When the claim is
+/// asked for on wake — stealing a live input is the harm. When the focus is
 /// skipped the power-ons still ran, so this returns `Done(ok)`, not `Skipped`.
+///
+/// The focus step goes through [`apply_focus`], so the user's `cecDefaultInput`
+/// decides WHICH input the woken chain lands on (#415). Unset — the default —
+/// means us, i.e. the pre-#415 behaviour unchanged.
 fn wake_sequence(
     conn: &cec_rs::CecConnection,
     events_tx: &broadcast::Sender<Event>,
     owner: &OwnerCell,
+) -> LifecycleOutcome {
+    // Read on the blocking worker's thread (this fn only ever runs there), so the
+    // settings I/O never touches the reactor.
+    let behavior = crate::config::CecBehavior::load(&crate::config::settings_path());
+    wake_sequence_with(conn, events_tx, owner, behavior.default_input)
+}
+
+/// [`wake_sequence`] with the resolved `cecDefaultInput` passed in and the libcec
+/// surface behind [`CecOps`], so the sequence's transmits are unit-testable.
+fn wake_sequence_with<O: CecOps + ?Sized>(
+    ops: &O,
+    events_tx: &broadcast::Sender<Event>,
+    owner: &OwnerCell,
+    default_input: i32,
 ) -> LifecycleOutcome {
     for addr in [AVR_ADDR, TV_ADDR] {
         let Some(logical) = logical_from_i32(addr) else {
@@ -801,43 +1076,28 @@ fn wake_sequence(
                 "invalid lifecycle address {addr}"
             )));
         };
-        if let Err(e) = conn.send_power_on_devices(logical) {
+        if let Err(e) = ops.power_on(logical) {
             return LifecycleOutcome::Done(protocol::resp_error(&format!(
                 "wake power-on {addr} failed: {e:?}"
             )));
         }
-        let ps = conn.get_device_power_status(logical);
         let _ = events_tx.send(Event::CecPower(protocol::cec_power_json(
             &addr.to_string(),
-            power_status_word(ps),
+            ops.power_word(logical),
         )));
     }
     // Give the TV time to leave standby before switching it to our input.
     std::thread::sleep(WAKE_ACTIVE_SOURCE_DELAY);
 
-    // Ownership gate — passive cache only, no probe.
-    let observed = owner_get(owner);
-    let ours = our_address_tracked(conn, owner);
-    if !may_claim_active_source(observed, ours) {
-        tracing::info!(
-            "cec: lifecycle active-source claim SKIPPED — {observed:?} holds active source (we are {ours:?}); not stealing the display"
-        );
-        return LifecycleOutcome::Done(protocol::resp_ok());
-    }
-
-    match conn.set_active_source(cec_rs::CecDeviceType::PlaybackDevice) {
-        Ok(()) => {
-            // Our OWN claim never comes back through the command callback (it
-            // fires on RECEIVED traffic), so record it here — otherwise the
-            // following suspend would see "unseen" and skip a standby we
-            // legitimately owe. `ours` being Unknown stores "unseen", which is
-            // the honest, fail-safe answer.
-            owner_set(owner, ours, "our own wake active-source claim");
+    match apply_focus(ops, owner, default_input, "our own wake focus claim") {
+        // An ownership skip still leaves the power-ons done, so the sequence as a
+        // whole succeeded — same contract as before #415.
+        FocusOutcome::Skipped | FocusOutcome::Applied(Ok(())) => {
             LifecycleOutcome::Done(protocol::resp_ok())
         }
-        Err(e) => LifecycleOutcome::Done(protocol::resp_error(&format!(
-            "wake active-source failed: {e:?}"
-        ))),
+        FocusOutcome::Applied(Err(msg)) => {
+            LifecycleOutcome::Done(protocol::resp_error(&format!("wake {msg}")))
+        }
     }
 }
 
@@ -979,8 +1239,8 @@ const KERNEL_CEC_NODE: &str = "/dev/cec0";
 /// healthy adapter fails to open whenever something else got there first. That
 /// is indistinguishable from a hardware wedge at the libcec level — both surface
 /// as `AdapterOpenFailed` — and the `adapter_open_failed` copy tells the operator
-/// to "re-seat the USB adapter or power-cycle the AVR". Both real incidents on
-/// htpc-1 were software conflicts, so that message sent someone after a cable
+/// to "re-seat the USB adapter or power-cycle the AVR". Both real incidents in
+/// the field were software conflicts, so that message sent someone after a cable
 /// twice. Naming the claimant turns a hardware goose-chase into a one-line fix.
 ///
 /// Two claimants seen in practice, checked in that order:
@@ -1304,13 +1564,20 @@ fn blocking_worker(
     // broadcasts `cec:health` only on a real variant transition.
     let mut health = protocol::CecHealthState::new(now_millis());
 
+    // Per-address power history for the #415 auto-switch. Starts all-`None`, so
+    // the FIRST sweep can never look like a power-on edge — a daemon starting
+    // next to an already-on TV must not read that as "the TV just came on".
+    let mut watch: PowerWatch = [None; 16];
+
     while let Ok(req) = rx.recv() {
         match req {
             WorkerReq::Scan(tx) => {
-                // Single bus sweep, reused for the response and the push events.
+                // Single bus sweep, reused for the response, the push events, and
+                // the auto-switch power-on edge detector.
                 let devices = scan_devices(&conn);
-                for obj in &devices {
-                    let _ = events_tx.send(Event::CecDevice(obj.clone()));
+                for (addr, word) in &devices {
+                    let _ =
+                        events_tx.send(Event::CecDevice(protocol::cec_device_json(*addr, word)));
                 }
                 // Health refresh side effect (#19): so the QML 30s `cec-scan`
                 // poll keeps the status line fresh with no user action. A
@@ -1324,15 +1591,37 @@ fn blocking_worker(
                 } else {
                     run_poll_probe(&conn, &mut health, &events_tx);
                 }
-                let _ = tx.send(format!("[{}]", devices.join(",")));
+                // AFTER the sweep's own health refresh, never before: the
+                // auto-switch is a transmit whose outcome must be the LAST word
+                // on this round, or a non-empty sweep's unconditional
+                // `note_health(true)` would mask a switch that just failed.
+                note_auto_switch(&conn, &mut watch, &mut health, &events_tx, &owner, &devices);
+                let body = devices
+                    .iter()
+                    .map(|(a, w)| protocol::cec_device_json(*a, w))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = tx.send(format!("[{body}]"));
             }
             WorkerReq::Device { addr, tx } => {
                 let resp = match addr.parse::<i32>().ok().and_then(logical_from_i32) {
                     Some(logical) => {
                         let idx = addr.parse::<i32>().unwrap_or(-1);
-                        match device_json(&conn, idx, logical) {
-                            Some(obj) => {
+                        match device_power(&conn, logical) {
+                            Some(word) => {
+                                let obj = protocol::cec_device_json(idx, word);
                                 let _ = events_tx.send(Event::CecDevice(obj.clone()));
+                                // A single-device probe is a bus observation like
+                                // any other — feed it to the edge detector so a
+                                // targeted poll can trigger the auto-switch too.
+                                note_auto_switch(
+                                    &conn,
+                                    &mut watch,
+                                    &mut health,
+                                    &events_tx,
+                                    &owner,
+                                    &[(idx, word)],
+                                );
                                 obj
                             }
                             None => protocol::resp_error(&format!("no device at address {addr}")),
@@ -1923,5 +2212,427 @@ mod tests {
         );
         assert_eq!(logical_from_i32(-1), None);
         assert_eq!(logical_from_i32(16), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings CONSUMPTION (#415).
+    //
+    // These are deliberately not reader tests. `cec_auto_switch_on_power_on()`
+    // was already exhaustively unit-tested in `config.rs` while having no caller
+    // at all — proving a getter parses a bool says nothing about whether the
+    // actor acts on it. Every test below drives the actor's focus path through
+    // the [`CecOps`] seam and asserts on the TRANSMITS that come out, so a change
+    // that stops consuming a setting fails here instead of staying green.
+    // -----------------------------------------------------------------------
+
+    /// Recording fake for the libcec surface. `calls` is the assertion target:
+    /// the exact transmits, in order, that a policy decision produced.
+    struct FakeCec {
+        ours: cec_rs::CecLogicalAddress,
+        fail: bool,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl FakeCec {
+        /// A fake that is Playback 1 (addr 4) — the device type the daemon
+        /// announces — and whose transmits all succeed.
+        fn new() -> Self {
+            Self {
+                ours: cec_rs::CecLogicalAddress::Playbackdevice1,
+                fail: false,
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                fail: true,
+                ..Self::new()
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+
+        fn record(&self, what: String) -> Result<(), cec_rs::CecConnectionResultError> {
+            self.calls.borrow_mut().push(what);
+            if self.fail {
+                Err(cec_rs::CecConnectionResultError::TransmitFailed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl CecOps for FakeCec {
+        fn power_on(
+            &self,
+            addr: cec_rs::CecLogicalAddress,
+        ) -> Result<(), cec_rs::CecConnectionResultError> {
+            self.record(format!("power_on:{}", logical_to_i32(addr)))
+        }
+
+        fn claim_active_source(&self) -> Result<(), cec_rs::CecConnectionResultError> {
+            self.record("active_source".to_string())
+        }
+
+        fn power_word(&self, _addr: cec_rs::CecLogicalAddress) -> &'static str {
+            "on"
+        }
+
+        fn our_address(&self) -> cec_rs::CecLogicalAddress {
+            self.ours
+        }
+    }
+
+    /// A fresh ownership cell with nobody observed — the state in which the wake
+    /// claim is allowed and the standby gate refuses.
+    fn unseen_owner() -> OwnerCell {
+        std::sync::Arc::new(crate::display_owner::DisplayOwner::new())
+    }
+
+    /// An ownership cell in which `addr` demonstrably holds the display.
+    fn owner_held_by(addr: i32) -> OwnerCell {
+        let cell = unseen_owner();
+        cell.observe(addr, 0);
+        cell
+    }
+
+    fn behavior(auto_switch: bool, default_input: i32) -> crate::config::CecBehavior {
+        crate::config::CecBehavior {
+            auto_switch_on_power_on: auto_switch,
+            default_input,
+        }
+    }
+
+    /// A sweep in which the TV was in standby and has now come on.
+    fn tv_power_on_sweep(watch: &mut PowerWatch) -> Vec<DeviceObservation> {
+        watch[TV_ADDR as usize] = Some("standby");
+        vec![(TV_ADDR, "on")]
+    }
+
+    #[test]
+    fn auto_switch_off_transmits_nothing_on_a_power_on_edge() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(false, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &sweep,
+        );
+
+        assert!(fired.is_none(), "auto-switch must not fire while disabled");
+        assert!(
+            ops.calls().is_empty(),
+            "a disabled setting must produce ZERO transmits, got {:?}",
+            ops.calls()
+        );
+        // The observation is still folded, so the next edge has real history.
+        assert_eq!(watch[TV_ADDR as usize], Some("on"));
+    }
+
+    #[test]
+    fn auto_switch_on_claims_active_source_when_the_display_powers_on() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &sweep,
+        );
+
+        assert_eq!(
+            fired,
+            Some((TV_ADDR, FocusOutcome::Applied(Ok(())))),
+            "the enabled setting must produce a focus attempt"
+        );
+        assert_eq!(ops.calls(), vec!["active_source".to_string()]);
+    }
+
+    #[test]
+    fn auto_switch_honours_the_configured_default_input() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+        let owner = unseen_owner();
+
+        // Default input = the AVR (5), which is not us (4): the display is handed
+        // to it instead of being claimed for ourselves.
+        let fired =
+            auto_switch_on_power_on(&ops, &mut watch, &owner, true, &behavior(true, 5), &sweep);
+
+        assert_eq!(fired, Some((TV_ADDR, FocusOutcome::Applied(Ok(())))));
+        assert_eq!(ops.calls(), vec!["power_on:5".to_string()]);
+        // Ownership now records the device we handed the display to, so the next
+        // suspend's standby gate refuses rather than powering off its input.
+        assert_eq!(owner.owner(), 5);
+    }
+
+    #[test]
+    fn auto_switch_with_a_self_addressed_default_input_still_claims_for_us() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+
+        // Default input = 4 = our own address: "make me the default" is a claim.
+        auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(true, 4),
+            &sweep,
+        );
+
+        assert_eq!(ops.calls(), vec!["active_source".to_string()]);
+    }
+
+    #[test]
+    fn auto_switch_does_not_fire_on_a_first_observation() {
+        let ops = FakeCec::new();
+        // Empty history: the daemon has just started beside an already-on TV.
+        let mut watch: PowerWatch = [None; 16];
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &[(TV_ADDR, "on")],
+        );
+
+        assert!(fired.is_none());
+        assert!(ops.calls().is_empty());
+    }
+
+    #[test]
+    fn auto_switch_ignores_a_source_device_powering_on() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        watch[8] = Some("standby");
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &[(8, "on")],
+        );
+
+        assert!(
+            fired.is_none(),
+            "playback2 waking up is claiming the display, not offering it"
+        );
+        assert!(ops.calls().is_empty());
+    }
+
+    #[test]
+    fn auto_switch_skips_when_another_device_owns_the_display() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            // Playback 2 (addr 8) demonstrably holds the screen.
+            &owner_held_by(8),
+            true,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &sweep,
+        );
+
+        assert_eq!(fired, Some((TV_ADDR, FocusOutcome::Skipped)));
+        assert!(
+            ops.calls().is_empty(),
+            "an ownership skip must perform zero transmits"
+        );
+    }
+
+    #[test]
+    fn auto_switch_requires_the_lifecycle_master_flag() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            false,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &sweep,
+        );
+
+        assert!(fired.is_none());
+        assert!(ops.calls().is_empty());
+    }
+
+    #[test]
+    fn auto_switch_fires_at_most_once_per_sweep() {
+        let ops = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        watch[TV_ADDR as usize] = Some("standby");
+        watch[AVR_ADDR as usize] = Some("standby");
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            // The whole chain comes up together — one event, not two.
+            &[(TV_ADDR, "on"), (AVR_ADDR, "on")],
+        );
+
+        assert_eq!(fired.map(|(addr, _)| addr), Some(TV_ADDR));
+        assert_eq!(ops.calls(), vec!["active_source".to_string()]);
+        // Both observations are still folded.
+        assert_eq!(watch[TV_ADDR as usize], Some("on"));
+        assert_eq!(watch[AVR_ADDR as usize], Some("on"));
+    }
+
+    #[test]
+    fn auto_switch_reports_a_failed_transmit() {
+        let ops = FakeCec::failing();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+
+        let fired = auto_switch_on_power_on(
+            &ops,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &behavior(true, crate::config::CEC_DEFAULT_INPUT_UNSET),
+            &sweep,
+        );
+
+        match fired {
+            Some((TV_ADDR, FocusOutcome::Applied(Err(msg)))) => {
+                assert!(msg.contains("active-source failed"), "got {msg}");
+            }
+            other => panic!("expected a reported transmit failure, got {other:?}"),
+        }
+    }
+
+    /// The end-to-end shape the issue is actually about: a value written to
+    /// `settings.json` reaches a CEC transmit. Nothing between the file and the
+    /// bus is stubbed except libcec itself.
+    #[test]
+    fn settings_json_drives_the_auto_switch_all_the_way_to_a_transmit() {
+        // See `crate::testutil` for why this is based on `current_exe()` rather
+        // than the system temp dir.
+        let path = crate::testutil::scratch_path("gs-cec-consume", ".json");
+
+        // Setting off on disk -> no transmit.
+        std::fs::write(&path, r#"{"cecAutoSwitchOnPowerOn":false}"#).unwrap();
+        let off = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+        auto_switch_on_power_on(
+            &off,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &crate::config::CecBehavior::load(&path),
+            &sweep,
+        );
+        assert!(off.calls().is_empty(), "got {:?}", off.calls());
+
+        // Setting on, with a default input, on disk -> that exact transmit.
+        std::fs::write(
+            &path,
+            r#"{"cecAutoSwitchOnPowerOn":true,"cecDefaultInput":5}"#,
+        )
+        .unwrap();
+        let on = FakeCec::new();
+        let mut watch: PowerWatch = [None; 16];
+        let sweep = tv_power_on_sweep(&mut watch);
+        auto_switch_on_power_on(
+            &on,
+            &mut watch,
+            &unseen_owner(),
+            true,
+            &crate::config::CecBehavior::load(&path),
+            &sweep,
+        );
+        assert_eq!(on.calls(), vec!["power_on:5".to_string()]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wake_sequence_focuses_the_configured_default_input() {
+        let (events_tx, _rx) = broadcast::channel(16);
+
+        // No default input: the chain is powered on and claimed for us — the
+        // pre-#415 behaviour, unchanged.
+        let ours = FakeCec::new();
+        let outcome = wake_sequence_with(
+            &ours,
+            &events_tx,
+            &unseen_owner(),
+            crate::config::CEC_DEFAULT_INPUT_UNSET,
+        );
+        assert!(matches!(outcome, LifecycleOutcome::Done(ref r) if r == &protocol::resp_ok()));
+        assert_eq!(
+            ours.calls(),
+            vec![
+                format!("power_on:{AVR_ADDR}"),
+                format!("power_on:{TV_ADDR}"),
+                "active_source".to_string(),
+            ]
+        );
+
+        // Default input = playback 2 (addr 8): the chain still comes up, but the
+        // display is handed to that device instead of claimed.
+        let other = FakeCec::new();
+        let outcome = wake_sequence_with(&other, &events_tx, &unseen_owner(), 8);
+        assert!(matches!(outcome, LifecycleOutcome::Done(ref r) if r == &protocol::resp_ok()));
+        assert_eq!(
+            other.calls(),
+            vec![
+                format!("power_on:{AVR_ADDR}"),
+                format!("power_on:{TV_ADDR}"),
+                "power_on:8".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn wake_sequence_still_powers_the_chain_when_the_focus_is_ownership_skipped() {
+        let (events_tx, _rx) = broadcast::channel(16);
+        let ops = FakeCec::new();
+
+        let outcome = wake_sequence_with(
+            &ops,
+            &events_tx,
+            // Playback 2 is watching — the focus must be skipped.
+            &owner_held_by(8),
+            crate::config::CEC_DEFAULT_INPUT_UNSET,
+        );
+
+        assert!(matches!(outcome, LifecycleOutcome::Done(ref r) if r == &protocol::resp_ok()));
+        assert_eq!(
+            ops.calls(),
+            vec![
+                format!("power_on:{AVR_ADDR}"),
+                format!("power_on:{TV_ADDR}"),
+            ],
+            "the power-ons still run; only the focus claim is gated"
+        );
     }
 }

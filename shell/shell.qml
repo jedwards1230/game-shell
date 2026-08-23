@@ -47,7 +47,7 @@ ShellRoot {
 
     // Push the shell's own state machine + media-playing predicate to the daemon
     // (`shell-state`), which surfaces it on `/status` so Home Assistant can tell
-    // whether htpc-1 is safe to suspend. The daemon can't work either value out:
+    // whether this box is safe to suspend. The daemon can't work either value out:
     // its compositor-level UiState is explicitly NOT this QML state machine, and
     // MPRIS playback is read QML-side. `root.state` goes over the wire verbatim.
     //

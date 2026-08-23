@@ -104,6 +104,16 @@ pub struct ShellActionParams {
 
 /// Known settings page slugs. Unknown slugs are a graceful no-op in QML;
 /// this enum constrains the MCP input to the documented set.
+///
+/// **This must mirror the section registry in `shell/settings/SettingsApp.qml`
+/// exactly** — it is the authoring source of truth, and
+/// `settings_page_enum_matches_qml_registry` fails the suite when the two
+/// diverge. Variants are listed in registry order.
+///
+/// `widgets` / `moonlight` / `streaming` are deliberately NOT here. They are
+/// intercepted by `ShellLayout.openSettings` before Settings is ever asked and
+/// land on the top-level Widgets surface, so they are served by the
+/// `open_widgets` tool instead.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SettingsPage {
@@ -115,17 +125,16 @@ pub enum SettingsPage {
     Network,
     /// Display settings (monitor, HDR, refresh rate, night light, overscan).
     Display,
+    /// Wallpaper picker (the images under `~/.config/tv-shell/wallpapers/`).
+    Wallpaper,
     /// Gamepad/controller configuration.
     Controllers,
     /// Key-binding remapping.
     Keybindings,
     /// HDMI-CEC AV control and focus preferences.
     Avcontrol,
-    /// Streaming / Moonlight provider page (shown when a provider is active;
-    /// `streaming` is the fallback slug, else the provider id).
-    Streaming,
-    /// Home-screen widgets (enable/disable + per-widget size).
-    Widgets,
+    /// Web-app registry (add/remove the browser shortcuts shown on Home).
+    Webapps,
     /// Accessibility (reduce motion, text size).
     Accessibility,
     /// Power management (sleep timer, wake-on-controller).
@@ -141,11 +150,11 @@ impl SettingsPage {
             SettingsPage::Bluetooth => "bluetooth",
             SettingsPage::Network => "network",
             SettingsPage::Display => "display",
+            SettingsPage::Wallpaper => "wallpaper",
             SettingsPage::Controllers => "controllers",
             SettingsPage::Keybindings => "keybindings",
             SettingsPage::Avcontrol => "avcontrol",
-            SettingsPage::Streaming => "streaming",
-            SettingsPage::Widgets => "widgets",
+            SettingsPage::Webapps => "webapps",
             SettingsPage::Accessibility => "accessibility",
             SettingsPage::Power => "power",
             SettingsPage::System => "system",
@@ -195,6 +204,35 @@ pub struct NavigateParams {
 pub struct OpenSettingsParams {
     /// Settings page to open.
     pub page: SettingsPage,
+}
+
+/// A widget whose config page can be deep-linked from the Widgets surface.
+///
+/// Only `moonlight` is reachable today: `ShellLayout.openSettings` is the only
+/// thing that routes a wire slug into `WidgetsApp.openPage`, and it does so for
+/// `moonlight`/`streaming` alone. Widening this enum means teaching
+/// `ShellLayout.openSettings` the new slug first — otherwise the deep-link
+/// falls through to Settings and is a logged no-op.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WidgetTarget {
+    /// Moonlight streaming widget config (hosts, pairing, launch prefs). The
+    /// legacy `streaming` slug is an alias for this one.
+    Moonlight,
+}
+
+impl WidgetTarget {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WidgetTarget::Moonlight => "moonlight",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OpenWidgetsParams {
+    /// Optional widget to deep-link into. Omit to land on the widget list.
+    pub widget: Option<WidgetTarget>,
 }
 
 /// Overlay popover target.
@@ -372,6 +410,8 @@ impl ServerHandler for TvShellMcp {
                  - shell_action: top-level bare-verb actions (home, menu, settings, power). \
                  Does NOT accept deep-links — use the sugar tools for those.\n\
                  - open_settings(page): navigate directly to a typed settings page.\n\
+                 - open_widgets(widget): open the Widgets surface (widget list, or \
+                 a widget's config). Widgets is its own screen, not a settings page.\n\
                  - open_overlay(target): open volume/network/session QAM popovers.\n\
                  - launch_app(wm_class): launch an installed app by its StartupWMClass. \
                  Use list_apps to discover launchable apps and their wm_class values.\n\
@@ -543,6 +583,32 @@ impl TvShellMcp {
                 ))])
             }
         };
+        Self::intent_result(
+            bridge_core::dispatch_intent(&self.handles.control_tx, intent_name).await,
+        )
+    }
+
+    #[tool(
+        description = "Open the Widgets surface — the top-level screen where \
+            home-screen widgets are enabled/disabled and configured. Omit \
+            `widget` to land on the widget list; pass `moonlight` to deep-link \
+            straight into the Moonlight streaming config. Widgets is NOT a \
+            settings page (open_settings does not accept it).",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn open_widgets(
+        &self,
+        Parameters(OpenWidgetsParams { widget }): Parameters<OpenWidgetsParams>,
+    ) -> CallToolResult {
+        // The wire encoding is still a `settings:` deep-link: `ShellLayout
+        // .openSettings` intercepts `widgets` and `moonlight`/`streaming`
+        // BEFORE delegating to SettingsApp and pushes the Widgets surface
+        // instead. That intercept is the only path into WidgetsApp over IPC, so
+        // this tool rides it rather than inventing a `widgets:` namespace. The
+        // MCP surface is what gets corrected here: the capability is no longer
+        // advertised as a settings page.
+        let slug = widget.as_ref().map_or("widgets", WidgetTarget::as_str);
+        let intent_name = bridge_core::settings_intent(slug);
         Self::intent_result(
             bridge_core::dispatch_intent(&self.handles.control_tx, intent_name).await,
         )
@@ -956,6 +1022,8 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     // Building the tool router validates every tool's input AND output schema.
@@ -1161,11 +1229,11 @@ mod tests {
             (SettingsPage::Bluetooth, "bluetooth"),
             (SettingsPage::Network, "network"),
             (SettingsPage::Display, "display"),
+            (SettingsPage::Wallpaper, "wallpaper"),
             (SettingsPage::Controllers, "controllers"),
             (SettingsPage::Keybindings, "keybindings"),
             (SettingsPage::Avcontrol, "avcontrol"),
-            (SettingsPage::Streaming, "streaming"),
-            (SettingsPage::Widgets, "widgets"),
+            (SettingsPage::Webapps, "webapps"),
             (SettingsPage::Accessibility, "accessibility"),
             (SettingsPage::Power, "power"),
             (SettingsPage::System, "system"),
@@ -1182,11 +1250,11 @@ mod tests {
             "bluetooth",
             "network",
             "display",
+            "wallpaper",
             "controllers",
             "keybindings",
             "avcontrol",
-            "streaming",
-            "widgets",
+            "webapps",
             "accessibility",
             "power",
             "system",
@@ -1220,11 +1288,11 @@ mod tests {
             "bluetooth",
             "network",
             "display",
+            "wallpaper",
             "controllers",
             "keybindings",
             "avcontrol",
-            "streaming",
-            "widgets",
+            "webapps",
             "accessibility",
             "power",
             "system",
@@ -1233,6 +1301,209 @@ mod tests {
             assert!(
                 bridge_core::is_valid_intent(&intent),
                 "settings_intent('{slug}') = '{intent}' should be a valid intent"
+            );
+        }
+    }
+
+    // ── QML ⇄ Rust drift gate ─────────────────────────────────────────────────
+    //
+    // The page registry is QML and `SettingsPage` is Rust, so nothing the
+    // compiler sees spans the two — the enum drifted in BOTH directions before
+    // anyone noticed (jedwards1230/tv-shell#423). These tests parse the QML at
+    // test time, the same shape as the panel's
+    // `route_table_matches_main_rs_declarations`, which parses `main.rs` because
+    // axum's `Router` has no introspection API.
+
+    const SETTINGS_APP_QML: &str = include_str!("../../shell/settings/SettingsApp.qml");
+    const SHELL_LAYOUT_QML: &str = include_str!("../../shell/components/ShellLayout.qml");
+    const MCP_RS: &str = include_str!("mcp.rs");
+    const WIDGETS_INDEX_JSON: &str = include_str!("../../widgets-index.json");
+
+    /// The slug `ShellLayout.openSettings` intercepts for the widget LIST —
+    /// what `open_widgets` puts on the wire when no `widget` is given.
+    const WIDGETS_LIST_SLUG: &str = "widgets";
+
+    /// Intercepted slugs that are ALIASES of a canonical [`WidgetTarget`].
+    /// `ShellLayout.openSettings` routes `moonlight` and `streaming` to the very
+    /// same destination (Widgets ▸ Moonlight); `open_widgets` advertises the
+    /// canonical `moonlight` only. Recording the alias here is what keeps
+    /// `intercepted_slugs_are_served_by_open_widgets` honest — the alias is
+    /// accounted for explicitly instead of quietly allow-listed.
+    const INTERCEPT_ALIASES: &[(&str, &str)] = &[("streaming", "moonlight")];
+
+    /// The body of the brace block introduced by `marker`, up to the first
+    /// occurrence of `close` (the block's closing brace at its own indent).
+    fn block_after<'a>(src: &'a str, marker: &str, close: &str) -> &'a str {
+        let start = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker `{marker}` not found — did the source move?"))
+            + marker.len();
+        let rest = &src[start..];
+        let end = rest
+            .find(close)
+            .unwrap_or_else(|| panic!("no `{close}` closing the block opened by `{marker}`"));
+        &rest[..end]
+    }
+
+    /// Every string literal that immediately follows `sep` in `block`.
+    fn quoted_after(block: &str, sep: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let mut rest = block;
+        while let Some(i) = rest.find(sep) {
+            let tail = &rest[i + sep.len()..];
+            let end = tail
+                .find('"')
+                .unwrap_or_else(|| panic!("unterminated literal after `{sep}`"));
+            out.insert(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+        out
+    }
+
+    /// The `id:` slugs of `SettingsApp.qml`'s section registry — the authoring
+    /// source of truth for what a settings page IS.
+    fn qml_settings_pages() -> BTreeSet<String> {
+        let block = block_after(
+            SETTINGS_APP_QML,
+            "readonly property var sections: {",
+            "\n    }",
+        );
+        let pages = quoted_after(block, "id: \"");
+        assert!(
+            !pages.is_empty(),
+            "parsed zero pages out of SettingsApp.qml's section registry — the \
+             parser has gone blind, which would make this whole gate pass vacuously"
+        );
+        pages
+    }
+
+    /// The slugs `ShellLayout.openSettings` intercepts before delegating to
+    /// Settings. These reach the Widgets surface, NOT the settings registry.
+    fn shell_layout_intercepted_slugs() -> BTreeSet<String> {
+        let block = block_after(SHELL_LAYOUT_QML, "function openSettings(page) {", "\n    }");
+        let slugs = quoted_after(block, "page === \"");
+        assert!(
+            !slugs.is_empty(),
+            "parsed zero intercepted slugs out of ShellLayout.openSettings — the \
+             parser has gone blind"
+        );
+        slugs
+    }
+
+    /// The slugs of an enum's `as_str` match arms. `as_str` is exhaustive (the
+    /// compiler enforces that), so its arms ARE the variant set — there is no
+    /// hand-maintained list here that could itself drift.
+    fn as_str_arms(impl_marker: &str) -> BTreeSet<String> {
+        let arms = quoted_after(block_after(MCP_RS, impl_marker, "\n}"), "=> \"");
+        assert!(!arms.is_empty(), "parsed zero arms out of `{impl_marker}`");
+        arms
+    }
+
+    /// **The gate.** `SettingsPage` must be exactly `SettingsApp.qml`'s
+    /// registry — no more, no less. Adding a page in QML without adding the
+    /// variant makes it unreachable over MCP (the schema rejects the slug before
+    /// any code runs); keeping a variant QML dropped advertises a page that
+    /// isn't there.
+    #[test]
+    fn settings_page_enum_matches_qml_registry() {
+        assert_eq!(
+            as_str_arms("impl SettingsPage {"),
+            qml_settings_pages(),
+            "`SettingsPage` and `shell/settings/SettingsApp.qml`'s section registry \
+             disagree. SettingsApp.qml is the source of truth: add/remove the enum \
+             variant (and its `as_str` arm) to match it. If the slug is one \
+             `ShellLayout.openSettings` intercepts, it is not a settings page at all \
+             — serve it from `open_widgets` instead."
+        );
+
+        // Set equality above already fails when either side gains or loses a
+        // slug, so this count is not redundant with it — it guards the case set
+        // equality cannot see: a parser that silently under-reads BOTH sources
+        // (a restructured `sections` block, a reformatted `as_str`) and agrees
+        // with itself on a subset. Bump it deliberately when a page is added.
+        assert_eq!(
+            qml_settings_pages().len(),
+            12,
+            "expected the 12 pages SettingsApp.qml registers — if you added or \
+             removed one, update this count in the same change"
+        );
+    }
+
+    /// The other half of the same drift: a slug ShellLayout steals before
+    /// Settings sees it must never be advertised as a settings page.
+    #[test]
+    fn intercepted_slugs_are_not_settings_pages() {
+        let pages = as_str_arms("impl SettingsPage {");
+        for slug in shell_layout_intercepted_slugs() {
+            assert!(
+                !pages.contains(&slug),
+                "`SettingsPage` advertises '{slug}', but ShellLayout.openSettings \
+                 intercepts it before Settings is ever asked — it lands on the \
+                 Widgets surface, not a settings page. Serve it from `open_widgets`."
+            );
+        }
+    }
+
+    /// …and removing them from `SettingsPage` must not have dropped the
+    /// capability on the floor: every intercepted slug is still reachable over
+    /// MCP through `open_widgets`.
+    #[test]
+    fn intercepted_slugs_are_served_by_open_widgets() {
+        let targets = as_str_arms("impl WidgetTarget {");
+        let aliases: BTreeSet<&str> = INTERCEPT_ALIASES.iter().map(|(from, _)| *from).collect();
+        let intercepted = shell_layout_intercepted_slugs();
+
+        for (from, to) in INTERCEPT_ALIASES {
+            assert!(
+                intercepted.contains(*from),
+                "INTERCEPT_ALIASES lists '{from}', but ShellLayout.openSettings no \
+                 longer intercepts it — drop the stale alias"
+            );
+            assert!(
+                targets.contains(*to),
+                "alias '{from}' points at '{to}', which is not a `WidgetTarget` arm"
+            );
+        }
+
+        for slug in &intercepted {
+            let served = slug == WIDGETS_LIST_SLUG
+                || targets.contains(slug)
+                || aliases.contains(slug.as_str());
+            assert!(
+                served,
+                "ShellLayout.openSettings intercepts '{slug}' and routes it to the \
+                 Widgets surface, but no `open_widgets` input reaches it — an agent \
+                 has no way to open that view. Add a `WidgetTarget` variant, or \
+                 record it in INTERCEPT_ALIASES if it is a synonym of one."
+            );
+        }
+    }
+
+    /// `WidgetTarget` names real widgets. `WidgetsApp.openPage` checks the id
+    /// against `WidgetManifests`, so a variant naming a widget that does not
+    /// exist would silently fall back to the widget list.
+    #[test]
+    fn widget_targets_exist_in_the_widget_index() {
+        let index: serde_json::Value =
+            serde_json::from_str(WIDGETS_INDEX_JSON).expect("widgets-index.json must parse");
+        let known: BTreeSet<String> = index["widgets"]
+            .as_array()
+            .expect("widgets-index.json must have a `widgets` array")
+            .iter()
+            .map(|w| {
+                w["id"]
+                    .as_str()
+                    .expect("every widget entry must have a string id")
+                    .to_string()
+            })
+            .collect();
+
+        for target in as_str_arms("impl WidgetTarget {") {
+            assert!(
+                known.contains(&target),
+                "`WidgetTarget` names '{target}', which is not a widget id in \
+                 widgets-index.json (known: {known:?}) — WidgetsApp.openPage would \
+                 fall back to the widget list"
             );
         }
     }

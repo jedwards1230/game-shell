@@ -64,8 +64,8 @@ Item {
     property string audioCardProfile: ""         // "card|profile" surround profile to reapply on boot (#234)
     property bool cecFocusOnStartup: false      // claim active source when daemon starts (default off)
     property bool cecFocusOnWake: true          // claim active source on resume from sleep (default on)
-    property bool cecAutoSwitchOnPowerOn: false // switch TV/AVR input when a device powers on (default off, daemon wiring TBD)
-    property int cecDefaultInput: -1            // logical address of the preferred default input (-1 = unset; persist-only in Phase 1)
+    property bool cecAutoSwitchOnPowerOn: false // focus the display when the TV/AVR powers on (default off; daemon: cec::auto_switch_on_power_on)
+    property int cecDefaultInput: -1            // logical address to focus (-1 = unset, i.e. claim for this box; daemon: cec::apply_focus)
     property var cecDeviceNames: ({})           // local label overrides keyed by logical address, e.g. {"0":"Living Room TV"}
     property var prewarmApps: []                 // wmClass list of apps to silently prewarm at login (#238)
 
