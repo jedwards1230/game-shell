@@ -23,4 +23,12 @@ Item {
     // gridUnit-derived: radiusMD ≈ gridUnit*0.30, iconSizeLG ≈ gridUnit*2.22).
     property int radiusMD: 11
     property int iconSizeLG: 80
+    // AppIcon's default icon size (real: gridUnit*4.44 == 120 at gridUnit 27).
+    property int iconSizeXL: 120
+
+    // "The compositor has reported a real screen height." The real one starts
+    // false and latches true; the stub defaults to TRUE so every existing test
+    // renders at a settled scale, and tst_iconmemo drives it false explicitly to
+    // pin the pre-ready request gate.
+    property bool screenReady: true
 }

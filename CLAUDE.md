@@ -55,11 +55,23 @@ shell/                       # QML shell — Quickshell config root (-c tv-shell
     prewarm.js               # Pure .pragma library: login-prewarm key resolution + launch decisions (dedup against mapped windows AND the process table) (headless-testable)
     appQuirks.js             # Pure .pragma library: per-app behaviour overrides keyed by prewarm.keyFor() — first quirk is `quitCommand` for apps that close-to-background instead of exiting (Steam) (headless-testable)
     resumeFocus.js           # Pure .pragma library: resume focus-selector decision (known address → class fallback → nothing) + post-dispatch landing verification against hypr-active, since `hyprctl dispatch` exits 0 on a no-match (headless-testable)
+    screenScale.js           # Pure .pragma library: the sticky screen-height filter behind Units.screenHeight/screenReady — holds the last VALID height across a transiently-empty Quickshell.screens or a ~0-height ShellScreen, and reports whether the scale is known yet (headless-testable)
     StreamOverlay.qml        # Reconnecting/error overlay
     lib/                     # Shared reusable component library (own qmldir module)
       SettingsDropdown.qml   #   Collapsible single-select dropdown (D-pad)
       SettingsButtonGroup.qml#   Horizontal chip selector (D-pad)
       HintBar.qml            #   Bottom-of-page hint text
+      AppIcon.qml            #   Freedesktop icon + letter-initial fallback
+      iconMemo.js            #   Pure .pragma library: negative memo of theme-
+                             #   missing icon names. AppIcon stops re-requesting a
+                             #   name that already failed at a TRUSTWORTHY size
+                             #   (real size AND Units.screenReady) (headless-testable)
+      artMemo.js             #   Pure .pragma library: negative memo of dead poster
+                             #   URLs + first-untried candidate index (SteamCard art
+                             #   chain). Cleared by SteamLibraryView on every
+                             #   host-unreachable→reachable edge, since Image.status
+                             #   can't tell a 404 from a sleeping sidecar host
+                             #   (headless-testable)
       qmldir                 #   lib registry — `module components.lib`
     qmldir                   # Component registry — `module components`
   settings/                  # Settings module (own qmldir — `module shell.settings`)

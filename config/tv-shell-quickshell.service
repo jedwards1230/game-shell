@@ -30,6 +30,28 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
+# Point Qt at a real Freedesktop icon theme.
+#
+# Without this, no Qt platform theme is selected (XDG_CURRENT_DESKTOP=Hyprland,
+# no QT_QPA_PLATFORMTHEME), so QIcon falls back to bare `hicolor` — which
+# contains almost none of the standard freedesktop names that .desktop entries
+# use. Every `image://icon/<name>` lookup in AppIcon.qml then misses and logs
+# `WARN: Could not load icon "<name>" ...`; 12 distinct names accounted for ~960
+# warnings in the first 70s of a session, and the icons rendered as letter
+# initials instead of art.
+#
+# `kde` (plasma-integration's KDEPlasmaPlatformTheme6.so, already installed)
+# resolves to themeName=breeze-dark with fallbackThemeName=breeze and adds the
+# XDG icon search paths, which covers 9 of those 12 names. It does NOT require
+# XDG_CURRENT_DESKTOP=KDE (verified) — leave that as Hyprland, since changing it
+# would also steer xdg-desktop-portal backend selection.
+#
+# Blast radius is this process only. plasma-integration also supplies Qt's
+# default font and cursor theme; tv-shell drives its own colors via Theme.qml, so
+# the plausible visible change is the default font/cursor. If that turns out to
+# be unwanted, `gtk3` (libqgtk3, also installed) is the fallback — it would pick
+# up the existing gtk-icon-theme-name=breeze-dark.
+Environment=QT_QPA_PLATFORMTHEME=kde
 # Belt-and-braces single-instance guard: reap any stray quickshell before we
 # start ours. The leading `-` makes a no-match (pkill exit 1) non-fatal. systemd's
 # own single-instance guarantee is the primary mechanism; this just cleans up a

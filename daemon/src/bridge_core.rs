@@ -678,9 +678,14 @@ pub async fn dev_restart_shell(
     let filtered: String = log_content
         .lines()
         .filter(|l| {
+            // No icon-noise exclusion here on purpose. This tail used to drop
+            // every `COULD NOT LOAD ICON` line, because a single shell start
+            // emitted ~960 of them and they buried everything else. That noise is
+            // now fixed at the source (see docs/OBSERVABILITY.md), so filtering it
+            // here would only hide a regression: if the icon flood ever returns,
+            // this tail is exactly where we want to see it.
             let upper = l.to_uppercase();
-            (upper.contains("WARN") || upper.contains("ERROR"))
-                && !upper.contains("COULD NOT LOAD ICON")
+            upper.contains("WARN") || upper.contains("ERROR")
         })
         .rev()
         .take(30)

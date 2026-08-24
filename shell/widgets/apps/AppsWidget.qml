@@ -41,7 +41,9 @@ Widget {
     signal openLibraryRequested
 
     // === Segments ===
-    property string _segment: "recent"
+    // The segment the USER last committed (or the default). It is never coerced —
+    // it records intent, so a segment that empties and refills comes back.
+    property string _requestedSegment: "recent"
 
     // All installed apps, alphabetised, shaped exactly like AppCard expects with an
     // explicit running:false (so the shared _recentActivate path launches them).
@@ -87,13 +89,99 @@ Widget {
         return o;
     }
 
+    // The segment actually RENDERED: the request, coerced onto a segment that has
+    // content. This is derived, not assigned.
+    //
+    // It used to be a writable property that an imperative `_coerceSegment()`
+    // updated from `onModelChanged` / `onApplicationsChanged`. That is what
+    // produced `Binding loop detected for property "_activeModel"` on device: a
+    // signal handler on one of `_activeModel`'s dependencies (`model`) wrote
+    // another of its dependencies (`_segment`), re-entering `_activeModel`'s
+    // update while it was still in flight. Qt then abandons the update and leaves
+    // the property STALE — the rail could keep rendering the wrong list.
+    // (Reproduced headlessly against the pre-fix file: apps discovered before the
+    // recent model settles — the normal startup order — is enough. See
+    // tests/qml/tst_appssegment.qml.)
+    //
+    // Expressing the coercion as a binding removes the writer entirely, so nothing
+    // mutates `_activeModel`'s dependency set from inside its own cascade. The
+    // behaviour is also strictly better: previously a segment that emptied flipped
+    // away permanently, now it is restored when its content returns.
+    readonly property string _segment: {
+        if (root._requestedSegment === "all")
+            return root._hasAll ? "all" : (root._hasRecent ? "recent" : "all");
+        return root._hasRecent ? "recent" : (root._hasAll ? "all" : "recent");
+    }
+
+    // Auto-parking LATCHES: when the derivation has to move off the request
+    // because the requested segment is empty, adopt the parked segment as the new
+    // request. Without this the rail yanks itself out from under the user — cold
+    // boot with Recent empty parks on All Apps, the user starts browsing, then the
+    // first launch fills Recent and (since the request was still the default
+    // "recent") the content and chip highlight jump mid-browse. The old imperative
+    // coercion never did that, because it only ever moved when the CURRENT segment
+    // emptied.
+    //
+    // Deferred via Qt.callLater on purpose. `_requestedSegment` is a dependency of
+    // `_segment`, so writing it directly from `_segment`'s own change handler is
+    // precisely the synchronous re-entrancy this whole change removed — it would
+    // just relocate the loop from `_activeModel` to `_segment`. Running a turn
+    // later puts the write outside every binding cascade, and it is a no-op
+    // whenever the two already agree. (tests/qml/run.sh fails the run on any
+    // "Binding loop detected" line, so a regression here breaks the suite rather
+    // than printing a warning nobody reads.)
+    function _latchParkedSegment() {
+        if (root._segment !== root._requestedSegment)
+            root._requestedSegment = root._segment;
+    }
+    on_SegmentChanged: Qt.callLater(root._latchParkedSegment)
+    Component.onCompleted: Qt.callLater(root._latchParkedSegment)
+
     readonly property var _activeModel: root._segment === "all" ? root._allApps : root.model
 
     // Trailing "Open Library" ACTION chip sentinel (ignored by the segment handler).
     readonly property string _openValue: "__open_library__"
 
-    // Surfaced for HomeScreen's hint bar (current rail selection).
+    // Current rail selection. Nothing outside the tests reads it any more — the
+    // hint bar was its only consumer and now uses currentEntryRunning below — but
+    // it is kept as part of the widget's outward surface for a host that wants the
+    // cursor position.
     readonly property int currentIndex: appsRow.currentIndex
+
+    // Is the rail's CURRENT entry a running app? Exposed so the host's hint bar
+    // can label A as "Resume" vs "Launch" from a value DOWNSTREAM of the rail.
+    //
+    // This exists to break a real binding loop (`Binding loop detected for
+    // property "_activeModel"`, ~8×/minute on device). HomeScreen's hint bar used
+    // to answer the same question by reading `recentWidget.currentIndex` AND
+    // `HomeScreen._recentModel`, which closed this cycle:
+    //
+    //   _activeModel  -> appsRow.model (ListView model reset)
+    //                 -> listView.currentIndex
+    //                 -> AppsWidget.currentIndex
+    //                 -> HintBar.text  (pulls the now-dirty _recentModel)
+    //                 -> HomeScreen._recentModel
+    //                 -> Binding{ property: "model" } writes AppsWidget.model
+    //                 -> onModelChanged -> _coerceSegment() writes _segment
+    //                 -> _activeModel   (re-entered mid-update -> loop warning)
+    //
+    // The load-bearing hop is the hint bar reaching back UPSTREAM for the recent
+    // model; answering from a downstream value removes that edge entirely. It also
+    // fixes a latent correctness bug: the old lookup indexed `_recentModel` even
+    // while the "All Apps" segment was showing, so the hint could report the wrong
+    // entry's running state.
+    //
+    // Note this reads the RAIL's settled model (`appsRow.model`), NOT
+    // `_activeModel`. `currentIndex` is itself downstream of `_activeModel` — a
+    // model reset moves the ListView cursor — so a getter reading both would
+    // evaluate `_activeModel` from inside its own cascade and re-enter it: the
+    // same loop, just relocated. `appsRow.model` is already written by the time
+    // the cursor moves, which keeps every dependency on one side of the flow.
+    readonly property bool currentEntryRunning: {
+        let m = appsRow.model;
+        let i = appsRow.currentIndex;
+        return !!m && i >= 0 && i < m.length && m[i].running === true;
+    }
 
     // Apps essentially always exist, so this widget basically always shows — that's
     // intended (it is the home screen's app launcher).
@@ -120,22 +208,6 @@ Widget {
         return false;
     }
 
-    // Keep the active segment on something that has content (a flip of either input
-    // can empty the current segment). Driven off the two data sources.
-    function _coerceSegment() {
-        if (root._segment === "recent" && !root._hasRecent && root._hasAll)
-            root._segment = "all";
-        else if (root._segment === "all" && !root._hasAll && root._hasRecent)
-            root._segment = "recent";
-    }
-    onModelChanged: root._coerceSegment()
-    Connections {
-        target: AppDiscoveryManager
-        function onApplicationsChanged() {
-            root._coerceSegment();
-        }
-    }
-
     ColumnLayout {
         id: col
         width: root.width
@@ -156,7 +228,8 @@ Widget {
             ]
             previousRow: root.previousRow
             nextRow: appsRow
-            onSegmentChanged: value => root._segment = value
+            // A chip commit records the user's INTENT; `_segment` derives from it.
+            onSegmentChanged: value => root._requestedSegment = value
             onActionTriggered: value => root.openLibraryRequested()
             onEscaped: root.escaped()
             onEnsureVisibleRequested: item => root.ensureVisibleRequested(item)
