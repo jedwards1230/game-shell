@@ -91,6 +91,11 @@ journalctl --user -t tv-shell-quickshell -f    # follow
 tail -f /tmp/qs-log.txt                        # same stream, restart-truncated
 ```
 
+The daemon also **counts** that file. A background scanner samples it every 15s
+and folds new WARN/ERROR lines into `tv_shell_quickshell_warnings_total`, so the
+invariant below is a Prometheus series rather than something you only notice by
+reading logs.
+
 ### Signal-to-noise is a maintained invariant, not an accident
 
 **A healthy shell start emits a handful of WARN lines, not hundreds.** If you
@@ -102,6 +107,65 @@ before the fix: **1,108 WARN lines in the first 69 seconds** of a shell start
 (and 10,498 over a 23-hour session). Zero ERROR lines. Every class was benign in
 isolation, which is exactly why it went unnoticed — and it made `/dev/logs` and
 the `/dev/restart-shell` tail useless for real debugging.
+
+**The invariant is now enforced, not just documented.**
+`tv_shell_quickshell_warnings_total` counts exactly those lines, using the same
+`WARN`/`ERROR` predicate as the `/dev/restart-shell` tail
+(`bridge_core::is_warning_line` — one source of truth, so the number and the tail
+can never disagree). "Benign classes nobody reads" is precisely the failure mode
+a counter catches, so alert on the *rate*:
+
+```promql
+# Sustained warning flood: >1 WARN/ERROR per second averaged over 15 minutes.
+# The pre-fix baseline was ~16/s; a healthy start is a handful, then ~0.
+rate(tv_shell_quickshell_warnings_total{job="htpc-1-tv-shell"}[15m]) > 1
+```
+
+```promql
+# Noisy start: more than 100 warnings in the 10 minutes after a shell restart.
+increase(tv_shell_quickshell_warnings_total{job="htpc-1-tv-shell"}[10m]) > 100
+```
+
+### Counting a truncated log monotonically
+
+`/tmp/qs-log.txt` is truncated on **every** shell start — by the unit's `tee`
+(`config/tv-shell-quickshell.service`) and by the daemon's fallback spawn. A
+naive "count the lines and store the number" would therefore be a gauge that
+resets to zero on each restart, and `rate()` over it would be nonsense. The
+scanner (`metrics::run_quickshell_warning_scanner`) keeps `(len, inode, count)`
+between ticks and:
+
+- treats a **shrink in length or a change of inode** as a new file, adding the
+  whole current count as the delta — `tee` truncates the *same* inode, so the
+  length check is the one that normally fires and the inode check covers an
+  unlink-and-replace;
+- otherwise adds `new_count - last_count`;
+- **seeds from the current file on the daemon's first tick without adding a
+  delta.** The daemon restarts independently of the shell
+  (`/dev/restart-daemon` re-execs it), and without seeding a daemon restart
+  would replay a whole session's warnings into one scrape interval. The counter
+  resetting to `0` on a daemon restart is normal and expected — `rate()` handles
+  it, and `tv_shell_shell_restarts_total` marks it.
+- **treats a MISSING log as an observation of an empty one**, seeding at zero
+  rather than skipping the tick. This is what makes a cold boot work, and it is
+  subtle enough to be worth spelling out: on a fresh boot `/tmp/qs-log.txt` does
+  not exist yet when the daemon's first tick fires, and the shell's entire
+  startup burst lands seconds later. If "absent" were a skip, the state would
+  still be unseeded when that burst arrived, the seed would adopt it as history,
+  and the counter would read `0` through precisely the flood it exists to catch —
+  the measured 1,108-line regression was a *cold-boot* flood. Seeding at zero
+  instead makes the burst an ordinary append. A genuine read **error** is still a
+  skip: unlike `NotFound` it tells us nothing about the contents.
+
+One case is deliberately **not** recovered: warnings written and then truncated
+away *inside* a single 15s scan interval are lost. The alternative would be
+hooking the restart path, which cannot work — the unit's `Restart=on-failure`
+restarts Quickshell without the daemon ever hearing about it.
+
+The scan runs in its own task, spawned unconditionally, and **never inside
+`render()`**: `render` runs on every `/metrics` scrape *and* every textfile tick,
+so reading the file there would tie counting to scrape frequency and double-count
+whenever both sinks are enabled.
 
 The four root causes, all fixed, are worth knowing because each is a trap that
 is easy to reintroduce:
@@ -199,6 +263,74 @@ forced one — and can be retired once the fix has held for a while.
 If you find yourself wanting to add a filter to read the log, fix the emitter
 instead.
 
+### The residual 36: three names, three different root causes
+
+After the four fixes above, a cold shell start on the reference device still
+emitted **36** `Could not load icon "X" at size QSize(w,h) from request` lines,
+across exactly three names — 12 each. The repeat counts are a product of
+screen-scale restages (`gridUnit` walks 1080→2160, so `iconSizeXL` walks
+120→240), `Variants { model: Quickshell.screens }` rebuilding the shell tree when
+the screens list churns, and `LibraryScreen` eagerly instantiating a `Repeater`
+over every installed app while hidden. Three names, and **no two share a cause**:
+
+| Name | Origin | Fix |
+|---|---|---|
+| `web-browser` | **Ours.** `webapps.rs` hardcoded `Icon=web-browser` into every generated web-app `.desktop`. Breeze — which the shell selects via `QT_QPA_PLATFORMTHEME=kde` — ships `internet-web-browser`; plain `web-browser` exists only under `AdwaitaLegacy`, outside Breeze's inheritance chain. | Template now emits `internet-web-browser`, plus a one-shot startup migration that rewrites the `Icon=` line of entries already on disk (guarded by the `X-TvShell-WebApp` ownership marker, so a foreign `.desktop` is never touched). |
+| `hwloc` | **A third-party entry with a dangling reference.** `/usr/share/applications/lstopo.desktop` sets `Icon=hwloc`, and no `hwloc` (or `lstopo`) icon file exists anywhere under `/usr/share/icons` or `/usr/share/pixmaps`. There is nothing to alias it to. | The daemon now blanks, at scan time, any `Icon=` that resolves to no file at all, so the app falls back to `AppCard`'s letter tile and never issues a doomed request. See below. |
+| `hyprland-donate-screen` | **A live Hyprland nag window** whose window class was used verbatim as an icon name. | Handled on the QML side. |
+
+A blocklist of the three names would have papered over three unrelated bugs.
+
+### Why `iconMemo` cannot close this class
+
+`iconMemo.js` (added by #441) is a negative memo: a name that fails once is never
+requested again. It is **completely inert for all three names above**, and this is
+structural, not a tuning problem.
+
+Quickshell's `image://icon` provider returns a magenta **placeholder** pixmap for
+a theme-missing name and reports `Image.Ready`. `AppIcon.qml` only records into
+the memo on `Image.Error`, which therefore never fires. The gap is already
+flagged in `AppIcon.qml`'s own comments.
+
+Nor is it fixable one layer up. `Quickshell.iconPath(name, true)` — the obvious
+"ask whether it resolves before requesting it" — does **not** return `""` for
+theme-missing names on the Quickshell build running on the reference device.
+Commit `aee043c` tried exactly that and was reverted by `e371e8e`. Anyone
+proposing "just memoise it" should read those two commits first.
+
+So the fix has to happen **at the source of the icon name**, which is why the
+table above has three different fixes rather than one.
+
+### The daemon-side resolvable check
+
+The durable guard against the `hwloc` class — a third-party `.desktop` shipping a
+reference to an icon that does not exist — lives in `apps.rs`. At scan time, an
+`Icon=` name that appears in **no** icon file anywhere is replaced with an empty
+string, so the shell renders its designed letter-tile fallback and never issues a
+request that can only warn.
+
+It works off a flat index of icon **basenames** under the standard roots
+(`/usr/share/icons`, `/usr/share/pixmaps`, `$XDG_DATA_HOME/icons`, `~/.icons`,
+`~/.local/share/icons`, plus the Flatpak export equivalents), built lazily **once
+per process** — `/usr/share/icons` on a KDE box is tens of thousands of files and
+`scan_apps` runs on every `list-apps` call. Installing a new icon theme
+mid-session needs a daemon restart before its icons count as resolvable.
+
+> **It is deliberately permissive, and must stay that way.** A basename index
+> knows nothing about theme inheritance or `index.theme`, so it answers "present"
+> for a name that only exists in a theme Qt will never search — `web-browser`
+> under `AdwaitaLegacy` is exactly such a name and is **not** caught by it. That
+> is intended: the check may only ever blank a name that exists *nowhere*, so it
+> can never blank a working icon. It is also why `web-browser` needed its own fix.
+> Do not "improve" this into a real theme resolver — one that models inheritance
+> will start returning "missing" for icons that render fine, and the failure mode
+> is silent: apps lose their icons with nothing in the log to explain it.
+
+An absolute (or otherwise slash-bearing) `Icon=` is passed through untouched and
+never stat'ed. A blanked name is logged at `debug`, never `warn` — a distro
+shipping a broken icon reference is not ours to shout about, and log volume is
+the entire point.
+
 ---
 
 ## Metrics
@@ -233,6 +365,8 @@ textfile writer and `/metrics`, so the two never drift.
 | `tv_shell_build_total` | counter | — | `POST /dev/build` attempts via the HTTP bridge. |
 | `tv_shell_restart_shell_total` | counter | — | `POST /dev/restart-shell` attempts via the HTTP bridge. |
 | `tv_shell_restart_daemon_total` | counter | — | `POST /dev/restart-daemon` (re-exec) requests via the HTTP bridge. Counted before the process image is replaced; the re-exec'd process starts its own counters at zero. |
+| `tv_shell_quickshell_multi_instance_total` | counter | — | Times a shell restart (`POST /dev/restart-shell` or MCP `restart_shell`) found **more than one live** `quickshell` process after the restart settle — the #254 stacked-instance bug. Zombies (`<defunct>`) are excluded so the metric cannot cry wolf on the path it monitors. Should stay `0`. |
+| `tv_shell_quickshell_warnings_total` | counter | — | WARN/ERROR lines the Quickshell QML process wrote to `/tmp/qs-log.txt` (#441). Makes the signal-to-noise invariant below **alertable**. Sampled by a background scanner every 15s, never inside `render` — see [Counting a truncated log monotonically](#counting-a-truncated-log-monotonically). |
 | `tv_shell_cpu_percent` | gauge | — | Aggregate CPU utilisation 0..=100. _Convenience — prefer node_exporter._ |
 | `tv_shell_mem_used_bytes` | gauge | — | Used memory in bytes. _Convenience._ |
 | `tv_shell_mem_total_bytes` | gauge | — | Total memory in bytes. _Convenience._ |

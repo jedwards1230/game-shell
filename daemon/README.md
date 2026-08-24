@@ -340,9 +340,25 @@ on the HTTP bridge, and/or an atomically-written **node_exporter textfile**
 default 15s; unset = off). One shared renderer feeds both (`metrics.rs`). Series are all
 `tv_shell_*`: `build_info{sha,branch,version}` (current deployment), dev-action
 counters (`deploy_total{outcome}`, `build_total`, `restart_*_total`),
-input/intent/transition/pad counters, and cpu/mem/load/temp gauges (the gauges are
-a convenience — prefer node_exporter for host resources). Full catalogue in
+input/intent/transition/pad counters, shell-health counters
+(`quickshell_multi_instance_total`, `quickshell_warnings_total`), and
+cpu/mem/load/temp gauges (the gauges are a convenience — prefer node_exporter for
+host resources). Full catalogue in
 [`../docs/OBSERVABILITY.md`](../docs/OBSERVABILITY.md).
+
+`quickshell_warnings_total` is the odd one out: it is not incremented at an event
+site but by a background scanner (`metrics::run_quickshell_warning_scanner`,
+spawned unconditionally from `main.rs`, 15s cadence) that samples
+`/tmp/qs-log.txt` and counts WARN/ERROR lines with the same predicate as the
+`/dev/restart-shell` tail. The log is truncated on every shell start, so the
+scanner tracks `(len, inode, count)` and treats a shrink or an inode change as a
+new file; on the daemon's first tick it seeds from the current file **without**
+counting its history, so a daemon re-exec does not replay a session. A *missing*
+log counts as an empty one rather than as a skipped tick — on a cold boot that
+seeds at zero before the shell exists, so the startup burst is counted as a plain
+append instead of being swallowed by the seed. This turns
+the "a healthy shell start emits a handful of WARN lines, not hundreds" invariant
+into an alertable series (#441).
 
 ## Status
 

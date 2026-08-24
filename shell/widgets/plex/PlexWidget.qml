@@ -41,7 +41,9 @@ Widget {
     readonly property bool _hasRecent: recentItems.length > 0
 
     // === Segment (Up Next vs Recently Added) ===
-    property string _segment: "ondeck"
+    // The segment the USER last committed (or the default). It is never coerced —
+    // it records intent; `_segment` below derives the rendered segment from it.
+    property string _requestedSegment: "ondeck"
     readonly property var _segmentOptions: {
         let o = [];
         if (_hasOnDeck)
@@ -56,6 +58,48 @@ Widget {
             });
         return o;
     }
+
+    // The segment actually RENDERED: the request, coerced onto a segment that has
+    // content. Derived, never assigned — same treatment as AppsWidget's `_segment`
+    // (shell/widgets/apps/AppsWidget.qml), with the roles swapped ("ondeck" is the
+    // default here).
+    //
+    // It used to be a writable property that `plexMon.onUpdated` coerced inline,
+    // right after writing `onDeckItems`/`recentItems` in the same handler. That is
+    // the anti-pattern recorded in docs/OBSERVABILITY.md: a handler writing one
+    // dependency of a derived property (`_segment`) from a handler that also writes
+    // another (`onDeckItems`/`recentItems`). In AppsWidget the equivalent shape
+    // produced `Binding loop detected for property "_activeModel"` on device — Qt
+    // abandons a re-entered update and leaves the property STALE, so the row can
+    // keep rendering the wrong list.
+    //
+    // Two concrete wins beyond removing that hazard: the coercion now applies to
+    // ANY change of the two lists (previously it only ran when the poll handler
+    // happened to fire, so a list written from anywhere else left the chip
+    // highlight and the rendered row disagreeing), and it is directly exercisable
+    // headless — the stub SocketClient never drives a real poll, so the old
+    // in-handler coercion was unreachable from a test at all
+    // (tests/qml/tst_plexsegment.qml).
+    readonly property string _segment: {
+        if (root._requestedSegment === "recent")
+            return root._hasRecent ? "recent" : (root._hasOnDeck ? "ondeck" : "recent");
+        return root._hasOnDeck ? "ondeck" : (root._hasRecent ? "recent" : "ondeck");
+    }
+
+    // Auto-parking LATCHES: when the derivation has to move off the request
+    // because the requested segment is empty, adopt the parked segment as the new
+    // request, so a later refill does not yank the row out from under a user who
+    // is mid-browse. Deferred via Qt.callLater because `_requestedSegment` is a
+    // dependency of `_segment` — writing it straight from `_segment`'s own change
+    // handler would reintroduce exactly the synchronous re-entrancy this change
+    // removes. It is a no-op whenever the two already agree.
+    function _latchParkedSegment() {
+        if (root._segment !== root._requestedSegment)
+            root._requestedSegment = root._segment;
+    }
+    on_SegmentChanged: Qt.callLater(root._latchParkedSegment)
+    Component.onCompleted: Qt.callLater(root._latchParkedSegment)
+
     readonly property string _segmentName: _segment === "ondeck" ? "Up Next" : "Recently Added"
     readonly property var _activeItems: _segment === "ondeck" ? onDeckItems : recentItems
 
@@ -115,11 +159,10 @@ Widget {
                 root.onDeckItems = [];
                 root.recentItems = [];
             }
-            // Keep the active segment on something that has content.
-            if (root._segment === "ondeck" && !root._hasOnDeck && root._hasRecent)
-                root._segment = "recent";
-            else if (root._segment === "recent" && !root._hasRecent && root._hasOnDeck)
-                root._segment = "ondeck";
+            // No segment coercion here on purpose — `_segment` derives it (above),
+            // so this handler only writes DATA. Writing `_segment` from the same
+            // handler that writes its sibling dependencies is the loop shape #441
+            // removed from AppsWidget.
         }
     }
 
@@ -149,7 +192,8 @@ Widget {
             ]
             previousRow: root.previousRow
             nextRow: posterRow
-            onSegmentChanged: value => root._segment = value
+            // A chip commit records the user's INTENT; `_segment` derives from it.
+            onSegmentChanged: value => root._requestedSegment = value
             onActionTriggered: value => root.openPlexRequested()
             onEscaped: root.escaped()
             onEnsureVisibleRequested: item => root.ensureVisibleRequested(item)

@@ -73,10 +73,24 @@ migrator `widgetConfig.js` (`tst_widgetmigrate.qml`), the two log-noise negative
 memos `iconMemo.js` / `artMemo.js` (`tst_iconmemo.qml` — which also drives the
 REAL `AppIcon`, since offscreen has no `image://icon` provider so every request
 errors — and `tst_artmemo.qml`), the screen-scale filter `screenScale.js`
-(`tst_screenscale.qml`), `SteamLibraryView`'s poll-adoption signature guard
-(`tst_steamlibrary.qml`, against the real view + the real `SteamCard`), and
+(`tst_screenscale.qml`), the running-application filter `windowFilter.js`
+(`tst_windowfilter.qml` — which also pushes a filtered client list through the
+real `resumeModel.build()`, since `AppLifecycleManager.qml` imports
+`Quickshell.Io` and cannot be loaded headless at all), `SteamLibraryView`'s poll-adoption signature guard
+(`tst_steamlibrary.qml`, against the real view + the real `SteamCard`),
 `AppsWidget`'s segment derivation + hint-bar contract (`tst_appssegment.qml`, the
-two `_activeModel` binding-loop regressions).
+two `_activeModel` binding-loop regressions), and the same segment derivation on
+the other two widgets that carried it — `PlexWidget` (`tst_plexsegment.qml`) and
+`SteamLibraryView` (`tst_steamsegment.qml`, which also pins the deferred
+fast-poll teardown).
+
+Those last two are only reachable **because** `_segment` became a derived
+`readonly` property. While the coercion lived inside `ServiceMonitor.onUpdated`
+it could not be driven headless at all (the stub `SocketClient` is inert, so no
+poll ever fires); writing `onDeckItems`/`recentItems` — or `recentItems`/
+`allItems` — directly now exercises it. Where a test *does* need the production
+`onUpdated` body, it reaches the widget's private `ServiceMonitor` by duck-typing
+`children` for its `healthKey`, sets `data`, and emits `updated()` by hand.
 
 **The run also fails on any QML binding loop.** `run.sh` scans the combined
 output for `Binding loop detected` and exits non-zero if it appears, for every
@@ -114,6 +128,12 @@ ROOTS + their focus/segment framework + `SteamLibraryView` are copied **verbatim
 - **Quickshell-backed clients** — `SocketClient` / `AppDiscoveryManager` become
   inert no-ops, and a minimal `Quickshell.Services.Mpris` `Mpris` singleton is
   put on a second import path (`-import .build/qml`) so `MprisPlayerBase` loads.
+  The stub `SocketClient` still does no I/O, but it now **tallies** each
+  `request(cmd)` into the test-only `SocketProbe` singleton
+  (`widgetstubs/components/SocketProbe.qml`) — `ServiceMonitor`'s `dataReq` is a
+  private child, so a singleton tally is the only way a test can ask "did this
+  handler issue a poll?" (`tst_steamsegment`'s fast-poll guard). Reset it with
+  `SocketProbe.reset()` in any test that reads it.
 - **Pure-visual leaf cards** — `AppCard` / `StreamCard` / `PlexCard` / `SteamCard`
   / `WakeCard` / `SessionIndicator` / `NowPlayingCard` / `NowPlayingStripView`
   (the `QtQuick.Effects`/`image://icon` renderers) become minimal stubs exposing

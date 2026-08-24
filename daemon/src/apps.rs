@@ -21,6 +21,7 @@
 //!   - sort the final list by `name.to_lowercase()`
 
 use freedesktop_desktop_entry::DesktopEntry;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// One discovered application, matching the QML model shape
@@ -122,6 +123,152 @@ pub fn app_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+// ---------------------------------------------------------------------------
+// Icon resolvability (#441 follow-up)
+// ---------------------------------------------------------------------------
+
+/// Icon file extensions we index. Matches what `image://icon/` can actually
+/// render from a theme directory.
+const ICON_EXTENSIONS: [&str; 3] = ["svg", "png", "xpm"];
+
+/// How deep to walk an icon root. Real theme layouts bottom out around
+/// `<theme>/<context>/<size>/<name>.svg` (3) and `<theme>/<size>/<context>/`
+/// variants; 6 covers those with room to spare while refusing to chase a
+/// pathological symlink farm.
+const ICON_WALK_MAX_DEPTH: usize = 6;
+
+/// The standard icon roots, in no particular order — this is a flat existence
+/// index, not a lookup path (see [`icon_is_resolvable`]).
+pub fn icon_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/share/icons"),
+        PathBuf::from("/usr/share/pixmaps"),
+        // System-wide Flatpak exports, matching `app_dirs`.
+        PathBuf::from("/var/lib/flatpak/exports/share/icons"),
+    ];
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(data_home).join("icons"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".icons"));
+        dirs.push(home.join(".local/share/icons"));
+        dirs.push(home.join(".local/share/flatpak/exports/share/icons"));
+    }
+    dirs
+}
+
+/// Walk `dirs` and collect every icon **basename** (filename without its
+/// extension) found underneath.
+///
+/// Deliberately flat: theme inheritance, `index.theme`, size buckets and
+/// contexts are all ignored — see [`icon_is_resolvable`] for why that is the
+/// point rather than a shortcut.
+pub fn build_icon_index(dirs: &[PathBuf]) -> HashSet<String> {
+    let mut index = HashSet::new();
+    // Iterative BFS with an explicit depth so a symlink cycle can't recurse the
+    // daemon into a stack overflow.
+    let mut queue: Vec<(PathBuf, usize)> = dirs.iter().map(|d| (d.clone(), 0)).collect();
+    while let Some((dir, depth)) = queue.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            // `file_type()` does not follow symlinks; `is_dir()` on the path
+            // does, which is what we want (themes symlink size buckets).
+            if path.is_dir() {
+                if depth < ICON_WALK_MAX_DEPTH {
+                    queue.push((path, depth + 1));
+                }
+                continue;
+            }
+            let has_icon_ext = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|ext| ICON_EXTENSIONS.iter().any(|k| ext.eq_ignore_ascii_case(k)));
+            if !has_icon_ext {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                index.insert(stem.to_owned());
+            }
+        }
+    }
+    index
+}
+
+/// The process-wide icon index, built lazily on first use.
+///
+/// **Cached for the life of the process on purpose.** `/usr/share/icons` on a
+/// KDE box is tens of thousands of files, and `scan_apps` runs on every
+/// `list-apps` IPC call — rebuilding per scan (let alone per app) would turn a
+/// cheap request into a full filesystem walk. Installing a new icon theme
+/// mid-session therefore needs a daemon restart before its icons count as
+/// resolvable; that is an acceptable trade for a value that changes about as
+/// often as the OS does.
+fn icon_index() -> &'static HashSet<String> {
+    static INDEX: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let index = build_icon_index(&icon_dirs());
+        tracing::debug!("apps: indexed {} icon names", index.len());
+        index
+    })
+}
+
+/// Would `icon` resolve to *some* file on this system?
+///
+/// Pure over an injected `index` so the policy is unit-testable with no
+/// filesystem, matching `count_live_quickshell` / `metrics::count_warning_lines`.
+///
+/// **Deliberately permissive, and it must stay that way.** A flat basename index
+/// knows nothing about theme inheritance or `index.theme`, so it answers "yes"
+/// for a name that exists only in a theme Qt will never search — `web-browser`,
+/// present under `AdwaitaLegacy` but outside Breeze's inheritance chain, is
+/// exactly such a name and is NOT caught here. That is intended: the only thing
+/// this check may ever do is blank a name that exists **nowhere**, so it can
+/// never blank a working icon. It is also why the generated web-app launcher
+/// needed its own fix (`webapps::WEBAPP_ICON`) rather than relying on this.
+///
+/// If you are tempted to "improve" this into a real theme resolver: don't. A
+/// resolver that models inheritance will start returning `false` for icons that
+/// render fine, and the failure mode is silent — apps lose their icons and fall
+/// back to letter tiles with nothing in the log to explain it.
+pub fn icon_is_resolvable(icon: &str, index: &HashSet<String>) -> bool {
+    // A path (absolute, or anything with a separator) is passed through
+    // untouched: the spec allows `Icon=` to be a file path, and we deliberately
+    // do not stat it — a network/removable path could block, and a wrong answer
+    // here would blank a perfectly good icon.
+    if icon.contains('/') {
+        return true;
+    }
+    if index.contains(icon) {
+        return true;
+    }
+    // Deprecated-but-real: `Icon=foo.png`. The index stores stems, so retry
+    // without a known icon extension before giving up.
+    std::path::Path::new(icon)
+        .extension()
+        .and_then(|x| x.to_str())
+        .filter(|ext| ICON_EXTENSIONS.iter().any(|k| ext.eq_ignore_ascii_case(k)))
+        .and_then(|_| std::path::Path::new(icon).file_stem())
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| index.contains(stem))
+}
+
+/// Blank an `Icon=` that resolves to nothing, so the shell renders its designed
+/// letter-tile fallback instead of issuing a doomed `image://icon/` request.
+///
+/// Returns `icon` unchanged when it is empty (already the fallback) or
+/// resolvable. See [`icon_is_resolvable`] for the conservatism contract.
+pub fn resolve_icon(icon: &str, index: &HashSet<String>) -> String {
+    if icon.is_empty() || icon_is_resolvable(icon, index) {
+        icon.to_owned()
+    } else {
+        String::new()
+    }
+}
+
 /// Scan the given directories for `.desktop` files, parse + filter each, then
 /// de-duplicate and sort. Files that fail to read or parse are skipped.
 pub fn scan_apps_in(dirs: &[PathBuf]) -> Vec<App> {
@@ -140,7 +287,23 @@ pub fn scan_apps_in(dirs: &[PathBuf]) -> Vec<App> {
             let Ok(contents) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            if let Some(app) = parse_entry(&path, &contents) {
+            if let Some(mut app) = parse_entry(&path, &contents) {
+                // Drop an icon name that resolves to no file at all. A distro
+                // entry with a dangling `Icon=` (e.g. lstopo's `hwloc`, which
+                // ships no icon anywhere) would otherwise make the shell request
+                // it on every restage and log a warning each time — 12 per cold
+                // start, measured. `debug!`, never `warn!`: a third-party entry
+                // with a broken reference is not ours to shout about, and log
+                // volume is the whole point of this change.
+                let resolved = resolve_icon(&app.icon, icon_index());
+                if resolved.is_empty() && !app.icon.is_empty() {
+                    tracing::debug!(
+                        "apps: icon {:?} for {:?} resolves to no file; using the letter fallback",
+                        app.icon,
+                        app.name
+                    );
+                }
+                app.icon = resolved;
                 apps.push(app);
             }
         }
@@ -192,6 +355,119 @@ mod tests {
         );
         // Still scans the plain XDG dirs.
         assert!(dirs.iter().any(|d| d.ends_with("usr/share/applications")));
+    }
+
+    // ── Icon resolvability (#441 follow-up) ──────────────────────────────────
+
+    fn index(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn absolute_and_relative_icon_paths_pass_through_untouched() {
+        let idx = index(&[]);
+        // A path is never blanked and never stat'ed: `Icon=` may legally be a
+        // file path, and a wrong answer here would kill a working icon.
+        assert_eq!(
+            resolve_icon("/usr/share/pixmaps/thing.png", &idx),
+            "/usr/share/pixmaps/thing.png"
+        );
+        assert_eq!(
+            resolve_icon("./relative/thing.svg", &idx),
+            "./relative/thing.svg"
+        );
+        assert!(icon_is_resolvable("/nonexistent/anywhere.png", &idx));
+    }
+
+    #[test]
+    fn an_indexed_icon_name_survives() {
+        let idx = index(&["firefox", "internet-web-browser"]);
+        assert_eq!(resolve_icon("firefox", &idx), "firefox");
+        assert_eq!(
+            resolve_icon("internet-web-browser", &idx),
+            "internet-web-browser"
+        );
+    }
+
+    #[test]
+    fn an_unindexed_icon_name_is_blanked() {
+        // `hwloc` is the real case: /usr/share/applications/lstopo.desktop
+        // references it and NO hwloc icon file exists anywhere on the system, so
+        // every request is doomed and logs a warning. Blanking hands the shell
+        // its designed letter-tile fallback instead.
+        let idx = index(&["firefox"]);
+        assert_eq!(resolve_icon("hwloc", &idx), "");
+        assert!(!icon_is_resolvable("hwloc", &idx));
+    }
+
+    #[test]
+    fn an_empty_icon_stays_empty() {
+        assert_eq!(resolve_icon("", &index(&["firefox"])), "");
+        assert_eq!(resolve_icon("", &index(&[])), "");
+    }
+
+    #[test]
+    fn icon_lookup_is_case_sensitive_like_the_real_thing() {
+        // Icon names resolve to real filenames, and the freedesktop lookup is
+        // case-sensitive — `Firefox` genuinely does not find `firefox.svg`.
+        // Asserted rather than assumed, since a "helpful" case-insensitive
+        // match would make the index claim names that never render.
+        let idx = index(&["firefox"]);
+        assert!(icon_is_resolvable("firefox", &idx));
+        assert!(!icon_is_resolvable("Firefox", &idx));
+        assert_eq!(resolve_icon("FireFox", &idx), "");
+    }
+
+    #[test]
+    fn a_name_carrying_an_icon_extension_matches_its_stem() {
+        // Deprecated but real: `Icon=foo.png`. The index stores stems, so this
+        // must not be blanked just because of the suffix.
+        let idx = index(&["foo"]);
+        assert!(icon_is_resolvable("foo.png", &idx));
+        assert!(icon_is_resolvable("foo.svg", &idx));
+        // A non-icon extension is not stripped — `foo.bar` is its own name.
+        assert!(!icon_is_resolvable("foo.bar", &idx));
+        // And the stem must actually be present.
+        assert!(!icon_is_resolvable("nope.png", &idx));
+    }
+
+    #[test]
+    fn the_check_is_permissive_by_design_not_a_theme_resolver() {
+        // `web-browser` exists under AdwaitaLegacy, which is NOT in Breeze's
+        // inheritance chain, so Qt cannot load it — yet a flat basename index
+        // says "present" and we deliberately keep the icon. Blanking it would
+        // require modelling theme inheritance, and such a resolver would start
+        // silently blanking icons that render fine. This is exactly why the
+        // generated web-app launcher needed its own fix (webapps::WEBAPP_ICON)
+        // instead of relying on this check.
+        let idx = index(&["web-browser"]);
+        assert!(icon_is_resolvable("web-browser", &idx));
+        assert_eq!(resolve_icon("web-browser", &idx), "web-browser");
+    }
+
+    #[test]
+    fn build_icon_index_collects_stems_recursively() {
+        // See `crate::testutil` for why this is based on `current_exe()`
+        // rather than the system temp dir.
+        let root = crate::testutil::scratch_dir("apps-icon-index-test");
+        let nested = root.join("breeze/apps/48");
+        std::fs::create_dir_all(&nested).unwrap();
+        crate::testutil::harden_dir(&root.join("breeze"));
+        crate::testutil::harden_dir(&root.join("breeze/apps"));
+        crate::testutil::harden_dir(&nested);
+        std::fs::write(nested.join("internet-web-browser.svg"), "<svg/>").unwrap();
+        std::fs::write(root.join("legacy.png"), "").unwrap();
+        std::fs::write(root.join("notes.txt"), "").unwrap();
+
+        let idx = build_icon_index(std::slice::from_ref(&root));
+        assert!(idx.contains("internet-web-browser"), "nested svg: {idx:?}");
+        assert!(idx.contains("legacy"), "top-level png: {idx:?}");
+        assert!(!idx.contains("notes"), "non-icon extension must not index");
+
+        // A nonexistent root is skipped, not an error.
+        assert!(build_icon_index(&[root.join("nope")]).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

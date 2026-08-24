@@ -149,8 +149,9 @@ TestCase {
     // `model` and a populated AppDiscoveryManager, then `model` arrives.
     //
     // Pre-fix this logged `Binding loop detected for property "_activeModel"` and
-    // left `_segment` STALE (Qt abandons a re-entered update). failOnWarning above
-    // is what actually catches a regression; the value assertions below describe
+    // left `_segment` STALE (Qt abandons a re-entered update). The run.sh grep is
+    // what actually catches a regression of that class (QML TestCase has no
+    // `failOnWarning` — see the header note); the value assertions below describe
     // the intended behaviour.
     function test_startup_order_apps_first() {
         AppDiscoveryManager.applications = [_app("Firefox")];

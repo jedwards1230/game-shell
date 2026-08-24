@@ -30,6 +30,22 @@ pub const OWNER_KEY: &str = "X-TvShell-WebApp";
 /// Pre-rebrand spelling, still honored when detecting ownership.
 pub const LEGACY_OWNER_KEY: &str = "X-GameShell-WebApp";
 
+/// The `Icon=` name generated entries carry.
+///
+/// **Breeze ships `internet-web-browser`, not `web-browser`.** The shell sets
+/// `QT_QPA_PLATFORMTHEME=kde`, so Qt resolves icons against breeze/breeze-dark;
+/// plain `web-browser` exists only in themes outside that inheritance chain, so
+/// every generated launcher used to produce a `Could not load icon "web-browser"`
+/// warning per request — measured at 12 per cold shell start on the reference
+/// device. This is the standard freedesktop name for the class and is present in
+/// Breeze and the Adwaita chain alike.
+pub const WEBAPP_ICON: &str = "internet-web-browser";
+
+/// The pre-#441 `Icon=` value. Entries already written to disk keep whatever
+/// name they were generated with, so [`migrate_desktop_icons_in`] rewrites
+/// exactly this value — and only this value — to [`WEBAPP_ICON`].
+const STALE_WEBAPP_ICON: &str = "web-browser";
+
 /// Longest generated slug, keeping filenames and window classes sane.
 const MAX_SLUG: usize = 32;
 /// Defensive caps so a hostile/fat-fingered panel POST can't write a huge entry.
@@ -193,7 +209,7 @@ pub fn desktop_entry(app: &WebApp, chromium: &str, user_data_dir: &Path) -> Stri
          Name={name}\n\
          Comment=Web app launched by tv-shell\n\
          Exec={exec}\n\
-         Icon=web-browser\n\
+         Icon={icon}\n\
          Terminal=false\n\
          Categories=Network;\n\
          StartupWMClass={wm_class}\n\
@@ -202,6 +218,7 @@ pub fn desktop_entry(app: &WebApp, chromium: &str, user_data_dir: &Path) -> Stri
          X-TvShell-WebAppUrl={url}\n",
         name = app.name,
         exec = exec,
+        icon = WEBAPP_ICON,
         wm_class = app.wm_class,
         owner = OWNER_KEY,
         id = app.id,
@@ -404,6 +421,105 @@ pub fn remove(settings_path: &Path, id: &str) -> Result<(), String> {
     persist(settings_path, &remaining)
 }
 
+// ---------------------------------------------------------------------------
+// Icon migration for entries already on disk (#441 follow-up)
+// ---------------------------------------------------------------------------
+
+/// Rewrite a generated entry's stale `Icon=web-browser` line to [`WEBAPP_ICON`].
+///
+/// Pure: returns `Some(new_contents)` only when a rewrite is actually needed,
+/// and `None` otherwise — which is what makes the migration idempotent and makes
+/// "did it change anything?" testable with no filesystem.
+///
+/// Three guards, all load-bearing:
+///
+/// 1. **Ownership.** Returns `None` unless [`entry_is_ours`] accepts the file.
+///    The module contract (see the header) is that a hand-written or
+///    distro-shipped `.desktop` is never clobbered by us; a migration is no
+///    exception. The legacy `X-GameShell-WebApp` marker counts as ours, so
+///    pre-rebrand entries migrate too.
+/// 2. **Exact value only.** Only the literal `web-browser` is replaced. A user
+///    who deliberately edited `Icon=` to something else keeps their choice, and
+///    an entry already carrying [`WEBAPP_ICON`] is left byte-identical.
+/// 3. **Key, not substring.** Matching is on a trimmed `Icon=<value>` line, so a
+///    `Name=` or `Comment=` that happens to contain the words is untouched.
+pub fn migrate_entry_icon(contents: &str) -> Option<String> {
+    if !entry_is_ours(contents) {
+        return None;
+    }
+    let stale = format!("Icon={STALE_WEBAPP_ICON}");
+    if !contents.lines().any(|l| l.trim() == stale) {
+        return None;
+    }
+    // Preserve the trailing-newline shape of the original: `lines()` drops it,
+    // so re-add it only if the input had one.
+    let mut out = contents
+        .lines()
+        .map(|l| {
+            if l.trim() == stale {
+                format!("Icon={WEBAPP_ICON}")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if contents.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Migrate every generated `.desktop` entry in `dir` to [`WEBAPP_ICON`],
+/// returning how many files were rewritten.
+///
+/// Needed because [`write_desktop_entry`] only ever runs from [`add`], so a
+/// template change alone leaves every already-installed launcher on the stale
+/// icon name forever.
+///
+/// **Never fails the caller.** A missing directory, an unreadable file, or a
+/// failed write is logged and skipped — this is opportunistic cleanup of log
+/// noise, and it must never be able to hold up daemon startup.
+///
+/// Blocking I/O; the caller runs it on the blocking pool.
+pub fn migrate_desktop_icons_in(dir: &Path) -> usize {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        // No per-user applications dir yet — nothing generated, nothing to do.
+        tracing::debug!(
+            "webapps: {} not readable, skipping icon migration",
+            dir.display()
+        );
+        return 0;
+    };
+    let mut migrated = 0usize;
+    for path in read_dir
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("desktop"))
+    {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // `migrate_entry_icon` enforces the ownership guard, so a foreign entry
+        // never reaches the write below.
+        let Some(updated) = migrate_entry_icon(&contents) else {
+            continue;
+        };
+        match crate::config::atomic_write(&path, &updated) {
+            Ok(()) => {
+                migrated += 1;
+                tracing::info!("webapps: migrated {} to Icon={WEBAPP_ICON}", path.display());
+            }
+            Err(e) => tracing::warn!("webapps: could not migrate {}: {e}", path.display()),
+        }
+    }
+    migrated
+}
+
+/// [`migrate_desktop_icons_in`] over the real per-user applications directory.
+pub fn migrate_desktop_icons() -> usize {
+    migrate_desktop_icons_in(&applications_dir())
+}
+
 fn persist(settings_path: &Path, apps: &[WebApp]) -> Result<(), String> {
     let updates = serde_json::json!({ "webApps": registry_json(apps) });
     crate::config::set_config(settings_path, &updates)
@@ -485,6 +601,11 @@ mod tests {
         assert!(e.contains("Name=YouTube\n"));
         assert!(e.contains("StartupWMClass=tvshell-youtube\n"));
         assert!(e.contains("X-TvShell-WebApp=true\n"));
+        // Breeze ships `internet-web-browser`; plain `web-browser` is outside its
+        // inheritance chain and produced 12 "Could not load icon" warnings per
+        // cold shell start (#441).
+        assert!(e.contains("Icon=internet-web-browser\n"), "got: {e}");
+        assert!(!e.contains("Icon=web-browser\n"));
         assert!(e.contains("--app=https://youtube.com/tv"));
         assert!(e.contains("--class=tvshell-youtube"));
         assert!(e.contains("--user-data-dir=/home/u/.wa/youtube"));
@@ -578,6 +699,89 @@ mod tests {
         assert!(!written.exists());
         // Deleting again is a no-op success.
         remove_desktop_entry(&app.id, &dir).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Icon migration (#441 follow-up) ──────────────────────────────────────
+
+    const OURS_STALE: &str =
+        "[Desktop Entry]\nName=YouTube\nIcon=web-browser\nX-TvShell-WebApp=true\n";
+
+    #[test]
+    fn migrate_entry_icon_rewrites_only_our_stale_entries() {
+        // Ours + stale → migrated, and nothing else on the line changes.
+        let out = migrate_entry_icon(OURS_STALE).expect("ours+stale migrates");
+        assert!(out.contains("Icon=internet-web-browser\n"), "got: {out}");
+        assert!(!out.contains("Icon=web-browser\n"));
+        assert!(out.contains("Name=YouTube\n") && out.contains("X-TvShell-WebApp=true\n"));
+        assert!(out.ends_with('\n'), "trailing newline preserved");
+
+        // Idempotent: running it on the migrated output is a no-op.
+        assert_eq!(migrate_entry_icon(&out), None);
+
+        // The pre-rebrand marker still counts as ours.
+        assert!(
+            migrate_entry_icon("[Desktop Entry]\nIcon=web-browser\nX-GameShell-WebApp=true\n")
+                .is_some()
+        );
+
+        // A FOREIGN entry with the same stale icon is never touched. This guard
+        // is the module's whole contract (see the header) — a distro-shipped
+        // launcher must survive us untouched.
+        assert_eq!(
+            migrate_entry_icon("[Desktop Entry]\nName=Firefox\nIcon=web-browser\nExec=firefox\n"),
+            None
+        );
+
+        // A user who deliberately changed Icon= keeps their choice.
+        assert_eq!(
+            migrate_entry_icon("[Desktop Entry]\nIcon=my-custom-icon\nX-TvShell-WebApp=true\n"),
+            None
+        );
+
+        // `Icon=` is matched as a KEY, not a substring: a Name/Comment that
+        // mentions the words is not a migration trigger.
+        assert_eq!(
+            migrate_entry_icon(
+                "[Desktop Entry]\nName=web-browser\nComment=Icon=web-browser here\nIcon=internet-web-browser\nX-TvShell-WebApp=true\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn migrate_desktop_icons_in_rewrites_ours_and_spares_the_rest() {
+        // See `crate::testutil` for why this is based on `current_exe()`
+        // rather than the system temp dir.
+        let dir = crate::testutil::scratch_dir("webapps-icon-migration-test");
+
+        let ours = dir.join(desktop_file_name("youtube"));
+        let foreign = dir.join("firefox.desktop");
+        let already = dir.join(desktop_file_name("plex"));
+        let custom = dir.join(desktop_file_name("netflix"));
+        let foreign_body = "[Desktop Entry]\nName=Firefox\nIcon=web-browser\nExec=firefox\n";
+        let already_body = "[Desktop Entry]\nIcon=internet-web-browser\nX-TvShell-WebApp=true\n";
+        let custom_body = "[Desktop Entry]\nIcon=my-own\nX-TvShell-WebApp=true\n";
+        std::fs::write(&ours, OURS_STALE).unwrap();
+        std::fs::write(&foreign, foreign_body).unwrap();
+        std::fs::write(&already, already_body).unwrap();
+        std::fs::write(&custom, custom_body).unwrap();
+
+        assert_eq!(migrate_desktop_icons_in(&dir), 1, "only our stale entry");
+        assert!(std::fs::read_to_string(&ours)
+            .unwrap()
+            .contains("Icon=internet-web-browser\n"));
+        // Every other file is byte-identical.
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), foreign_body);
+        assert_eq!(std::fs::read_to_string(&already).unwrap(), already_body);
+        assert_eq!(std::fs::read_to_string(&custom).unwrap(), custom_body);
+
+        // Idempotent at the directory level too.
+        assert_eq!(migrate_desktop_icons_in(&dir), 0);
+
+        // A missing directory is a quiet zero, never an error.
+        assert_eq!(migrate_desktop_icons_in(&dir.join("does-not-exist")), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

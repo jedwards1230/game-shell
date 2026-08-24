@@ -16,7 +16,10 @@ Item {
     signal requestFailed
     signal lineReceived(string line)
 
+    // Still no I/O — the call is only TALLIED so a test can ask whether a given
+    // handler issued a poll (see SocketProbe.qml). `body` is deliberately ignored.
     function request(cmd, body) {
+        SocketProbe.record(cmd);
     }
     function start() {
     }

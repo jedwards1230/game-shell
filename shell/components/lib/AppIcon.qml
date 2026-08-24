@@ -77,12 +77,23 @@ Item {
         // so this branch cannot currently be reached with `_sizeValid` false. It
         // is kept so the invariant survives a future edit to that binding.
         //
-        // KNOWN GAP — this only catches names that genuinely reach Image.Error.
-        // `image://icon/` can instead return a *Ready* magenta placeholder for
-        // some theme-missing names (documented in aee043c); those never error,
-        // so they are not memoised and keep being requested. Solving the
-        // placeholder case needs provider-side (or pixel-level) detection and is
-        // deliberately out of scope here.
+        // KNOWN GAP, and it is NOT closable at this layer. The memo only catches
+        // names that genuinely reach Image.Error; for some theme-missing names
+        // `image://icon/` instead returns a *Ready* magenta placeholder, so this
+        // handler never runs and the name keeps being requested. Detecting that
+        // needs provider-side (or pixel-level) inspection — aee043c tried
+        // `Quickshell.iconPath` for exactly this case and was reverted by e371e8e.
+        //
+        // So a missing icon NAME is fixed at its SOURCE, not here. The two
+        // sources, both of which publish a name straight into `iconSource`:
+        //   • the app catalog (daemon-side `.desktop` scan) — a stale/absent
+        //     `Icon=` key, e.g. `web-browser` / `hwloc`;
+        //   • the window enumerator (AppLifecycleManager) — a window class used
+        //     as an icon-name fallback when no `.desktop` matches. Windows that
+        //     are not applications at all are excluded there instead
+        //     (shell/components/windowFilter.js).
+        // Leave `iconMemo` in place regardless: it still does real work for every
+        // name that does reach Image.Error.
         onStatusChanged: {
             if (status === Image.Error && root._sizeValid && root.iconSource !== "")
                 IconMemo.markMissing(root.iconSource);
