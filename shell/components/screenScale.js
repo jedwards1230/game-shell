@@ -7,9 +7,10 @@
 // transiently EMPTY during startup, DPMS off/on, a mode set and CEC/TV power
 // transitions, and a ShellScreen can be PRESENT while reporting height ~0
 // mid-transition. A naive live binding turned both into a full rescale, and every
-// rescale re-requested every icon in the shell at a size the device never renders
-// (the QSize(240,240) and QSize(2,2) `Could not load icon` floods, plus the
-// matching `qt.svg.draw: The requested buffer size is too big` lines).
+// rescale re-requested every icon in the shell at a size it then discarded (the
+// QSize(2,2) / QSize(120,120) / QSize(240,240) `Could not load icon` floods —
+// one wave per stage the geometry passed through — plus the matching
+// `qt.svg.draw: The requested buffer size is too big` lines).
 //
 // This module is the whole decision, kept pure so it is headless-testable
 // (tests/qml/tst_screenscale.qml) — Units.qml itself can't be, since it imports
@@ -36,7 +37,9 @@ var MIN_VALID_HEIGHT = 200;
 // NOT treated as a real resolution: `ready` stays false while it is in force, so
 // nothing that would bake it into a cached/served artifact acts on it. It matches
 // the historical default purely so the pre-first-screen frame lays out as it
-// always did.
+// always did. On the current 4K panel it happens to equal the settled height,
+// but do NOT rely on that — it is a per-panel coincidence, and `ready` is what
+// makes the guess safe on any other display.
 var FALLBACK_HEIGHT = 2160;
 
 function initial() {

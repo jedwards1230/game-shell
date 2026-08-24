@@ -14,7 +14,7 @@ Item {
     // pure, headless-tested `screenScale.js`; this file only wires it to
     // Quickshell. Read that module's header for the why — in short, a transiently
     // EMPTY `Quickshell.screens` or a ~0-height ShellScreen used to rescale the
-    // entire UI and re-request every icon at a size the device never renders.
+    // entire UI and re-request every icon at a size it then discards.
     readonly property int _rawScreenHeight: Quickshell.screens.length > 0 ? Quickshell.screens[0].height : 0
 
     // { height, ready } — the folded state. `adopt()` returns the SAME object when
@@ -36,10 +36,10 @@ Item {
     // still the layout-only placeholder and the whole scale is a guess.
     //
     // This is what stops the startup half of the icon flood. Seeding a plausible
-    // height keeps first paint laid out, but on this device (1080 logical) the
-    // placeholder is DOUBLE the real scale, so every icon requested before the
-    // screen settles is requested at a size that is then thrown away and
-    // re-requested — `AppIcon` sets `cache: false` (load-bearing for the #194
+    // height keeps first paint laid out, but it is still a GUESS: the screen
+    // resolves in stages (absent -> an intermediate report -> the settled
+    // height), so every icon requested before it settles may be requested at a
+    // size that is then thrown away and re-requested — `AppIcon` sets `cache: false` (load-bearing for the #194
     // stale-texture bug), so that second wave is guaranteed. Consumers that issue
     // a sized request must gate on this, not just on a non-zero size. One-way:
     // once true it never returns to false, so a later DPMS/mode-set transient

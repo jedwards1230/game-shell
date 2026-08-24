@@ -111,12 +111,23 @@ is easy to reintroduce:
 size in the shell — from `Quickshell.screens[0].height`. That list goes
 transiently **empty** during startup, DPMS, mode-set and CEC/TV power events,
 and a `ShellScreen` can briefly report a height of ~0. The old code fell back to
-a literal `2160` on an empty list and did no flooring, so those two states
-produced `iconSizeXL` values of `240` (a size this 1080p-logical device never
-renders) and `0` (which the icon provider clamped to 1px × DPR 2 → the
-`QSize(2, 2)` requests). Every settle pass re-requested every icon at a bogus
-size, and the same degenerate size fed to `QSvgIconEngine` produced the
+a literal `2160` on an empty list and did no flooring.
+
+The screen does not appear at its final size — it **resolves in stages**, and
+the old binding turned every stage into a full rescale. Measured on the 4K
+panel, one start walked `0` → an intermediate report → the settled `2160`,
+producing three separate icon waves at `QSize(2, 2)` (the provider clamps a
+0-size request to 1px × DPR 2), `QSize(120, 120)` and `QSize(240, 240)`. Only
+the last is the real size. `AppIcon` sets `cache: false` (load-bearing for a
+separate stale-texture bug), so every wave is a fresh provider hit, and the
+degenerate size fed to `QSvgIconEngine` produced the
 `qt.svg.draw: The requested buffer size is too big` lines.
+
+Note `Quickshell.screens[0].height` reports the **physical** height (2160 here),
+not the scale-2 logical 1080 — so `240` is the correct settled `iconSizeXL` and
+`120` was itself a mid-settle artifact. Do not assume the seeded placeholder
+matches the real height; on this panel it happens to, which is a coincidence,
+and `screenReady` is what makes that safe on any other display.
 
 > **Invariant:** `Units` holds the last *valid* screen height and exposes a
 > `screenReady` flag. Nothing derived from screen geometry may be requested
