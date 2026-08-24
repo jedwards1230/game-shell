@@ -625,9 +625,13 @@ FocusScope {
                 muted: true
                 text: {
                     if (root.recentWidget && root.recentWidget.regionFocused) {
-                        let idx = root.recentWidget.currentIndex;
-                        let model = root._recentModel;
-                        let running = (idx >= 0 && idx < model.length && model[idx].running === true);
+                        // Ask the widget about its OWN current entry. This must not
+                        // read `root._recentModel` — that upstream read closed a
+                        // binding loop on the widget's `_activeModel` (full cycle
+                        // documented on AppsWidget.currentEntryRunning), and it also
+                        // looked the index up in the recent model while the "All
+                        // Apps" segment was showing.
+                        let running = root.recentWidget.currentEntryRunning === true;
                         return (running ? "A: Resume" : "A: Launch") + "  |  X: Actions  |  B: Home  |  ←→: Scroll  |  ↑↓: Switch Row";
                     }
                     return "A: Select  |  B: Home  |  ←→: Scroll  |  ↑↓: Switch Row";

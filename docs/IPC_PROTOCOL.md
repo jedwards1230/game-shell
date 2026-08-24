@@ -2099,7 +2099,7 @@ spawns a new `quickshell -c tv-shell` process detached via `setsid` with stdout 
 stderr redirected to `/tmp/qs-log.txt`. Session env (`WAYLAND_DISPLAY`,
 `HYPRLAND_INSTANCE_SIGNATURE`, `XDG_RUNTIME_DIR`) is injected into the child via
 `session_env`. The handler waits 3 seconds for initial log output, then returns the
-WARN/ERROR tail (up to 30 lines, excluding noisy `COULD NOT LOAD ICON` lines).
+WARN/ERROR tail (up to 30 lines, unfiltered).
 
 **Response:** Plain text — WARN/ERROR lines from the first 3 s of the log, or:
 

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import "../lib"
 import "../../components"
+import "../../components/lib/artMemo.js" as ArtMemo
 import "../../components/lib"
 
 // Steam-library poster view — shared between the Moonlight and Steam home
@@ -100,6 +101,58 @@ ColumnLayout {
     // === Data (populated from `steam-library`) ===
     property var recentItems: []
     property var allItems: []
+    // Content signatures of the last ADOPTED payload for each rail. The poll
+    // returns freshly built lists every 10s (3s while fast-polling), so a blind
+    // reassignment changed the property IDENTITY even when the payload was
+    // byte-identical — which reset `_activeItems`, reset the ListView model,
+    // destroyed and recreated EVERY poster delegate, and made every art chain
+    // re-walk from candidate 0. Same guard, same reasoning as
+    // AppLifecycleManager's `_runningWindowsSig` (components/AppLifecycleManager.qml
+    // ~:858-868). Cheap string signature, compared before assigning.
+    property string _recentSig: ""
+    property string _allSig: ""
+
+    // Stable, cheap signature of a library payload. Covers exactly the fields the
+    // cards render off (appid identity + title + the three art URLs), so a change
+    // that would alter a poster still gets through while an identical repoll does
+    // not. JSON.stringify rather than a join on a delimiter: a game title
+    // containing the delimiter could otherwise make two different payloads
+    // signature-identical and silently freeze the rail.
+    function _librarySig(items) {
+        if (!items || items.length === undefined)
+            return "";
+        let parts = [];
+        for (let i = 0; i < items.length; i++) {
+            let it = items[i];
+            parts.push([it.appid, it.name, it.art, it.localArt, it.headerArt]);
+        }
+        return JSON.stringify(parts);
+    }
+
+    // Adopt the two rails from an `ok` payload, but ONLY when the content actually
+    // changed. Extracted from `onUpdated` so the guard is directly exercisable
+    // headless (tests/qml/tst_steamlibrary.qml) — the stub SocketClient never
+    // drives a real poll.
+    function _adoptRails(d) {
+        // Guard partial replies: only overwrite a rail when the reply actually
+        // carries it, so a malformed/partial "ok" can never blank a good row.
+        if (d.recentlyPlayed !== undefined) {
+            let rItems = d.recentlyPlayed || [];
+            let rSig = root._librarySig(rItems);
+            if (rSig !== root._recentSig) {
+                root._recentSig = rSig;
+                root.recentItems = rItems;
+            }
+        }
+        if (d.allGames !== undefined) {
+            let aItems = d.allGames || [];
+            let aSig = root._librarySig(aItems);
+            if (aSig !== root._allSig) {
+                root._allSig = aSig;
+                root.allItems = aItems;
+            }
+        }
+    }
     // The host's currently-running Steam appid (or -1 when nothing is running).
     // Drives the per-card "Playing" badge.
     property int runningAppid: -1
@@ -158,6 +211,30 @@ ColumnLayout {
     // monitor recovers to "ok" this flips false and the poster row returns
     // automatically (the existing reconnect refetch repopulates the rails).
     readonly property bool _showWake: _hostDown
+
+    // Host reachability as a positive edge, so the art memo can be cleared the
+    // moment the sidecar comes back.
+    //
+    // `Image.status` cannot distinguish "this URL 404s" from "the machine serving
+    // it is asleep", and the FIRST art candidate for every card is a URL on this
+    // host. While it is down each visible card errors on its local capsule and the
+    // memo records it — so without this edge, one sleep/wake cycle would
+    // permanently demote the whole library to CDN art. That matters because the
+    // CDN portrait can return a ~1.6KB stub that loads as *Ready*, which the error
+    // walk cannot skip, leaving those cards blank until the shell restarts (the
+    // exact bug that put the LAN capsule first — see SteamCard.qml).
+    //
+    // A blanket reset rather than a host-scoped one: the daemon builds the capsule
+    // URLs, so the view does not know their base, and re-trying a handful of real
+    // 404s once per host recovery costs nothing next to the failure it prevents.
+    // Deliberately hung off the reachability transition rather than off
+    // `_endFastPoll()`, which only runs when WE initiated the wake — a host that
+    // comes back on its own (reboot, someone else's WoL) never calls it.
+    readonly property bool hostReachable: !root._hostDown
+    onHostReachableChanged: {
+        if (root.hostReachable)
+            ArtMemo.reset();
+    }
 
     // ANDed with `viewActive` (the parent decides WHICH view renders). Nothing
     // outside this view reads `visible` — only the parent Layout — so the binding
@@ -287,14 +364,12 @@ ColumnLayout {
             if (d && d.host !== undefined)
                 root.reportedHost = d.host || "";
             if (d && d.status === "ok") {
-                // Guard partial replies: only overwrite a rail when the reply
-                // actually carries it, so a malformed/partial "ok" can never blank
-                // a good row. `runningAppid` / `streaming` always refresh on ok —
-                // they are the per-game and session signals.
-                if (d.recentlyPlayed !== undefined)
-                    root.recentItems = d.recentlyPlayed || [];
-                if (d.allGames !== undefined)
-                    root.allItems = d.allGames || [];
+                // Adopt only on a CONTENT change (see _adoptRails / _librarySig
+                // above) — an identical repoll must not churn the property
+                // identity and tear down every delegate. `runningAppid` /
+                // `streaming` always refresh on ok: they are the per-game and
+                // session signals.
+                root._adoptRails(d);
                 let ra = d.runningAppid;
                 root.runningAppid = (typeof ra === "number" && ra > 0) ? ra : -1;
                 root.streaming = d.streaming === true;
@@ -305,6 +380,10 @@ ColumnLayout {
                     root._endFastPoll();
             } else if (d && d.status === "disabled") {
                 // Unconfigured (TV_SHELL_STEAM_URL unset): collapse for real.
+                // Clear the signatures too, so a later good poll is seen as a
+                // change and repopulates the rails.
+                root._recentSig = "";
+                root._allSig = "";
                 root.recentItems = [];
                 root.allItems = [];
                 root.runningAppid = -1;

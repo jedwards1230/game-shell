@@ -78,6 +78,129 @@ callback never fires". See
 
 ---
 
+## The Quickshell log (`/tmp/qs-log.txt`)
+
+The QML shell is a separate process from the daemon, and its log is a separate
+signal. `tv-shell-quickshell.service` tees Quickshell's merged stdout/stderr to
+**both** journald (tagged `tv-shell-quickshell`) and `/tmp/qs-log.txt`, which
+`/dev/logs` tails and `/dev/restart-shell` reads its warning tail from. The file
+is truncated on every shell start.
+
+```bash
+journalctl --user -t tv-shell-quickshell -f    # follow
+tail -f /tmp/qs-log.txt                        # same stream, restart-truncated
+```
+
+### Signal-to-noise is a maintained invariant, not an accident
+
+**A healthy shell start emits a handful of WARN lines, not hundreds.** If you
+see a warning class repeating in the thousands, that is a bug in this repo —
+treat it as one. Do not filter it at the reader.
+
+That rule is load-bearing because we already broke it once. A measured baseline
+before the fix: **1,108 WARN lines in the first 69 seconds** of a shell start
+(and 10,498 over a 23-hour session). Zero ERROR lines. Every class was benign in
+isolation, which is exactly why it went unnoticed — and it made `/dev/logs` and
+the `/dev/restart-shell` tail useless for real debugging.
+
+The four root causes, all fixed, are worth knowing because each is a trap that
+is easy to reintroduce:
+
+**1. Degenerate screen geometry collapsed every derived size (~795 lines).**
+`Units.qml` derives `gridUnit` — and therefore every spacing, radius and icon
+size in the shell — from `Quickshell.screens[0].height`. That list goes
+transiently **empty** during startup, DPMS, mode-set and CEC/TV power events,
+and a `ShellScreen` can briefly report a height of ~0. The old code fell back to
+a literal `2160` on an empty list and did no flooring.
+
+The screen does not appear at its final size — it **resolves in stages**, and
+the old binding turned every stage into a full rescale. Measured on the 4K
+panel, one start walked `0` → an intermediate report → the settled `2160`,
+producing three separate icon waves at `QSize(2, 2)` (the provider clamps a
+0-size request to 1px × DPR 2), `QSize(120, 120)` and `QSize(240, 240)`. Only
+the last is the real size. `AppIcon` sets `cache: false` (load-bearing for a
+separate stale-texture bug), so every wave is a fresh provider hit, and the
+degenerate size fed to `QSvgIconEngine` produced the
+`qt.svg.draw: The requested buffer size is too big` lines.
+
+Note `Quickshell.screens[0].height` reports the **physical** height (2160 here),
+not the scale-2 logical 1080 — so `240` is the correct settled `iconSizeXL` and
+`120` was itself a mid-settle artifact. Do not assume the seeded placeholder
+matches the real height; on this panel it happens to, which is a coincidence,
+and `screenReady` is what makes that safe on any other display.
+
+> **Invariant:** `Units` holds the last *valid* screen height and exposes a
+> `screenReady` flag. Nothing derived from screen geometry may be requested
+> before a real height has been adopted. If you add a size that feeds an
+> `Image`'s `sourceSize`, it must not be computable from an empty screen list.
+
+**2. Icons were resolved against the wrong theme (~960 lines).**
+Qt selects a platform theme from `QT_QPA_PLATFORMTHEME`; on this host it was
+unset and `XDG_CURRENT_DESKTOP` is `Hyprland`, so `QIcon` fell back to bare
+`hicolor` — which contains **none** of the standard freedesktop names that
+`.desktop` entries use. The icons were never missing from the system: `breeze`,
+`breeze-dark` and the `Adwaita` chain are all installed and carry nearly all of
+them.
+
+`tv-shell-quickshell.service` now sets `Environment=QT_QPA_PLATFORMTHEME=kde`
+(plasma-integration's platform theme, already installed), which resolves to
+`breeze-dark` with a `breeze` fallback and adds the XDG icon search paths. It
+does **not** require `XDG_CURRENT_DESKTOP=KDE` — leave that as `Hyprland`, since
+changing it also steers xdg-desktop-portal backend selection.
+
+Note the amplification: only **12 distinct icon names** produced all ~960 lines.
+`AppIcon.qml` sets `cache: false` (load-bearing for the stale-neighbour-texture
+bug on delegate recycling — do not change it), so every re-source re-resolves
+and re-warns. `AppIcon` now keeps a session-scoped negative memo
+(`lib/iconMemo.js`): a name that has failed once at a valid size is never
+requested again, and the existing letter-initial fallback renders instead.
+
+> **Known gap:** `image://icon/` can return a *Ready* magenta placeholder rather
+> than an `Image.Error` for some missing names, so the memo only catches names
+> that genuinely error. `Quickshell.iconPath(name, true)` is *not* a fix — that
+> overload does not return `""` for theme-missing names on this Quickshell
+> build (tried and reverted).
+
+**3. A poll reset the whole Steam model every 10 s (24 lines, plus real churn).**
+`SteamLibraryView` reassigned `recentItems`/`allItems` on every successful
+`ServiceMonitor` reply. Those are fresh lists each time, so the property
+identity changed even when the payload was byte-identical, the `ListView` model
+reset, and **every delegate was destroyed and rebuilt** — re-walking each
+`SteamCard` art candidate chain from index 0 and re-emitting its 404s. The
+assignments are now gated on a content signature, the same way
+`AppLifecycleManager` gates `runningWindows`.
+
+> **Invariant:** if you assign a list property from a poll reply, gate it on a
+> content signature covering exactly the fields the delegate binds. A field the
+> delegate binds but the signature omits means a real update is silently
+> dropped — a far worse bug than the noise.
+
+**4. A binding loop in `AppsWidget` (8 lines).** `_activeModel` had two cycles:
+a writable `_segment` imperatively coerced from `onModelChanged`, and a
+cross-component path where `HomeScreen`'s hint bar read back *upstream* to
+`_recentModel`. Both are broken by deriving rather than writing. Qt abandons a
+re-entered binding update, so the visible symptom was a **stale** `_activeModel`
+— the warning was the only evidence.
+
+> **Invariant:** never write a dependency of a derived property from a handler
+> on another of its dependencies, and never let a downstream consumer read back
+> upstream. `tests/qml/tst_appssegment.qml` pins this with
+> `failOnWarning: /Binding loop/`.
+
+### Why there is no reader-side filter
+
+`/dev/restart-shell`'s warning tail used to drop every `COULD NOT LOAD ICON`
+line unconditionally, because ~960 of them buried everything else. That filter
+is **gone on purpose**: now that the source is fixed, filtering there would only
+hide a regression. The panel's *opt-in* "Hide icon noise" toggle
+(`panel/src/pages/logs.rs`) is a different thing — a user-chosen view, not a
+forced one — and can be retired once the fix has held for a while.
+
+If you find yourself wanting to add a filter to read the log, fix the emitter
+instead.
+
+---
+
 ## Metrics
 
 All metrics are namespaced `tv_shell_` and carry `# HELP`/`# TYPE` lines. The

@@ -55,6 +55,15 @@ Drawer 1.0 Drawer.qml
 PopoverMenu 1.0 PopoverMenu.qml
 EOF
 cp "$shellc/lib/CountBadge.qml" "$build/components/lib/"
+# AppIcon + its negative icon memo. AppIcon is pure QtQuick over Theme/Units and
+# an `image://icon/` request that offscreen has no provider for — so every request
+# ERRORS, which is exactly what tst_iconmemo needs to pin the "only memoise a
+# failure seen at a valid size" invariant against production code.
+cp "$shellc/lib/AppIcon.qml" "$build/components/lib/"
+cp "$shellc/lib/iconMemo.js" "$build/components/lib/"
+cat >>"$build/components/lib/qmldir" <<'EOF'
+AppIcon 1.0 AppIcon.qml
+EOF
 # focusChain.js — the shared vertical-traversal helper imported by Widget.qml and
 # NavigableGrid via a relative path; copy it in so those imports resolve headless.
 cp "$shellc/lib/focusChain.js" "$build/components/lib/"
@@ -83,9 +92,13 @@ wstub="$here/widgetstubs"
 #     are Quickshell.Io-backed; the cards are QtQuick.Effects visuals that never
 #     render in the contract test — see widgetstubs/components/*.qml).
 cp "$shellc/NavigableRow.qml" "$build/components/"
+# MarqueeText is pure QtQuick over Theme.reduceMotion — the REAL one, needed by the
+# real SteamCard's caption row (see the steamlib block below).
+cp "$shellc/MarqueeText.qml" "$build/components/"
 cp "$wstub/components/"*.qml "$build/components/"
 cat >>"$build/components/qmldir" <<'EOF'
 NavigableRow 1.0 NavigableRow.qml
+MarqueeText 1.0 MarqueeText.qml
 SocketClient 1.0 SocketClient.qml
 singleton AppDiscoveryManager 1.0 AppDiscoveryManager.qml
 AppCard 1.0 AppCard.qml
@@ -128,13 +141,23 @@ mkdir -p "$build/widgets/moonlight"
 cp "$shellw/moonlight/MoonlightWidget.qml" "$build/widgets/moonlight/"
 cp "$wstub/widgets/moonlight/qmldir" "$build/widgets/moonlight/qmldir"
 
-# steamlib: REAL SteamLibraryView (shared by moonlight + steam) + stub SteamCard.
-# MoonlightWidget now imports "../steamlib", so this module must exist for it to
-# load headless.
+# steamlib: REAL SteamLibraryView AND REAL SteamCard (shared by moonlight +
+# steam). MoonlightWidget now imports "../steamlib", so this module must exist for
+# it to load headless.
+#
+# SteamCard used to be stubbed here as "a QtQuick.Effects visual that never
+# renders in the contract test". It is now the real file, because it grew a
+# `.pragma library` import (artMemo.js) and a memo-driven `_artIdx` binding — the
+# exact parse-passes-but-fails-to-load class this suite exists to catch. Stubbing
+# it meant the real file was never instantiated headless at all. Its MultiEffect /
+# MarqueeText / FocusFrame dependencies resolve against the stub singletons the
+# same way the other real leaves do.
 mkdir -p "$build/widgets/steamlib"
 cp "$shellw/steamlib/SteamLibraryView.qml" "$build/widgets/steamlib/"
-cp "$wstub/widgets/steamlib/SteamCard.qml" "$build/widgets/steamlib/"
+cp "$shellw/steamlib/SteamCard.qml" "$build/widgets/steamlib/"
 cp "$wstub/widgets/steamlib/qmldir" "$build/widgets/steamlib/qmldir"
+# SteamCard's negative art memo (a `.pragma library` it imports by relative path).
+cp "$shellc/lib/artMemo.js" "$build/components/lib/"
 
 mkdir -p "$build/widgets/nowplaying"
 cp "$shellw/nowplaying/NowPlayingWidget.qml" "$build/widgets/nowplaying/"
@@ -154,5 +177,25 @@ mkdir -p "$build/qml"
 cp -R "$wstub/qml/Quickshell" "$build/qml/Quickshell"
 
 # 4. Run every tst_*.qml in tests/qml headless.
+#
+# The run is ALSO gated on the absence of QML binding loops. qmltestrunner does
+# not fail a test on an unexpected warning (QML TestCase has no `failOnWarning` —
+# that is a C++-only QTest API), and a binding loop is not a cosmetic warning: Qt
+# ABANDONS a re-entered binding update, leaving the property stale at a value that
+# usually still looks plausible. Asserting settled values therefore cannot catch
+# the whole class. Scanning the combined output does, for every test at once.
 echo "Running QML tests with: $runner (offscreen)"
-QT_QPA_PLATFORM=offscreen "$runner" -import "$build" -import "$build/qml" -input "$here"
+log="$build/run.log"
+set +e
+QT_QPA_PLATFORM=offscreen "$runner" -import "$build" -import "$build/qml" -input "$here" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+set -e
+
+if grep -q "Binding loop detected" "$log"; then
+    echo >&2
+    echo "error: QML binding loop(s) reported during the test run:" >&2
+    grep "Binding loop detected" "$log" | sort -u >&2
+    exit 1
+fi
+
+exit "$status"

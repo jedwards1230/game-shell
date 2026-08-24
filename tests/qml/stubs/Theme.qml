@@ -17,6 +17,9 @@ Item {
 
     property int fontHint: 18
 
+    // Accessibility flag read by MarqueeText (real one comes from SettingsStore).
+    property bool reduceMotion: false
+
     // Card geometry — NavigableGrid reads these as the default cell footprint
     // (overridable per-instance). Fixed values keep grid-layout math deterministic.
     property int cardWidth: 200

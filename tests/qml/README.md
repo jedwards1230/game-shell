@@ -68,8 +68,22 @@ property is absent).
 
 Currently covered: `QuickActions` (+ real `QuickActionButton`, `CountBadge`),
 `WidgetHost` (against the stub `WidgetRegistry` + stub widgets), `PopoverMenu`
-(`tst_popovermenu.qml` — the disabled-item contract), and the widget config
-migrator `widgetConfig.js` (`tst_widgetmigrate.qml`).
+(`tst_popovermenu.qml` — the disabled-item contract), the widget config
+migrator `widgetConfig.js` (`tst_widgetmigrate.qml`), the two log-noise negative
+memos `iconMemo.js` / `artMemo.js` (`tst_iconmemo.qml` — which also drives the
+REAL `AppIcon`, since offscreen has no `image://icon` provider so every request
+errors — and `tst_artmemo.qml`), the screen-scale filter `screenScale.js`
+(`tst_screenscale.qml`), `SteamLibraryView`'s poll-adoption signature guard
+(`tst_steamlibrary.qml`, against the real view + the real `SteamCard`), and
+`AppsWidget`'s segment derivation + hint-bar contract (`tst_appssegment.qml`, the
+two `_activeModel` binding-loop regressions).
+
+**The run also fails on any QML binding loop.** `run.sh` scans the combined
+output for `Binding loop detected` and exits non-zero if it appears, for every
+test at once. This is not decoration: Qt *abandons* a re-entered binding update,
+so the symptom is a stale property value that usually still looks plausible —
+asserting settled values cannot catch the class. QML `TestCase` has no
+`failOnWarning` (that is a C++-only `QTest` API), hence the harness-level gate.
 
 The migrator test imports the **real** `widgetConfig.js` by source path
 (`../../shell/widgets/lib/widgetConfig.js`, a pure `.pragma library` module) and

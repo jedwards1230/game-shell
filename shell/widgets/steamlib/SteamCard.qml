@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Effects
 import QtQuick.Layouts
 import "../../components"
+import "../../components/lib/artMemo.js" as ArtMemo
 
 // Portrait poster card for the Steam widget (Recently Played / Library). Renders
 // the Steam CDN library poster (`library_600x900.jpg`) with an automatic
@@ -63,11 +64,28 @@ Item {
     // localArt, filtered out) and for when the sidecar host is unreachable
     // (localArt errors → advance to CDN).
     readonly property var _artCandidates: [root.localArt, root.art, root.headerArt].filter(u => u !== "")
-    property int _artIdx: 0
+    // Start at the first candidate not ALREADY known dead, not blindly at 0. The
+    // daemon emits `localArt` for every entry whether or not the host has a local
+    // capsule, so for those games candidate 0 is a deterministic 404 — and these
+    // delegates are recreated on every library poll (plain ListView, no
+    // reuseItems, freshly built model), so without the memo the same dead request
+    // was re-issued over and over. (ArtMemo is cleared whenever the sidecar host
+    // becomes reachable again — see SteamLibraryView.hostReachable — so a sleeping
+    // host cannot permanently demote the LAN capsule.)
+    //
+    // This is a BINDING, and the three former `onArtChanged` / `onLocalArtChanged`
+    // / `onHeaderArtChanged` reset handlers are gone on purpose. They read the
+    // `_artCandidates` sibling binding during the same notify cascade that had
+    // just changed one of its inputs, so which value they saw depended on
+    // evaluation order: on the `createObject` path the list lagged by one
+    // assignment and the reset landed on the known-dead candidate, making the memo
+    // a no-op. The binding here has no such ordering hazard — it re-evaluates
+    // whenever `_artCandidates` genuinely changes and stays live until the first
+    // `Image.Error` writes `_artIdx` imperatively, which is exactly the intended
+    // lifecycle: a JS-array model reassignment destroys and recreates the delegate
+    // rather than mutating these URLs in place.
+    property int _artIdx: ArtMemo.firstUntried(root._artCandidates)
     readonly property string _artSource: root._artIdx < root._artCandidates.length ? root._artCandidates[root._artIdx] : ""
-    onArtChanged: root._artIdx = 0
-    onLocalArtChanged: root._artIdx = 0
-    onHeaderArtChanged: root._artIdx = 0
 
     signal activated
     // Context popover trigger — emitted on the X face (daemon altAction → KEY_X)
@@ -153,12 +171,20 @@ Item {
                     asynchronous: true
                     cache: true
                     visible: status === Image.Ready
-                    // On a load error advance to the next candidate (portrait →
-                    // local → header); stop at the last so the letter placeholder
-                    // shows through. No loop: index only moves forward.
+                    // On a load error record the dead URL, then advance to the
+                    // next candidate in the real chain order (local → portrait →
+                    // header, matching _artCandidates at :49-50/:65 — the old
+                    // comment here claimed "portrait → local → header", which
+                    // contradicted the code). Stop at the last so the letter
+                    // placeholder shows through. No loop: index only moves
+                    // forward. The memo is recorded BEFORE advancing so the next
+                    // delegate for this game starts past the failure.
                     onStatusChanged: {
-                        if (status === Image.Error && root._artIdx < root._artCandidates.length - 1)
-                            root._artIdx += 1;
+                        if (status === Image.Error) {
+                            ArtMemo.markBad(root._artSource);
+                            if (root._artIdx < root._artCandidates.length - 1)
+                                root._artIdx += 1;
+                        }
                     }
                 }
 
