@@ -18,6 +18,12 @@
 # sdrbrightness=1.2/sdrsaturation=1.05 compensate SDR dimming/washout in HDR mode.
 monitor=HDMI-A-1,3840x2160@120,0x0,2,vrr,1,bitdepth,10,cm,hdr,sdrbrightness,1.2,sdrsaturation,1.05
 
+# NOTE: the panel's Devices > Display & Audio page can rewrite the resolution
+# and `vrr` fields of the monitor= line above (see docs/PANEL.md § Display
+# mode). It rewrites ONLY those two fields and only after you confirm a change,
+# so bitdepth/cm/sdr* and any comment on the line survive; every other line in
+# this file is left byte-identical.
+
 # HDR-over-AVR fix for Hyprland 0.55 (see monitor comment above).
 quirks {
     prefer_hdr = 1

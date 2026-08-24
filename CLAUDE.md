@@ -145,6 +145,8 @@ panel/                       # Rust web control panel (tv-shell-panel) — LAN-o
                              #   Shell appearance/widgets/apps/advanced · Devices controllers/display_audio/cec/network
                              #   Remote navigation/launcher · Dev dev/screenshot/console
                              #   plus redirects (old pre-IA paths), login, nav, units, ipc_console,
+                             #   display_mode.rs — NOT a page: the Hyprland resolution/refresh/VRR
+                             #   section of display_audio, with its own IPC path + revert timer,
                              #   and settings.rs — NOT a page: the shared settings.json schema + scoped patch builder
                              # capabilities.rs gates every route and the drawer; ipc/bridge/exec clients; updates job
   templates/                 # askama HTML templates (+ htmx partials)

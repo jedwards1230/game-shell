@@ -2349,6 +2349,40 @@ fn route_table() -> Vec<RouteSpec> {
                 Post,
                 Authenticated,
             ),
+            // The Hyprland display-mode section of the same page: node tier
+            // for the same reason, and deliberately NOT in the dangerous set
+            // (see `pages::display_mode`). The GET is the section partial the
+            // page loads; the four POSTs are its actions.
+            r(
+                "/devices/display-audio/mode",
+                "/devices/display-audio/mode",
+                Get,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio/mode/apply",
+                "/devices/display-audio/mode/apply",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio/mode/vrr",
+                "/devices/display-audio/mode/vrr",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio/mode/confirm",
+                "/devices/display-audio/mode/confirm",
+                Post,
+                Authenticated,
+            ),
+            r(
+                "/devices/display-audio/mode/revert",
+                "/devices/display-audio/mode/revert",
+                Post,
+                Authenticated,
+            ),
             r(
                 "/remote/navigation",
                 "/remote/navigation",
@@ -3103,7 +3137,7 @@ fn route_table_matches_main_rs_declarations() {
 
     assert_eq!(
         declared.len(),
-        108,
+        113,
         "expected the 109 routes phase 3 left, then phase 4: 6 deleted outright \
          (the four `/tools/sys/*` probes, already on the Overview tiles, and the \
          two `controllerdb-*` duplicates of the Controllers page's own), the \
@@ -3113,7 +3147,11 @@ fn route_table_matches_main_rs_declarations() {
          phase 6's single net-new route, `GET /overview/services-tile` (the \
          system-services tile's own poll target — Overview ADDED no mutating \
          route, and removed none, because its actions had already moved). \
-         Everything else moved rather than being added (docs/PANEL_IA.md)"
+         Everything else moved rather than being added (docs/PANEL_IA.md) — \
+         plus the display-mode section's five net-new routes on Devices > \
+         Display & Audio (`GET /devices/display-audio/mode` and its \
+         apply/vrr/confirm/revert POSTs), the first controls on that page that \
+         are compositor state rather than a `settings.json` slice"
     );
 }
 
@@ -5579,5 +5617,256 @@ fn every_settings_key_has_a_named_consumer() {
         "the shell settings-page control scan found only {} keys — it has probably stopped \
          matching, which would let a read-by-nobody key keep a live control",
         shell_controls.len()
+    );
+}
+// ---------------------------------------------------------------------------
+// Devices ▸ Display & Audio — the Hyprland display-mode section
+// ---------------------------------------------------------------------------
+//
+// These are the controls that do NOT go through `pages::settings`: resolution,
+// refresh rate and VRR are compositor state, so they have their own IPC
+// vocabulary (`hypr-display-state` / `hypr-set-mode` / `hypr-set-vrr` /
+// `hypr-display-confirm` / `hypr-display-revert`) and their own routes. What
+// is worth pinning here is the safety contract — the panel must never render a
+// display change as settled while a revert timer is still running — and the
+// exact wire text, since a typo'd command line reaches the operator as
+// "it just didn't work".
+
+/// The 4K120 HDR reply this section exists to render correctly: an output
+/// pinned by a `monitor=` line carrying bitdepth/cm arguments, running its top
+/// mode.
+const DISPLAY_STATE_4K120: &str = r#"{"displays":[{"name":"HDMI-A-1","description":"LG C2","currentMode":"3840x2160@120","currentLabel":"3840 × 2160 @ 120 Hz","currentFormat":"XRGB2101010","hdr":true,"dpmsStatus":true,"vrrActive":true,"configuredLine":"HDMI-A-1,3840x2160@120,0x0,2,vrr,1,bitdepth,10,cm,hdr","configuredVrr":1,"modes":[{"value":"3840x2160@120","label":"3840 × 2160 @ 120 Hz","current":true},{"value":"3840x2160@60","label":"3840 × 2160 @ 60 Hz","current":false},{"value":"1920x1080@60","label":"1920 × 1080 @ 60 Hz","current":false}]}],"pending":null,"revertSeconds":15,"configPath":"/home/u/.config/tv-shell/hyprland-local.conf","configPresent":true}"#;
+
+/// The same output mid-change: a mode applied, the timer running.
+const DISPLAY_STATE_PENDING: &str = r#"{"displays":[{"name":"HDMI-A-1","description":"LG C2","currentMode":"1920x1080@60","currentLabel":"1920 × 1080 @ 60 Hz","currentFormat":"XRGB8888","hdr":false,"dpmsStatus":true,"vrrActive":false,"configuredLine":"HDMI-A-1,3840x2160@120,0x0,2,vrr,1,cm,hdr","configuredVrr":1,"modes":[{"value":"1920x1080@60","label":"1920 × 1080 @ 60 Hz","current":true}]}],"pending":{"monitor":"HDMI-A-1","applied":"HDMI-A-1,1920x1080@60,0x0,2,vrr,1,cm,hdr","previous":"HDMI-A-1,3840x2160@120,0x0,2,vrr,1,cm,hdr","secondsRemaining":11},"revertSeconds":15,"configPath":"/home/u/.config/tv-shell/hyprland-local.conf","configPresent":true}"#;
+
+/// Collapse runs of whitespace so an assertion about rendered PROSE is not
+/// really an assertion about where the template happens to wrap.
+fn squash(html: &str) -> String {
+    html.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+async fn display_mode_state(name: &str, reply: &'static str) -> Arc<AppState> {
+    let sock = spawn_canned_daemon(
+        name,
+        std::collections::HashMap::from([("hypr-display-state", reply)]),
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    state_for_socket(sock)
+}
+
+#[tokio::test]
+async fn display_mode_section_offers_only_the_modes_the_output_reports() {
+    let state = display_mode_state("dm-render", DISPLAY_STATE_4K120).await;
+    let html = pages::display_mode::render_section(&state, None).await;
+
+    assert!(
+        html.contains(r#"<option value="3840x2160@120" selected>"#),
+        "the live mode must be the pre-selected option: {html}"
+    );
+    for label in ["3840 × 2160 @ 60 Hz", "1920 × 1080 @ 60 Hz"] {
+        assert!(html.contains(label), "missing mode {label}: {html}");
+    }
+    // The picker is a closed set. Free text is the input class that blanks a
+    // TV, so there must be no text field for a mode.
+    assert!(
+        !html.contains(r#"name="mode" type="text""#)
+            && !html.contains(r#"type="text" name="mode""#),
+        "the mode control must be a select, never free text: {html}"
+    );
+    // The CONFIGURED VRR value drives the selection, not the live bool.
+    assert!(
+        html.contains(r#"<option value="1" selected>On (always)</option>"#),
+        "VRR must pre-select the configured mode: {html}"
+    );
+    assert!(
+        squash(&html).contains("overrides the global <code>misc:vrr</code>"),
+        "the page must say why VRR is written per-output: {html}"
+    );
+}
+
+/// The whole reason this is not a `SettingField`: the section must say it is
+/// compositor state and that a change is provisional. A control that looks
+/// permanent but is not is the bug the revert timer would otherwise introduce.
+#[tokio::test]
+async fn display_mode_section_states_the_revert_contract_up_front() {
+    let state = display_mode_state("dm-contract", DISPLAY_STATE_4K120).await;
+    let html = pages::display_mode::render_section(&state, None).await;
+    assert!(
+        squash(&html).contains("not settings.json"),
+        "the section must say it is not a settings.json slice: {html}"
+    );
+    assert!(
+        squash(&html).contains("reverts by itself after 15 seconds unless you confirm it"),
+        "the revert contract must be stated before anything is applied: {html}"
+    );
+}
+
+#[tokio::test]
+async fn display_mode_apply_sends_the_exact_wire_line() {
+    let (sock, seen) = spawn_recording_daemon("dm-apply", DISPLAY_STATE_4K120);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let _ = pages::display_mode::render_apply(&state, "HDMI-A-1", "1920x1080@60").await;
+    let lines = seen.lock().unwrap().clone();
+    assert!(
+        lines.contains(&"hypr-set-mode HDMI-A-1 1920x1080@60".to_string()),
+        "expected the exact set-mode line, got {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn display_mode_vrr_sends_the_exact_wire_line() {
+    let (sock, seen) = spawn_recording_daemon("dm-vrr", DISPLAY_STATE_4K120);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let html = pages::display_mode::render_vrr(&state, "HDMI-A-1", "2").await;
+    let lines = seen.lock().unwrap().clone();
+    assert!(
+        lines.contains(&"hypr-set-vrr HDMI-A-1 2".to_string()),
+        "expected the exact set-vrr line, got {lines:?}"
+    );
+    assert!(
+        html.contains("fullscreen only"),
+        "the notice must name the mode in the same words as the control: {html}"
+    );
+}
+
+/// A form post is not a UI: the closed 0/1/2 set is re-checked server-side, and
+/// a rejected value must never reach the wire.
+#[tokio::test]
+async fn display_mode_vrr_rejects_an_out_of_range_value_before_the_wire() {
+    let (sock, seen) = spawn_recording_daemon("dm-vrr-bad", DISPLAY_STATE_4K120);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let html = pages::display_mode::render_vrr(&state, "HDMI-A-1", "9").await;
+    let lines = seen.lock().unwrap().clone();
+    assert!(
+        !lines.iter().any(|l| l.starts_with("hypr-set-vrr")),
+        "an invalid VRR mode must not be sent, got {lines:?}"
+    );
+    assert!(
+        html.contains("invalid VRR mode"),
+        "the rejection must be visible: {html}"
+    );
+}
+
+/// The safety contract, rendered: while a change is unconfirmed the section
+/// shows the countdown, both escape hatches, and no way to stack a second
+/// change on top of the one still waiting.
+#[tokio::test]
+async fn display_mode_pending_renders_the_countdown_and_both_escape_hatches() {
+    let state = display_mode_state("dm-pending", DISPLAY_STATE_PENDING).await;
+    let html = pages::display_mode::render_section(&state, None).await;
+
+    assert!(
+        squash(&html).contains("Awaiting confirmation — 11s left."),
+        "the countdown must show the daemon's remaining seconds: {html}"
+    );
+    assert!(
+        html.contains("/devices/display-audio/mode/confirm")
+            && html.contains("/devices/display-audio/mode/revert"),
+        "both the keep and the revert action must be offered: {html}"
+    );
+    // The auto-revert happens in the daemon, so the panel must re-read rather
+    // than assume — otherwise a timed-out change keeps rendering as pending.
+    assert!(
+        html.contains(r#"hx-trigger="every 1s""#),
+        "the pending banner must poll so a daemon-side revert shows up: {html}"
+    );
+    assert!(
+        html.contains(r#"<button type="submit" disabled>Apply mode</button>"#),
+        "a second change must not be applyable while one is unconfirmed: {html}"
+    );
+    assert!(
+        squash(&html).contains("Nothing is written until you keep it."),
+        "the persistence rule must be stated where the choice is made: {html}"
+    );
+}
+
+/// Confirming keeps the mode live even when the write fails. Reporting that as
+/// a flat success would tell the operator a change survives a reboot when it
+/// does not.
+#[tokio::test]
+async fn display_mode_confirm_that_could_not_persist_says_so_rather_than_reporting_success() {
+    let sock = spawn_canned_daemon(
+        "dm-confirm-nopersist",
+        std::collections::HashMap::from([
+            ("hypr-display-state", DISPLAY_STATE_4K120),
+            (
+                "hypr-display-confirm",
+                r#"{"ok":true,"monitor":"HDMI-A-1","line":"HDMI-A-1,1920x1080@60,0x0,2","persisted":false,"persistError":"Permission denied (os error 13)","configPath":"/home/u/.config/tv-shell/hyprland-local.conf"}"#,
+            ),
+        ]),
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let html = pages::display_mode::render_confirm(&state).await;
+    assert!(
+        squash(&html).contains("Kept for this session"),
+        "a failed persist must not read as a plain success: {html}"
+    );
+    assert!(
+        html.contains("Permission denied"),
+        "the write error must be surfaced: {html}"
+    );
+    assert!(
+        squash(&html).contains("revert when Hyprland restarts"),
+        "the consequence of not persisting must be stated: {html}"
+    );
+}
+
+#[tokio::test]
+async fn display_mode_confirm_that_persisted_names_the_file_it_wrote() {
+    let sock = spawn_canned_daemon(
+        "dm-confirm-ok",
+        std::collections::HashMap::from([
+            ("hypr-display-state", DISPLAY_STATE_4K120),
+            (
+                "hypr-display-confirm",
+                r#"{"ok":true,"monitor":"HDMI-A-1","line":"HDMI-A-1,1920x1080@60,0x0,2","persisted":true,"configPath":"/home/u/.config/tv-shell/hyprland-local.conf"}"#,
+            ),
+        ]),
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+
+    let html = pages::display_mode::render_confirm(&state).await;
+    assert!(
+        squash(&html).contains("written to /home/u/.config/tv-shell/hyprland-local.conf"),
+        "a successful persist must name the file: {html}"
+    );
+}
+
+#[tokio::test]
+async fn display_mode_section_degrades_to_a_banner_when_the_daemon_is_down() {
+    let state = hermetic_state();
+    let html = pages::display_mode::render_section(&state, None).await;
+    assert!(
+        html.contains("Display mode unavailable"),
+        "an unreachable daemon must render a banner, not a broken form: {html}"
+    );
+    assert!(
+        !html.contains("<select"),
+        "no control may render when the compositor state is unknown: {html}"
+    );
+}
+
+/// The section is loaded as a partial from the page, so the page itself must
+/// carry the container and the `hx-get` — otherwise the controls never appear.
+#[tokio::test]
+async fn display_audio_page_loads_the_display_mode_section() {
+    let (sock, _received) = spawn_config_daemon("display-audio-mode-slot", "{}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let state = state_for_socket(sock);
+    let html = pages::display_audio::render_page(&state).await;
+    assert!(
+        html.contains(r#"id="display-mode""#)
+            && html.contains(r#"hx-get="/devices/display-audio/mode""#),
+        "the page must load the display-mode partial: {html}"
     );
 }

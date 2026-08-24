@@ -6,7 +6,7 @@
 //! `cec` and `network` (Devices); `navigation` and `launcher` (Remote); and
 //! `dev`, `screenshot` and `console` (Dev), plus `login`.
 //!
-//! Four modules here are **not** pages:
+//! Five modules here are **not** pages:
 //!
 //! * `redirects` — the forwarding addresses from the pre-IA paths (phase 1).
 //! * `units` — the single systemd-unit-state presentation helper `dashboard`,
@@ -16,6 +16,10 @@
 //!   Settings page dissolved).
 //! * `ipc_console` — the IPC result partial, reply pretty-printer and argument
 //!   validators the pages the Tools console dissolved into share (phase 4).
+//! * `display_mode` — the Hyprland resolution/refresh/VRR section of
+//!   `display_audio`. Its own module because it is the one part of that page
+//!   that is compositor state rather than a `settings.json` slice, so it has
+//!   its own IPC vocabulary and its own routes.
 //!
 //! The last two are what is left of the two dissolved grab-bag pages: neither
 //! Settings nor Tools had a subject, but each had real shared machinery, so
@@ -30,6 +34,7 @@ pub mod controllers;
 pub mod dashboard;
 pub mod dev;
 pub mod display_audio;
+pub mod display_mode;
 pub mod ipc_console;
 pub mod launcher;
 pub mod login;

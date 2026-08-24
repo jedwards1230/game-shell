@@ -11,6 +11,16 @@
   {% endif %}
 </p>
 
+{% if node_enabled %}
+{# The Hyprland resolution/refresh/VRR controls. Loaded as a partial rather
+   than rendered inline because every action in it re-renders the whole
+   section — see `pages::display_mode`. Node tier, like the power probes
+   below. #}
+<div id="display-mode" hx-get="/devices/display-audio/mode" hx-trigger="load" hx-swap="innerHTML">
+  <p class="muted">Loading display mode…</p>
+</div>
+{% endif %}
+
 <div id="settings-result"></div>
 
 {% if daemon_up %}

@@ -127,7 +127,7 @@ partials moved without redirects — they are poll targets, not bookmarks.
 | Widgets | `/shell/widgets` | per-widget enabled/order/size/prefs editors (`widgets.<id>` subtree) |
 | Apps | `/shell/apps` | what can launch on this box: the `prewarmApps` list editor (one `StartupWMClass` per line; an emptied box clears the list to `[]`), and — since phase 4 — the daemon-owned **web-app registry** (`webapp-list`/`-add`/`-remove`, #187 P1+P3). The panel is the add surface because the couch UI has no on-screen keyboard (#20); the daemon validates, allocates the id/`wmClass` and writes the `.desktop`, so the panel only relays. Removing one keeps its Chromium profile, so re-adding restores logins. The two registry routes are gated on `web_apps` while the page is `settings_store`, so the add/remove forms render only when the node declared both |
 | Advanced | `/shell/advanced` | the three escape hatches, quarantined behind one deliberate click: the daemon-owned keys (binding layers + the `webApps` registry, `docs/WEB_APPS.md`) **read-only** — `keyBindings` is editable via the Controllers page's bindings editor, the per-game/per-player layers are read-only there too; a **read-only** `config.toml` view (a general edit path is deferred — editing still requires a manual edit + daemon/panel restart via the Dev page; the one targeted exception anywhere is the CEC page's `[cec].osd_name` editor); and the raw-JSON hatch with its explicit shallow-merge/`null`-deletes warning, which can write *any* key including ones no typed form models (`widgets`, `cecDeviceNames`) and the daemon-owned layers. Client-side JSON-object validation for immediate feedback, with the server-side object check as the authoritative gate |
-| Display &amp; Audio | `/devices/display-audio` | the `Display`, `Night Light`, `Power` and `Audio` slices of `settings.json` on one form — HDR, overscan, auto-dim, night-light schedule/temperature, sleep timer, wake-on-controller, default sink and card profile — plus the two live power probes (`power-can-suspend`, `power-battery`) beside the `Power` group they report on. Those two are **node** tier while the page is `settings_store`, so the buttons render only when the handshake succeeded. `wallpaperPath` left this page in phase 4 (see Appearance) |
+| Display &amp; Audio | `/devices/display-audio` | the `Display`, `Night Light`, `Power` and `Audio` slices of `settings.json` on one form — HDR, overscan, auto-dim, night-light schedule/temperature, sleep timer, wake-on-controller, default sink and card profile — plus the two live power probes (`power-can-suspend`, `power-battery`) beside the `Power` group they report on, plus the **Display mode** section (resolution, refresh rate, VRR — see [Display mode](#display-mode-resolution-refresh-vrr) below). Those three are **node** tier while the page is `settings_store`, so they render only when the handshake succeeded. `wallpaperPath` left this page in phase 4 (see Appearance) |
 | Controllers | `/devices/controllers` | Fleet table (`get-pads`, per-pad battery/rumble-status/bounded rumble test) with a lazy `list-input-devices` diagnostics panel; grab-management (`grab`/`release`/`handoff`) with explanations and confirms on the two that affect the live input path; a bindings editor (`get-bindings`/`set-binding` against the fixed action/button vocabulary, plus a `capture-next`/`capture-cancel` capture-and-apply flow); read-only per-game/per-player binding layers with a `set-active-game`/clear form (editing deferred — use the Advanced page's raw JSON hatch); the `Input` slice of `settings.json` (`controllerDebug`, `rumbleEnabled`), rendered only when the node declares `settings_store` because its save route lives in that block; controller-DB status/refresh |
 | CEC | `/devices/cec` | Topology (`cec-scan`/`cec-device`, merged with the `cecDeviceNames` friendly-name overrides); switching (`cec-active-source` as the "switch input" primitive, per-device `cec-power-on`/`-off`, all confirmed); a health panel (`cec-health`/`cec-test`) classifying the daemon's transmit-wedge state, with an escalating "Recover CEC" ladder (test → restart daemon, reusing the Dev page's bridge-then-exec tier logic → link to a full reboot on Dev) that flags the recommended step for the current state; the `CEC` slice of `settings.json` (claim active source on startup/wake, auto-switch on device power-on, default input) so config and actions finally share a page, rendered only when the node declares `settings_store` because its save route lives in that block; and — distinct from all of the above — an Input-name editor for the OSD device name the daemon announces on the bus (`[cec].osd_name`, default = hostname), **the panel's one config.toml write**, done format-preservingly via `toml_edit` and applied by a daemon restart; a build/platform-gated daemon renders as an honest "not available" note, never a failure banner |
 | Network | `/devices/network` | the box's two radios, from the dissolved Tools page: NetworkManager (link status, Wi-Fi list/rescan, per-interface throughput, ping) and bluez (adapter power, discovery, the known-device list with per-device connect/disconnect/pair/trust). Pairing a gamepad here is the keyboard-free alternative to the couch UI's own Bluetooth page. Every argument that becomes part of an IPC command line goes through the shared validators in `pages::ipc_console`: a ping host and a `wm_class` must be single tokens, an interface name additionally carries no `/` or `..` (it reaches a sysfs path daemon-side), and a ping count must be an integer in `1..=10` |
@@ -173,6 +173,55 @@ checks. Omitting a field from the form omits it from the patch, which is safe
 here *only because it is not a `Bool`*: non-`Bool` kinds are written only when
 present, so the daemon's shallow merge leaves the current selection alone. A
 `Bool` handled this way would be written `false` on every save.
+
+### Display mode (resolution, refresh, VRR)
+
+Resolution, refresh rate and variable refresh rate are the one group of
+controls on Devices ▸ Display & Audio that are **not** a `settings.json` slice.
+They are Hyprland compositor state, so they bypass the `SettingField` pipeline
+entirely and have their own IPC vocabulary, their own routes
+(`GET /devices/display-audio/mode` plus `apply` / `vrr` / `confirm` / `revert`
+POSTs) and their own module, `pages::display_mode`. Adding them to `SCHEMA`
+would render three controls writing keys nothing reads.
+
+**Every change is provisional.** Applying a mode or a VRR setting arms a
+15-second revert timer **in the daemon**; if nothing confirms it, the previous
+`monitor=` line goes back on its own. This is the Windows/GNOME
+apply-then-confirm contract, and it exists because the shell's display is a TV
+on a couch with no keyboard: a mode the display or the AV receiver in the chain
+cannot lock would otherwise leave a black screen and no way back short of SSH.
+The timer is daemon-side deliberately — a revert that depends on the browser
+tab still being open is not a safety net when the tab is on a phone.
+
+**Confirming is the only thing that persists.** `hypr-display-confirm` writes
+the change to `~/.config/tv-shell/hyprland-local.conf` (the per-machine override
+the committed `config/hyprland.conf` already `source`s) and nothing else does.
+So a mode nobody could see well enough to confirm never reaches disk, and the
+worst a bad pick costs is 15 seconds of black screen rather than a machine that
+boots into one. A confirm whose write fails still keeps the mode live and says
+so explicitly — "kept for this session, but not written" — rather than
+reporting a flat success.
+
+**VRR is written per-output, not as `misc:vrr`.** Hyprland's per-monitor `vrr`
+argument overrides the global, and the reference config for this shell ships
+exactly such a line, so `hyprctl keyword misc:vrr 0` would be a no-op on the
+deployed box. The panel therefore re-issues the output's `monitor=` line with
+its `vrr` field changed — and rewrites **only that field**, because
+`hyprctl monitors -j` does not report `bitdepth`, `cm`, `sdrbrightness` or
+`sdrsaturation`, so a line rebuilt from the live read would silently drop the
+10-bit HDR setup. The resolution field is untouched by a VRR change, so
+toggling VRR cannot move the display off its current mode.
+
+**The mode picker is a closed set.** It offers only what the output reports in
+`availableModes`, de-duplicated and ordered largest-and-fastest first, and
+`hypr-set-mode` re-validates against that same list server-side. There is no
+free-text mode field — that is precisely the input class that blanks a TV.
+
+Gating is **node** tier, like the two power probes on the same page: these are
+IPC commands that map to no declared `Feature`. Deliberately **not**
+`allow_dangerous` — the shell host does not set it, so a dangerous-gated
+control would be invisible on the one device these exist for. The safety story
+is the revert timer, not a config flag that hides the button.
 
 ### Navigation
 
@@ -457,7 +506,7 @@ tiers — `panel/src/capabilities.rs`:
 | Tier | Registered when | Pages |
 |---|---|---|
 | **Recovery** | always | Overview, Services (+ unit restarts), Processes, Updates, Logs, Dev ▸ Recovery (+ unit restarts), login, assets |
-| **Node** | the handshake succeeded | Devices ▸ Network, Remote ▸ Navigation, Remote ▸ Launcher, Dev ▸ Console (the *page*), and the two Display & Audio power probes |
+| **Node** | the handshake succeeded | Devices ▸ Network, Remote ▸ Navigation, Remote ▸ Launcher, Dev ▸ Console (the *page*), and the two Display & Audio power probes plus its five display-mode routes |
 | **Capability** | the node declared that `Feature` | Appearance **incl. the wallpaper files**, Apps, Advanced, Display & Audio, and the CEC/Input groups' save routes (`settings_store`), Widgets (`widgets`), web-app add/remove (`web_apps`), Controllers (`controllers`), CEC (`cec`), the three Dev ▸ Screenshot routes (`screenshot`) |
 | **Danger** | `[panel].allow_dangerous`, intersected with a capability where a route is both | `/dev/deploy` + `/dev/build` also need `dev_deploy` |
 
@@ -473,6 +522,7 @@ two blocks, in whichever direction fits:
 | `POST /devices/controllers/settings/save` | `settings_store` | `controllers` |
 | `POST /shell/apps/webapp/{add,remove}` | `web_apps` | `settings_store` |
 | `POST /devices/display-audio/power/{can-suspend,battery}` | node | `settings_store` |
+| `GET /devices/display-audio/mode` + its four POSTs | node | `settings_store` |
 | `POST /dev/console/raw` | `allow_dangerous` | node |
 
 Each route sits in the block naming the capability it *actually* needs. The

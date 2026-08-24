@@ -61,6 +61,11 @@ pub mod shell_state;
 // HTTP bridge can read it in every build (and honestly report "unknown" in a
 // build that has no CEC at all).
 pub mod display_owner;
+// Display-mode plumbing (resolution/refresh/VRR): `monitor=` line surgery and
+// hyprland-local.conf editing. Cross-platform on purpose — the compositor half
+// lives in the Linux-only `hyprland` module, so the parsing and file logic
+// builds and unit-tests on macOS too.
+pub mod display_mode;
 pub mod state;
 pub mod system;
 // Observability metrics: app-specific counters + Prometheus/OpenMetrics text

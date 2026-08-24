@@ -1,0 +1,123 @@
+{# The Display mode section of Devices ▸ Display & Audio. A PARTIAL — every
+   route in `pages::display_mode` returns this whole block and htmx swaps it
+   into #display-mode, so the controls can never be stale beside a fresh
+   result. See that module's docs. #}
+<section class="settings-group">
+  <h2>Display mode <span class="muted">(Hyprland, not settings.json)</span></h2>
+  <p class="muted">
+    Resolution, refresh rate and variable refresh rate come from the compositor, not from
+    <code>settings.json</code>. Each change is applied live and then <strong>reverts by itself
+    after {{ revert_seconds }} seconds unless you confirm it</strong> — so a mode this display
+    cannot lock costs you a blank screen for {{ revert_seconds }} seconds, not a trip to the
+    keyboard.
+  </p>
+
+  {% if notice_shown %}
+  <p class="banner {% if notice_ok %}banner-ok{% else %}banner-error{% endif %}">{{ notice_text }}</p>
+  {% endif %}
+
+  {% if !available %}
+  <p class="banner banner-error">Display mode unavailable: {{ error }}</p>
+  {% else %}
+
+  {% if pending %}
+  {# The countdown re-requests the section every second, so a daemon-side
+     auto-revert appears here without anyone clicking anything. #}
+  <div class="banner banner-warn"
+       hx-get="/devices/display-audio/mode"
+       hx-target="#display-mode"
+       hx-swap="innerHTML"
+       hx-trigger="every 1s">
+    <p>
+      <strong>Awaiting confirmation — {{ pending_seconds }}s left.</strong>
+      <code>{{ pending_monitor }}</code> is running <code>{{ pending_applied }}</code>.
+      If you do nothing it goes back to <code>{{ pending_previous }}</code>.
+    </p>
+    <div class="button-row">
+      <form hx-post="/devices/display-audio/mode/confirm" hx-disabled-elt="find button"
+            hx-target="#display-mode" hx-swap="innerHTML" class="inline-form">
+        <button type="submit">Keep these settings</button>
+      </form>
+      <form hx-post="/devices/display-audio/mode/revert" hx-disabled-elt="find button"
+            hx-target="#display-mode" hx-swap="innerHTML" class="inline-form">
+        <button type="submit">Revert now</button>
+      </form>
+    </div>
+    <p class="muted">
+      Keeping also writes the change to <code>{{ config_path }}</code>, so it survives a
+      compositor restart. Nothing is written until you keep it.
+    </p>
+  </div>
+  {% endif %}
+
+  {% if displays.is_empty() %}
+  <p class="degraded-msg">The compositor reported no outputs.</p>
+  {% endif %}
+
+  {% for d in displays %}
+  <div class="field-row" style="display:block;">
+    <h3>{{ d.name }} <span class="muted">{{ d.description }}</span></h3>
+    <p class="muted">
+      Currently {{ d.current_label }}, format <code>{{ d.current_format }}</code>{% if d.hdr %}, HDR active{% endif %}.
+      VRR is {% if d.vrr_active %}active{% else %}not active{% endif %} right now.
+      {% if !d.has_config_line %}
+      This output has no <code>monitor=</code> line in <code>{{ config_path }}</code> yet — keeping a
+      change will add one.
+      {% endif %}
+    </p>
+
+    {% if d.no_modes %}
+    <p class="degraded-msg">This output reports no usable modes, so there is nothing to pick from.</p>
+    {% else %}
+    <form hx-post="/devices/display-audio/mode/apply" hx-disabled-elt="find button"
+          hx-target="#display-mode" hx-swap="innerHTML" class="inline-form"
+          {% if pending %}hx-confirm="Another change is still awaiting confirmation. Confirm or revert that one first."{% endif %}>
+      <input type="hidden" name="monitor" value="{{ d.name }}">
+      <label for="mode-{{ d.name }}">Resolution &amp; refresh</label>
+      <select id="mode-{{ d.name }}" name="mode">
+        {% for m in d.modes %}
+        <option value="{{ m.value }}"{% if m.current %} selected{% endif %}>{{ m.label }}{% if m.current %} (current){% endif %}</option>
+        {% endfor %}
+      </select>
+      <button type="submit"{% if pending %} disabled{% endif %}>Apply mode</button>
+    </form>
+    {% endif %}
+
+    <form hx-post="/devices/display-audio/mode/vrr" hx-disabled-elt="find button"
+          hx-target="#display-mode" hx-swap="innerHTML" class="inline-form">
+      <input type="hidden" name="monitor" value="{{ d.name }}">
+      <label for="vrr-{{ d.name }}">Variable refresh rate</label>
+      <select id="vrr-{{ d.name }}" name="vrr">
+        <option value="0"{% if d.vrr_selected == 0 %} selected{% endif %}>Off</option>
+        <option value="1"{% if d.vrr_selected == 1 %} selected{% endif %}>On (always)</option>
+        <option value="2"{% if d.vrr_selected == 2 %} selected{% endif %}>Fullscreen only</option>
+      </select>
+      <button type="submit"{% if pending %} disabled{% endif %}>Apply VRR</button>
+    </form>
+    <p class="muted">
+      {% if d.vrr_from_config %}
+      Set on this output's own <code>monitor=</code> line, which overrides the global
+      <code>misc:vrr</code>.
+      {% else %}
+      This output has no explicit VRR setting, so the selection above is inferred from the live
+      reading. Applying one writes it onto this output's <code>monitor=</code> line, which
+      overrides the global <code>misc:vrr</code>.
+      {% endif %}
+      Changing VRR re-issues the line with the resolution untouched, so it cannot move the display
+      off its current mode.
+    </p>
+
+    {% if d.has_config_line %}
+    <p class="muted">Configured: <code>monitor={{ d.configured_line }}</code></p>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  {% if !config_present %}
+  <p class="muted">
+    <code>{{ config_path }}</code> does not exist yet. Keeping a change creates it; the shell's
+    committed <code>hyprland.conf</code> already <code>source</code>s that path.
+  </p>
+  {% endif %}
+  {% endif %}
+</section>

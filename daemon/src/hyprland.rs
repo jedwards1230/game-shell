@@ -63,6 +63,31 @@ pub enum HyprReq {
     /// `hypr-monitors` -> compact JSON array of monitor objects including
     /// currentFormat + derived hdr bool.
     Monitors(Reply),
+    /// `hypr-display-state` -> everything the Display & Audio page needs to
+    /// render its mode/VRR controls in one round trip: the live monitors, the
+    /// `monitor=` line each output is configured with, and any change still
+    /// awaiting confirmation. See [`display_state_json`].
+    DisplayState(Reply),
+    /// `hypr-set-mode <NAME> <WxH@R>` -> apply the mode and arm the revert
+    /// timer.
+    SetMode {
+        monitor: String,
+        mode: String,
+        reply: Reply,
+    },
+    /// `hypr-set-vrr <NAME> <0|1|2>` -> apply the per-output VRR mode and arm
+    /// the revert timer.
+    SetVrr {
+        monitor: String,
+        vrr: u8,
+        reply: Reply,
+    },
+    /// `hypr-display-confirm` -> keep the pending change and persist it to
+    /// `hyprland-local.conf`.
+    DisplayConfirm(Reply),
+    /// `hypr-display-revert` -> put the previous `monitor=` line back now,
+    /// without waiting for the timer.
+    DisplayRevert(Reply),
 }
 
 /// Resolve the Hyprland IPC socket directory for the current instance.
@@ -232,6 +257,10 @@ pub async fn run(
 
     tracing::info!("hyprland actor started");
 
+    // The pending display change, owned by this actor (and shared with the
+    // spawned revert timer). See `DisplayGuard`.
+    let display = std::sync::Arc::new(DisplayGuard::default());
+
     while let Some(req) = rx.recv().await {
         match req {
             HyprReq::Active(reply) => {
@@ -242,6 +271,29 @@ pub async fn run(
             }
             HyprReq::Monitors(reply) => {
                 let _ = reply.send(monitors_json().await);
+            }
+            HyprReq::DisplayState(reply) => {
+                let _ = reply.send(display_state_json(&display).await);
+            }
+            HyprReq::SetMode {
+                monitor,
+                mode,
+                reply,
+            } => {
+                let _ = reply.send(set_mode(&display, &monitor, &mode).await);
+            }
+            HyprReq::SetVrr {
+                monitor,
+                vrr,
+                reply,
+            } => {
+                let _ = reply.send(set_vrr(&display, &monitor, vrr).await);
+            }
+            HyprReq::DisplayConfirm(reply) => {
+                let _ = reply.send(confirm_display(&display));
+            }
+            HyprReq::DisplayRevert(reply) => {
+                let _ = reply.send(revert_display(&display, RevertCause::Manual).await);
             }
         }
     }
@@ -421,6 +473,494 @@ fn monitor_entry(v: &serde_json::Value) -> serde_json::Value {
         "currentFormat": current_format,
         "hdr": hdr,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Display mode: apply → confirm-or-revert → persist
+// ---------------------------------------------------------------------------
+//
+// The pure half of this (parsing and rewriting a `monitor=` line, editing
+// `hyprland-local.conf`) is `crate::display_mode`, which builds everywhere.
+// What is here is the part that needs the compositor and a clock.
+//
+// ## Why every change is provisional
+//
+// The shell's display is a TV on a couch with no keyboard. A mode the panel
+// (or the AVR in the chain) cannot lock leaves a black screen and no way to
+// undo it short of SSH. So an applied change arms a timer: after
+// `display_mode::REVERT_SECONDS` the previous `monitor=` line goes back on its
+// own unless a `hypr-display-confirm` arrives first. Confirming is proof the
+// picture survived — and it is the *only* path that writes the change to disk,
+// so an unconfirmed mode can never come back after a reboot.
+//
+// The timer lives in the DAEMON, not in the panel's browser tab: the tab may
+// be closed, backgrounded by a phone, or on the far side of a network the
+// change itself broke. A revert that depends on the client being alive is not
+// a safety net.
+//
+// One caveat, stated rather than papered over: if the daemon itself dies
+// inside the window, the timer dies with it and the mode stays until the
+// compositor restarts. Nothing was persisted, so a Hyprland restart still
+// restores the configured line.
+
+use crate::display_mode::{self, Mode};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+/// A display change that has been applied but not yet confirmed.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// The output the change addresses.
+    monitor: String,
+    /// The `monitor=` value to restore on revert.
+    previous: String,
+    /// The `monitor=` value currently live.
+    applied: String,
+    /// Which arming this is. The revert timer carries the generation it was
+    /// armed for and does nothing if it no longer matches, so a confirm (or a
+    /// manual revert, or a later change) cannot be undone by a stale timer.
+    generation: u64,
+    /// When the timer fires.
+    deadline: Instant,
+}
+
+/// The actor's pending-change slot, shared with the spawned revert timer.
+#[derive(Default)]
+struct DisplayGuard {
+    inner: Mutex<GuardState>,
+}
+
+#[derive(Default)]
+struct GuardState {
+    generation: u64,
+    pending: Option<Pending>,
+}
+
+impl DisplayGuard {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GuardState> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Record a freshly applied change and return its generation.
+    fn arm(&self, monitor: &str, previous: &str, applied: &str) -> u64 {
+        let mut g = self.lock();
+        g.generation += 1;
+        let generation = g.generation;
+        g.pending = Some(Pending {
+            monitor: monitor.to_string(),
+            previous: previous.to_string(),
+            applied: applied.to_string(),
+            generation,
+            deadline: Instant::now() + Duration::from_secs(display_mode::REVERT_SECONDS),
+        });
+        generation
+    }
+
+    fn peek(&self) -> Option<Pending> {
+        self.lock().pending.clone()
+    }
+
+    /// Clear and return the pending change, unconditionally.
+    fn take(&self) -> Option<Pending> {
+        self.lock().pending.take()
+    }
+
+    /// Clear and return the pending change only if it is still `generation` —
+    /// the check that makes a stale timer a no-op.
+    fn take_generation(&self, generation: u64) -> Option<Pending> {
+        let mut g = self.lock();
+        match &g.pending {
+            Some(p) if p.generation == generation => g.pending.take(),
+            _ => None,
+        }
+    }
+}
+
+/// Why a revert happened, for the log line and the reply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RevertCause {
+    /// The operator asked for it.
+    Manual,
+    /// Nobody confirmed in time.
+    Timeout,
+}
+
+impl RevertCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            RevertCause::Manual => "manual",
+            RevertCause::Timeout => "timeout",
+        }
+    }
+}
+
+/// Issue one `hyprctl keyword`-equivalent over the request socket.
+///
+/// The leading `/` is the empty flag block Hyprland's request parser expects
+/// (the same position `j/` occupies in the read queries above); `hyprctl`
+/// itself sends exactly this form. Hyprland answers `ok` on success and an
+/// error string otherwise — and it answers `ok` for a *parsed* keyword, so a
+/// successful reply means "accepted", not "the display lit up". That gap is
+/// precisely what the revert timer covers.
+async fn keyword(arg: &str) -> Result<()> {
+    let reply = request(&format!("/keyword {arg}")).await?;
+    let trimmed = reply.trim();
+    if trimmed.eq_ignore_ascii_case("ok") {
+        Ok(())
+    } else {
+        Err(anyhow!("hyprland rejected `keyword {arg}`: {trimmed}"))
+    }
+}
+
+/// Read `hyprland-local.conf`, or `""` when it does not exist yet (which is
+/// the shipped state — `config/hyprland.conf` sources it optionally).
+fn read_local_conf() -> String {
+    std::fs::read_to_string(display_mode::local_conf_path()).unwrap_or_default()
+}
+
+/// The live `hypr-monitors` array, parsed.
+async fn live_monitors() -> Vec<Value> {
+    serde_json::from_str::<Vec<Value>>(&monitors_json().await).unwrap_or_default()
+}
+
+fn monitor_str<'a>(m: &'a Value, key: &str) -> &'a str {
+    m.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// The `monitor=` value a change should be built from: the configured line
+/// when `hyprland-local.conf` declares one (it carries the bitdepth/HDR
+/// arguments the live read cannot report), otherwise one synthesized from the
+/// live monitor.
+///
+/// Returns the value plus whether it came from the config file — the panel
+/// renders that difference, because a synthesized base means "this output has
+/// no line of its own yet" and confirming will create one.
+fn base_line(conf: &str, monitors: &[Value], name: &str) -> Result<(String, bool)> {
+    if let Some(line) = display_mode::configured_line(conf, name) {
+        return Ok((line, true));
+    }
+    let m = monitors
+        .iter()
+        .find(|m| monitor_str(m, "name") == name)
+        .ok_or_else(|| anyhow!("no such output '{name}'"))?;
+    let width = m.get("width").and_then(Value::as_u64).unwrap_or(0);
+    let height = m.get("height").and_then(Value::as_u64).unwrap_or(0);
+    let refresh = m.get("refreshRate").and_then(Value::as_f64).unwrap_or(0.0);
+    let mode = Mode::parse(&format!("{width}x{height}@{refresh}"))
+        .ok_or_else(|| anyhow!("output '{name}' reports no usable current mode"))?;
+    Ok((
+        display_mode::synthesize_line(
+            name,
+            mode,
+            m.get("x").and_then(Value::as_i64).unwrap_or(0),
+            m.get("y").and_then(Value::as_i64).unwrap_or(0),
+            m.get("scale").and_then(Value::as_f64).unwrap_or(1.0),
+        ),
+        false,
+    ))
+}
+
+/// `hypr-display-state` — one document with everything the panel's controls
+/// need, so a page render is a single round trip rather than three.
+async fn display_state_json(guard: &DisplayGuard) -> String {
+    let conf = read_local_conf();
+    let conf_path = display_mode::local_conf_path();
+    let monitors = live_monitors().await;
+
+    // One merged entry per output: the live read, the configured line, and the
+    // ready-to-render mode picker. Merging here rather than in the panel keeps
+    // the panel a renderer — and keeps the picker it shows identical to the
+    // list `set_mode` validates against.
+    let displays: Vec<Value> = monitors
+        .iter()
+        .map(|m| {
+            let name = monitor_str(m, "name");
+            let current = Mode::parse(&format!(
+                "{}x{}@{}",
+                m.get("width").and_then(Value::as_u64).unwrap_or(0),
+                m.get("height").and_then(Value::as_u64).unwrap_or(0),
+                m.get("refreshRate").and_then(Value::as_f64).unwrap_or(0.0),
+            ));
+            let available: Vec<String> = m
+                .get("availableModes")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let options: Vec<Value> = display_mode::mode_options(&available, current)
+                .into_iter()
+                .map(|o| json!({"value": o.value, "label": o.label, "current": o.current}))
+                .collect();
+            let configured = display_mode::configured_line(&conf, name);
+            let configured_vrr = configured.as_deref().and_then(display_mode::line_vrr);
+            let vrr_active = m.get("vrr").and_then(Value::as_bool).unwrap_or(false);
+
+            json!({
+                "name": name,
+                "description": monitor_str(m, "description"),
+                "currentMode": current.map(Mode::to_keyword),
+                "currentLabel": current.map(Mode::label),
+                "currentFormat": monitor_str(m, "currentFormat"),
+                "hdr": m.get("hdr").and_then(Value::as_bool).unwrap_or(false),
+                "dpmsStatus": m.get("dpmsStatus").and_then(Value::as_bool).unwrap_or(true),
+                // What Hyprland reports as ACTIVE right now (a bool), versus
+                // what the config asks for (0/1/2). They differ legitimately:
+                // mode 2 reads back as inactive outside a fullscreen window.
+                "vrrActive": vrr_active,
+                "configuredLine": configured,
+                "configuredVrr": configured_vrr,
+                "modes": options,
+            })
+        })
+        .collect();
+
+    let pending = guard.peek().map(|p| {
+        json!({
+            "monitor": p.monitor,
+            "applied": p.applied,
+            "previous": p.previous,
+            "secondsRemaining": p.deadline.saturating_duration_since(Instant::now()).as_secs(),
+        })
+    });
+
+    json!({
+        "displays": displays,
+        "pending": pending,
+        "revertSeconds": display_mode::REVERT_SECONDS,
+        "configPath": conf_path.display().to_string(),
+        "configPresent": conf_path.exists(),
+    })
+    .to_string()
+}
+
+/// Apply `next` to `monitor` and arm the revert timer. Shared by
+/// [`set_mode`] and [`set_vrr`], which differ only in how they derive `next`.
+async fn apply_change(
+    guard: &Arc<DisplayGuard>,
+    monitor: &str,
+    previous: &str,
+    next: &str,
+    from_conf: bool,
+) -> String {
+    if let Some(p) = guard.peek() {
+        return crate::protocol::resp_error(&format!(
+            "a display change on '{}' is already awaiting confirmation — confirm or revert it first",
+            p.monitor
+        ));
+    }
+    if next == previous {
+        return json!({
+            "ok": true,
+            "monitor": monitor,
+            "applied": next,
+            "unchanged": true,
+        })
+        .to_string();
+    }
+    if let Err(e) = keyword(&format!("monitor {next}")).await {
+        return crate::protocol::resp_error(&crate::protocol::sanitize_ipc(&e.to_string()));
+    }
+
+    let generation = guard.arm(monitor, previous, next);
+    tracing::info!(
+        monitor,
+        applied = next,
+        previous,
+        revert_seconds = display_mode::REVERT_SECONDS,
+        "display: applied a provisional monitor line; reverting unless confirmed"
+    );
+
+    {
+        let guard = Arc::clone(guard);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(display_mode::REVERT_SECONDS)).await;
+            // A confirm, a manual revert, or a newer change all clear or
+            // supersede this generation, so the timer is a no-op unless the
+            // same change is still waiting. Claiming the slot BEFORE awaiting
+            // the compositor is what keeps a confirm landing mid-revert from
+            // reporting success over a revert already in flight.
+            if let Some(p) = guard.take_generation(generation) {
+                let _ = restore(&p, RevertCause::Timeout).await;
+            }
+        });
+    }
+
+    json!({
+        "ok": true,
+        "monitor": monitor,
+        "applied": next,
+        "previous": previous,
+        "fromConfig": from_conf,
+        "revertSeconds": display_mode::REVERT_SECONDS,
+    })
+    .to_string()
+}
+
+/// `hypr-set-mode <NAME> <WxH@R>`.
+async fn set_mode(guard: &Arc<DisplayGuard>, monitor: &str, mode: &str) -> String {
+    let Some(mode) = Mode::parse(mode) else {
+        return crate::protocol::resp_error(&format!(
+            "unparseable mode '{mode}' — expected WIDTHxHEIGHT@REFRESH"
+        ));
+    };
+    let conf = read_local_conf();
+    let monitors = live_monitors().await;
+
+    // Offer only what the output reports: a mode outside `availableModes` is
+    // the class of input that blanks a TV, and the panel's <select> is not a
+    // security boundary.
+    let Some(m) = monitors.iter().find(|m| monitor_str(m, "name") == monitor) else {
+        return crate::protocol::resp_error(&format!("no such output '{monitor}'"));
+    };
+    let supported = m
+        .get("availableModes")
+        .and_then(Value::as_array)
+        .map(|v| {
+            v.iter()
+                .filter_map(|s| s.as_str())
+                .filter_map(Mode::parse)
+                .any(|a| a.same(mode))
+        })
+        .unwrap_or(false);
+    if !supported {
+        return crate::protocol::resp_error(&format!(
+            "output '{monitor}' does not report mode {} as available",
+            mode.to_keyword()
+        ));
+    }
+
+    let (previous, from_conf) = match base_line(&conf, &monitors, monitor) {
+        Ok(v) => v,
+        Err(e) => return crate::protocol::resp_error(&e.to_string()),
+    };
+    let Some(next) = display_mode::rewrite_mode(&previous, mode) else {
+        return crate::protocol::resp_error(&format!(
+            "configured line for '{monitor}' has no resolution field: {previous}"
+        ));
+    };
+    apply_change(guard, monitor, &previous, &next, from_conf).await
+}
+
+/// `hypr-set-vrr <NAME> <0|1|2>`.
+///
+/// Written as the output's own `vrr` argument rather than `misc:vrr` — see
+/// `crate::display_mode`'s module docs for why the global has no effect on a
+/// configured output. The mode field is untouched, so toggling VRR cannot
+/// move the display off 4K120.
+async fn set_vrr(guard: &Arc<DisplayGuard>, monitor: &str, vrr: u8) -> String {
+    if vrr > 2 {
+        return crate::protocol::resp_error("vrr must be 0 (off), 1 (on) or 2 (fullscreen only)");
+    }
+    let conf = read_local_conf();
+    let monitors = live_monitors().await;
+    let (previous, from_conf) = match base_line(&conf, &monitors, monitor) {
+        Ok(v) => v,
+        Err(e) => return crate::protocol::resp_error(&e.to_string()),
+    };
+    let Some(next) = display_mode::rewrite_vrr(&previous, vrr) else {
+        return crate::protocol::resp_error(&format!(
+            "configured line for '{monitor}' is too short to carry a vrr argument: {previous}"
+        ));
+    };
+    apply_change(guard, monitor, &previous, &next, from_conf).await
+}
+
+/// `hypr-display-confirm` — keep the live change and write it to
+/// `hyprland-local.conf`.
+///
+/// **Confirmation is the only thing that persists.** A change nobody could see
+/// to confirm never reaches disk, so the worst a bad pick costs is
+/// [`display_mode::REVERT_SECONDS`] of black screen rather than a machine that
+/// boots into one.
+///
+/// A failed write does not un-confirm: the mode is live and the operator asked
+/// to keep it. The reply reports `persisted:false` with the error so the panel
+/// can say "kept for this session, but not written".
+fn confirm_display(guard: &DisplayGuard) -> String {
+    let Some(p) = guard.take() else {
+        return crate::protocol::resp_error("no display change is awaiting confirmation");
+    };
+    let path = display_mode::local_conf_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = display_mode::upsert_monitor_line(&text, &p.monitor, &p.applied);
+    match crate::config::atomic_write(&path, updated) {
+        Ok(()) => {
+            tracing::info!(
+                monitor = %p.monitor,
+                line = %p.applied,
+                path = %path.display(),
+                "display: change confirmed and persisted"
+            );
+            json!({
+                "ok": true,
+                "monitor": p.monitor,
+                "line": p.applied,
+                "persisted": true,
+                "configPath": path.display().to_string(),
+            })
+            .to_string()
+        }
+        Err(e) => {
+            tracing::warn!(
+                monitor = %p.monitor,
+                path = %path.display(),
+                error = %e,
+                "display: change confirmed but could not be persisted"
+            );
+            json!({
+                "ok": true,
+                "monitor": p.monitor,
+                "line": p.applied,
+                "persisted": false,
+                "persistError": e.to_string(),
+                "configPath": path.display().to_string(),
+            })
+            .to_string()
+        }
+    }
+}
+
+/// `hypr-display-revert`, and the body of the timeout path.
+async fn revert_display(guard: &DisplayGuard, cause: RevertCause) -> String {
+    let Some(p) = guard.take() else {
+        return crate::protocol::resp_error("no display change is awaiting confirmation");
+    };
+    restore(&p, cause).await
+}
+
+/// Put a pending change's previous line back. Shared by the manual and
+/// timeout paths, both of which have already claimed the pending slot.
+async fn restore(p: &Pending, cause: RevertCause) -> String {
+    match keyword(&format!("monitor {}", p.previous)).await {
+        Ok(()) => {
+            tracing::info!(
+                monitor = %p.monitor,
+                restored = %p.previous,
+                cause = cause.as_str(),
+                "display: reverted to the previous monitor line"
+            );
+            json!({
+                "ok": true,
+                "monitor": p.monitor,
+                "reverted": p.previous,
+                "cause": cause.as_str(),
+            })
+            .to_string()
+        }
+        Err(e) => {
+            tracing::error!(
+                monitor = %p.monitor,
+                restored = %p.previous,
+                cause = cause.as_str(),
+                error = %e,
+                "display: REVERT FAILED — the display may be left on the provisional mode"
+            );
+            crate::protocol::resp_error(&crate::protocol::sanitize_ipc(&e.to_string()))
+        }
+    }
 }
 
 /// Watch Hyprland's event socket (`.socket2.sock`) and fan `hypr:*` events onto
