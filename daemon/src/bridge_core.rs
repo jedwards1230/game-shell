@@ -293,7 +293,16 @@ pub async fn get_status() -> StatusInfo {
 
 // ─── Logs ────────────────────────────────────────────────────────────────────
 
-const QS_LOG_PATH: &str = "/tmp/qs-log.txt";
+/// Path of the Quickshell (QML) process log. `tv-shell-quickshell.service` tees
+/// the shell's merged stdout/stderr here (and to journald); the daemon's
+/// fallback spawn path writes it directly. **Truncated on every shell start** by
+/// both writers — see `metrics::run_quickshell_warning_scanner`, which has to
+/// cope with that to keep its counter monotonic.
+///
+/// `pub` (not `pub(crate)`) because `main.rs` is a separate binary crate and
+/// passes this into the warning scanner as a parameter, so tests can point the
+/// scanner at a scratch file instead.
+pub const QS_LOG_PATH: &str = "/tmp/qs-log.txt";
 
 /// Read the quickshell log file, apply optional `filter`, and return the
 /// last `lines` lines.
@@ -513,6 +522,28 @@ fn count_live_quickshell(ps_output: &str) -> usize {
         .count()
 }
 
+/// Whether a Quickshell log line counts as a warning or an error.
+///
+/// **This is the single source of truth for that predicate** — the
+/// `/dev/restart-shell` warning tail and the `tv_shell_quickshell_warnings_total`
+/// scanner (`metrics::count_warning_lines`) must agree, or the metric would
+/// report a number the tail never shows.
+///
+/// Deliberately substring-and-case-insensitive rather than a strict Qt log-level
+/// parse: Quickshell interleaves Qt category lines (`qt.svg.draw: ...`), QML
+/// `console.warn` output and raw child-process stderr, which share no format.
+///
+/// **No icon-noise exclusion here on purpose.** This predicate used to drop every
+/// `COULD NOT LOAD ICON` line, because a single shell start emitted ~960 of them
+/// and they buried everything else. That noise is now fixed at the source (see
+/// docs/OBSERVABILITY.md), so filtering it here would only hide a regression: if
+/// the icon flood ever returns, the tail and the counter are exactly where we
+/// want to see it.
+pub(crate) fn is_warning_line(line: &str) -> bool {
+    let upper = line.to_uppercase();
+    upper.contains("WARN") || upper.contains("ERROR")
+}
+
 /// `POST /dev/restart-shell` — restart Quickshell and return a brief startup
 /// summary (no errors seen / first WARN/ERROR lines).
 ///
@@ -677,16 +708,7 @@ pub async fn dev_restart_shell(
         .unwrap_or_default();
     let filtered: String = log_content
         .lines()
-        .filter(|l| {
-            // No icon-noise exclusion here on purpose. This tail used to drop
-            // every `COULD NOT LOAD ICON` line, because a single shell start
-            // emitted ~960 of them and they buried everything else. That noise is
-            // now fixed at the source (see docs/OBSERVABILITY.md), so filtering it
-            // here would only hide a regression: if the icon flood ever returns,
-            // this tail is exactly where we want to see it.
-            let upper = l.to_uppercase();
-            upper.contains("WARN") || upper.contains("ERROR")
-        })
+        .filter(|l| is_warning_line(l))
         .rev()
         .take(30)
         .collect::<Vec<_>>()

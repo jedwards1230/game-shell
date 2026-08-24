@@ -161,7 +161,9 @@ ColumnLayout {
     readonly property bool _hasAll: allItems.length > 0
 
     // === Segment (Recently Played vs Library) ===
-    property string _segment: "recent"
+    // The segment the USER last committed (or the default). It is never coerced —
+    // it records intent; `_segment` below derives the rendered segment from it.
+    property string _requestedSegment: "recent"
     readonly property var _segmentOptions: {
         let o = [];
         if (_hasRecent)
@@ -176,6 +178,46 @@ ColumnLayout {
             });
         return o;
     }
+
+    // The segment actually RENDERED: the request, coerced onto a segment that has
+    // content. Derived, never assigned — the same treatment AppsWidget's `_segment`
+    // got (shell/widgets/apps/AppsWidget.qml), and the same segment roles.
+    //
+    // It used to be a writable property that `steamMon.onUpdated` coerced inline,
+    // in the same handler that adopts `recentItems`/`allItems` via `_adoptRails`.
+    // That is the anti-pattern recorded in docs/OBSERVABILITY.md: a handler writing
+    // one dependency of a derived property (`_segment`) alongside another
+    // (`recentItems`/`allItems`). In AppsWidget that shape produced `Binding loop
+    // detected for property "_activeModel"` on device — Qt abandons a re-entered
+    // update and leaves the property STALE, so the row can keep rendering the wrong
+    // list.
+    //
+    // Two concrete wins beyond removing that hazard: the coercion now applies to
+    // ANY change of the two rails rather than only when the poll handler happens to
+    // fire (previously a rail written from anywhere else left the chip highlight and
+    // the rendered row disagreeing), and it is directly exercisable headless — the
+    // stub SocketClient never drives a real poll, so the old in-handler coercion was
+    // unreachable from a test at all (tests/qml/tst_steamsegment.qml).
+    readonly property string _segment: {
+        if (root._requestedSegment === "all")
+            return root._hasAll ? "all" : (root._hasRecent ? "recent" : "all");
+        return root._hasRecent ? "recent" : (root._hasAll ? "all" : "recent");
+    }
+
+    // Auto-parking LATCHES: when the derivation has to move off the request because
+    // the requested segment is empty, adopt the parked segment as the new request,
+    // so a later refill does not yank the row out from under a user who is
+    // mid-browse. Deferred via Qt.callLater because `_requestedSegment` is a
+    // dependency of `_segment` — writing it straight from `_segment`'s own change
+    // handler would reintroduce exactly the synchronous re-entrancy this change
+    // removes. It is a no-op whenever the two already agree.
+    function _latchParkedSegment() {
+        if (root._segment !== root._requestedSegment)
+            root._requestedSegment = root._segment;
+    }
+    on_SegmentChanged: Qt.callLater(root._latchParkedSegment)
+    Component.onCompleted: Qt.callLater(root._latchParkedSegment)
+
     readonly property var _activeItems: _segment === "recent" ? recentItems : allItems
 
     // Trailing "Open Steam" ACTION chip sentinel — the SegmentedHeader renders it
@@ -373,11 +415,21 @@ ColumnLayout {
                 let ra = d.runningAppid;
                 root.runningAppid = (typeof ra === "number" && ra > 0) ? ra : -1;
                 root.streaming = d.streaming === true;
-                // Host is back — drop out of the fast wake-poll immediately
-                // (don't wait out the 2-min window). The poster row returns via
-                // the normal data binding (_showWake flips false on recovery).
+                // Host is back — drop out of the fast wake-poll (don't wait out
+                // the 2-min window). The poster row returns via the normal data
+                // binding (_showWake flips false on recovery).
+                //
+                // DEFERRED on purpose. `_fastPolling` feeds exactly one binding,
+                // `steamMon.dataIntervalMs` (below), which IS this monitor's poll
+                // `Timer.interval`. Clearing it inline mutates the interval of the
+                // very timer whose reply is being handled, from inside that reply
+                // handler — a handler on one input of a derived value writing
+                // another, the shape docs/OBSERVABILITY.md forbids. Qt.callLater
+                // puts the write a turn later, outside the reply cascade, where the
+                // timer restart is an ordinary state change. `_endFastPoll()` is
+                // idempotent, so a redundant schedule costs nothing.
                 if (root._fastPolling)
-                    root._endFastPoll();
+                    Qt.callLater(root._endFastPoll);
             } else if (d && d.status === "disabled") {
                 // Unconfigured (TV_SHELL_STEAM_URL unset): collapse for real.
                 // Clear the signatures too, so a later good poll is seen as a
@@ -395,11 +447,10 @@ ColumnLayout {
             // indicator, and streaming flag so the games row doesn't vanish. The
             // next good poll (or recovery refetch) refreshes them.
 
-            // Keep the active segment on something that has content.
-            if (root._segment === "recent" && !root._hasRecent && root._hasAll)
-                root._segment = "all";
-            else if (root._segment === "all" && !root._hasAll && root._hasRecent)
-                root._segment = "recent";
+            // No segment coercion here on purpose — `_segment` derives it (above),
+            // so this handler only writes DATA. Writing `_segment` from the same
+            // handler that writes its sibling dependencies is the loop shape #441
+            // removed from AppsWidget.
         }
     }
 
@@ -447,7 +498,8 @@ ColumnLayout {
         ]
         previousRow: root.previousRow
         nextRow: posterRow
-        onSegmentChanged: value => root._segment = value
+        // A chip commit records the user's INTENT; `_segment` derives from it.
+        onSegmentChanged: value => root._requestedSegment = value
         onActionTriggered: value => root.openBigPictureRequested()
         onEscaped: root.escaped()
         onEnsureVisibleRequested: item => root.ensureVisibleRequested(item)

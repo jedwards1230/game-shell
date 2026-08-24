@@ -100,6 +100,7 @@ cat >>"$build/components/qmldir" <<'EOF'
 NavigableRow 1.0 NavigableRow.qml
 MarqueeText 1.0 MarqueeText.qml
 SocketClient 1.0 SocketClient.qml
+singleton SocketProbe 1.0 SocketProbe.qml
 singleton AppDiscoveryManager 1.0 AppDiscoveryManager.qml
 AppCard 1.0 AppCard.qml
 StreamCard 1.0 StreamCard.qml

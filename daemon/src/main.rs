@@ -203,6 +203,43 @@ fn main() -> anyhow::Result<()> {
             });
         }
 
+        // One-shot web-app launcher icon migration (#441 follow-up): rewrites
+        // already-installed generated .desktop entries from the stale
+        // `Icon=web-browser` (absent from Breeze, which the shell selects via
+        // QT_QPA_PLATFORMTHEME=kde) to `internet-web-browser`. Runs here rather
+        // than in the app scan because it is a one-shot data migration — the
+        // scan path serves every `list-apps` IPC call and must not repeat a
+        // directory walk + rewrite each time. Blocking I/O, so it goes to the
+        // blocking pool; it never returns an error and never blocks startup.
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(tv_shell_input::webapps::migrate_desktop_icons).await
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("webapps: migrated {n} generated launcher icon(s)"),
+                Err(e) => tracing::warn!("webapps: icon migration task panicked: {e}"),
+            }
+        });
+
+        // Quickshell warning-log scanner (observability): samples /tmp/qs-log.txt
+        // on a timer and folds new WARN/ERROR lines into
+        // tv_shell_quickshell_warnings_total, making the "a healthy shell start
+        // emits a handful of WARN lines, not hundreds" invariant alertable
+        // (#441). Spawned UNCONDITIONALLY — not inside the textfile writer above,
+        // which early-returns when [observability].metrics_textfile is unset,
+        // because the counter must also be there for the /metrics HTTP route.
+        // Fire-and-forget: a missing log file is a debug skip, never a panic.
+        {
+            let scanner_metrics = Arc::clone(&metrics);
+            tokio::spawn(async move {
+                tv_shell_input::metrics::run_quickshell_warning_scanner(
+                    scanner_metrics,
+                    std::path::PathBuf::from(tv_shell_input::bridge_core::QS_LOG_PATH),
+                    tv_shell_input::metrics::QS_WARNING_SCAN_INTERVAL,
+                )
+                .await;
+            });
+        }
+
         // logind session watcher: releases the gamepad grab while our session is
         // backgrounded (VT-switched away) and re-grabs on return. Fire-and-forget
         // like the D-Bus actors — logs and degrades gracefully if logind is

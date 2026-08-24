@@ -4,6 +4,7 @@ import "prewarm.js" as Prewarm
 import "appQuirks.js" as AppQuirks
 import "launchTrace.js" as LaunchTrace
 import "resumeFocus.js" as ResumeFocus
+import "windowFilter.js" as WindowFilter
 
 Item {
     id: root
@@ -138,12 +139,13 @@ Item {
     //
     // Guardrails: only adopt while `idle` (idempotent no-op otherwise, so an
     // event-then-poll double fire can't churn), and skip the shell's own surfaces
-    // (empty / "quickshell") and prelaunch/transient classes — the SAME filters
-    // the launch-detect scans use, not a reinvented set.
+    // (empty / "quickshell") and compositor notices, plus prelaunch/transient
+    // classes — the SAME filters the launch-detect scans use, not a reinvented
+    // set (windowFilter.js owns the shared half).
     function _maybeAdoptIdleApp(cls) {
         if (root.shellState !== "idle")
             return;
-        if (!cls || cls === "" || cls.indexOf("quickshell") >= 0)
+        if (!WindowFilter.isAppWindow(cls))
             return;
         if (root._prelaunchClasses.indexOf(cls) >= 0)
             return;
@@ -825,7 +827,9 @@ Item {
             for (let i = 0; i < clients.length; i++) {
                 let c = clients[i];
                 let cls = c["class"] || "";
-                if (cls === "" || cls.indexOf("quickshell") >= 0)
+                // Not an app window (shell surface / compositor notice) — never
+                // enumerate it. See windowFilter.js for the list and the why.
+                if (!WindowFilter.isAppWindow(cls))
                     continue;
 
                 seenClasses[cls] = true;
@@ -919,7 +923,7 @@ Item {
             if (root._awaitingWindow && root.runningAppClass === "" && root.shellState === "appRunning") {
                 for (let i = 0; i < clients.length; i++) {
                     let cls = clients[i]["class"] || "";
-                    if (cls === "" || cls.indexOf("quickshell") >= 0)
+                    if (!WindowFilter.isAppWindow(cls))
                         continue;
                     if (root._prelaunchClasses.indexOf(cls) < 0) {
                         root.runningAppClass = cls;
@@ -937,7 +941,7 @@ Item {
             // poll instead — the client list is the source of truth here even
             // with no activewindow event yet. Adopt the current foreground window
             // (lowest Hyprland focusHistoryId == most-recently-focused). `windows`
-            // is already stripped of empty/"quickshell" classes, and
+            // is already stripped of non-app classes (windowFilter.js), and
             // _maybeAdoptIdleApp re-applies every filter. Guarded one-shot by
             // _startupAdoptionDone so this cannot become a steady-state re-adopt:
             // a deliberate return-to-shell leaves the app backgrounded but still

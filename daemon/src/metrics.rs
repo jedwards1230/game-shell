@@ -84,6 +84,14 @@ pub struct Metrics {
     /// which share `dev_restart_shell`) detected >1 quickshell process after the
     /// restart settle — the #254 stacked-instance bug; should stay 0.
     pub quickshell_multi_instance: AtomicU64,
+
+    // --- Quickshell (QML) log noise ------------------------------------------
+    /// WARN/ERROR lines the Quickshell QML process wrote to `/tmp/qs-log.txt`,
+    /// accumulated by [`run_quickshell_warning_scanner`]. Makes the "a healthy
+    /// shell start emits a handful of WARN lines, not hundreds" invariant
+    /// (docs/OBSERVABILITY.md) alertable — the repo regressed to 10,498 WARN
+    /// lines over one session unnoticed before #441 fixed the emitters.
+    pub quickshell_warnings: AtomicU64,
 }
 
 impl Metrics {
@@ -170,6 +178,14 @@ impl Metrics {
     pub fn inc_quickshell_multi_instance(&self) {
         self.quickshell_multi_instance
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Add `n` newly-observed Quickshell WARN/ERROR lines. Takes a count rather
+    /// than incrementing by one because the scanner observes the log file in
+    /// batches (one delta per tick), not line by line.
+    #[inline]
+    pub fn add_quickshell_warnings(&self, n: u64) {
+        self.quickshell_warnings.fetch_add(n, Ordering::Relaxed);
     }
 }
 
@@ -350,6 +366,12 @@ pub fn render(
         "tv_shell_quickshell_multi_instance_total",
         "Times a shell restart (HTTP /dev/restart-shell or MCP restart_shell) detected >1 quickshell process after a restart settle (#254; should stay 0).",
         counters.quickshell_multi_instance.load(Ordering::Relaxed),
+    );
+    counter(
+        &mut out,
+        "tv_shell_quickshell_warnings_total",
+        "WARN/ERROR lines written by the Quickshell QML process to /tmp/qs-log.txt, sampled periodically by the daemon (#441). A healthy shell start emits a handful, not hundreds. The log is truncated on every shell start and the scanner treats a shrink or an inode change as a new file, so the counter stays monotonic across shell restarts; on daemon start it seeds from the current file WITHOUT counting its history, so a daemon restart does not replay a whole session. A missing log counts as an empty one, so on a cold boot the seed lands at zero before the shell starts and the startup burst IS counted. Warnings written and truncated away inside one scan interval are not counted.",
+        counters.quickshell_warnings.load(Ordering::Relaxed),
     );
 
     // ── Convenience resource gauges (better sourced from node_exporter) ───────
@@ -535,6 +557,226 @@ pub async fn run_textfile_writer(
     }
 }
 
+// ─── Quickshell (QML) warning-log scanner ────────────────────────────────────
+
+/// How often the Quickshell log is sampled for new WARN/ERROR lines. Matches the
+/// daemon's existing polling cadence culture (the metrics textfile writer
+/// defaults to 15s, `service_health` polls every 30s). Deliberately a const, not
+/// a config key: the counter is monotonic, so the interval only bounds how
+/// quickly a burst becomes visible and how much a truncate-within-a-tick can
+/// swallow.
+pub const QS_WARNING_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Count WARN/ERROR lines in a Quickshell log body.
+///
+/// Pure (no filesystem) so the predicate is unit-testable, mirroring
+/// `bridge_core::count_live_quickshell`. The per-line predicate is
+/// `bridge_core::is_warning_line` — shared verbatim with the
+/// `/dev/restart-shell` warning tail so the counter and the tail can never
+/// disagree. In particular there is **no icon-noise filtering**: noise is fixed
+/// at the emitter, never hidden at the reader (docs/OBSERVABILITY.md).
+pub(crate) fn count_warning_lines(text: &str) -> u64 {
+    text.lines()
+        .filter(|l| crate::bridge_core::is_warning_line(l))
+        .count() as u64
+}
+
+/// What the scanner remembers between ticks so it can turn a repeatedly-read
+/// (and repeatedly-truncated) file into a monotonic counter.
+#[derive(Debug, Default)]
+pub(crate) struct ScanState {
+    /// False until the first successful read. The first read only SEEDS the
+    /// state; it contributes no delta (see [`warning_delta`]).
+    seeded: bool,
+    /// Byte length of the file as of the last successful read.
+    last_len: u64,
+    /// Inode of the file as of the last successful read (`None` on non-unix or
+    /// if the metadata read did not expose one).
+    last_ino: Option<u64>,
+    /// Warning count of the file as of the last successful read.
+    last_count: u64,
+}
+
+/// Fold one observation of the log file into `state` and return how many
+/// warnings to add to the counter.
+///
+/// Pure, so the whole truncation/restart story is testable without a filesystem.
+/// Three cases:
+///
+/// 1. **First observation of this daemon's life** (`!seeded`) → delta `0`. On a
+///    mid-session `/dev/restart-daemon` re-exec the file already holds a whole
+///    session's warnings, and counting them would replay history into a single
+///    scrape interval. Note the scanner treats a **missing** log as a valid
+///    observation of an empty file (`len 0`, `count 0`) rather than as a skip —
+///    so on a cold boot the seed lands at zero *before* the shell starts, and
+///    the startup burst is then counted as an ordinary append (case 3). Seeding
+///    off a skip instead would swallow exactly the flood this metric exists to
+///    catch.
+/// 2. **New file** — `len` shrank, or the inode changed → the whole current
+///    count is new. `/tmp/qs-log.txt` is truncated on every shell start, by the
+///    unit's `tee` and by the daemon's fallback spawn; `tee` truncates the SAME
+///    inode, so in practice the length check is the one that fires and the inode
+///    check covers an unlink-and-replace.
+/// 3. **Append** → the difference. `saturating_sub` is defensive: a file that
+///    was truncated and then grew back past `last_len` inside one interval can
+///    present a smaller count at a larger length, and losing those warnings is
+///    the documented, accepted cost of sampling.
+pub(crate) fn warning_delta(state: &mut ScanState, len: u64, ino: Option<u64>, count: u64) -> u64 {
+    let replaced = match (ino, state.last_ino) {
+        (Some(now), Some(before)) => now != before,
+        // Unknown inode on either side: fall back to the length check alone.
+        _ => false,
+    };
+    let delta = if !state.seeded {
+        0
+    } else if len < state.last_len || replaced {
+        count
+    } else {
+        count.saturating_sub(state.last_count)
+    };
+
+    state.seeded = true;
+    state.last_len = len;
+    state.last_ino = ino;
+    state.last_count = count;
+    delta
+}
+
+/// One observation of the log file.
+struct ScanSample {
+    len: u64,
+    ino: Option<u64>,
+    count: u64,
+}
+
+/// Read `path` and count its warning lines. `Ok(None)` means the file does not
+/// exist yet — the normal state before the first shell start, on CI, and on any
+/// non-Linux host. Callers treat that as a definitive observation of an EMPTY
+/// log (not as a failed read): the shell truncates-or-creates this file, so
+/// "absent" and "present but empty" are the same fact, and conflating them is
+/// what lets a cold-boot warning burst be counted. Contrast `Err(_)`, which
+/// means the read genuinely told us nothing.
+///
+/// Blocking I/O; callers run it on the blocking pool. `len` is the number of
+/// bytes actually read rather than `metadata().len()` so the length and the
+/// count always describe the same bytes.
+fn sample_log(path: &std::path::Path) -> std::io::Result<Option<ScanSample>> {
+    use std::io::Read;
+
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let ino = f.metadata().ok().and_then(|m| metadata_ino(&m));
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    // The shell can emit non-UTF-8 bytes (raw child-process stderr); lossy
+    // decoding keeps the surrounding line countable instead of dropping the read.
+    let text = String::from_utf8_lossy(&buf);
+    Ok(Some(ScanSample {
+        len: buf.len() as u64,
+        ino,
+        count: count_warning_lines(&text),
+    }))
+}
+
+/// The file's inode, where the platform exposes one. `std::os::unix` (not
+/// `std::os::linux`) keeps the module's cross-platform invariant: this still
+/// compiles and unit-tests on macOS, and degrades to `None` elsewhere.
+#[cfg(unix)]
+fn metadata_ino(m: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(m.ino())
+}
+
+#[cfg(not(unix))]
+fn metadata_ino(_m: &std::fs::Metadata) -> Option<u64> {
+    None
+}
+
+/// Background task: periodically sample the Quickshell log at `path` and fold
+/// newly-appeared WARN/ERROR lines into `tv_shell_quickshell_warnings_total`.
+///
+/// Spawned **unconditionally** from `main.rs` — deliberately NOT inside
+/// [`run_textfile_writer`], which early-returns when
+/// `[observability].metrics_textfile` is unset. The counter must be there for the
+/// `/metrics` HTTP route whether or not the textfile sink is configured.
+///
+/// The scan lives here and never in [`render`]: `render` runs on every scrape AND
+/// every textfile tick, so reading the file there would tie counting to scrape
+/// frequency and double-count whenever both sinks are active.
+///
+/// Fire-and-forget like the other daemon actors: a missing file is a `debug!`
+/// skip (the normal pre-first-shell-start / CI / non-Linux state, not worth
+/// warn-spamming every tick), an I/O error is a `debug!` skip, and nothing here
+/// can panic the daemon.
+pub async fn run_quickshell_warning_scanner(
+    counters: Arc<Metrics>,
+    path: std::path::PathBuf,
+    interval: std::time::Duration,
+) {
+    tracing::info!(
+        "metrics: scanning {} for quickshell WARN/ERROR lines every {}s",
+        path.display(),
+        interval.as_secs()
+    );
+
+    let mut state = ScanState::default();
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        ticker.tick().await;
+
+        let scan_path = path.clone();
+        // Blocking file I/O — off the async runtime, like the textfile writer.
+        let sample = match tokio::task::spawn_blocking(move || sample_log(&scan_path)).await {
+            Ok(Ok(Some(s))) => s,
+            Ok(Ok(None)) => {
+                // NOT a skip. An absent log is a definitive observation of an
+                // EMPTY one, and treating it as such is what makes a cold boot
+                // work: the daemon's first tick fires before the shell exists,
+                // seeds at zero, and the startup burst is then counted as a
+                // plain append on the next tick. Skipping here would leave the
+                // state unseeded until after the burst had already landed, and
+                // the seed would swallow it whole.
+                tracing::debug!(
+                    "metrics: {} absent, counting it as an empty log",
+                    path.display()
+                );
+                ScanSample {
+                    len: 0,
+                    ino: None,
+                    count: 0,
+                }
+            }
+            Ok(Err(e)) => {
+                // A real read error IS a skip: unlike NotFound it tells us
+                // nothing about the file's contents, so seeding off it could
+                // baseline at a wrong count.
+                tracing::debug!("metrics: quickshell log read failed: {e}");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("metrics: quickshell log scan task panicked: {e}");
+                continue;
+            }
+        };
+
+        let seeding = !state.seeded;
+        let delta = warning_delta(&mut state, sample.len, sample.ino, sample.count);
+        if seeding {
+            tracing::debug!(
+                "metrics: seeded quickshell warning scanner at {} pre-existing WARN/ERROR \
+                 line(s); anything already in the log is treated as history and not counted",
+                sample.count
+            );
+        } else if delta > 0 {
+            counters.add_quickshell_warnings(delta);
+            tracing::debug!("metrics: +{delta} quickshell WARN/ERROR lines");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,6 +802,10 @@ mod tests {
         assert!(text.contains("\ntv_shell_pad_joins_total 1\n"));
         assert!(text.contains("\ntv_shell_pad_leaves_total 0\n"));
         assert!(text.contains("\ntv_shell_shell_restarts_total 1\n"));
+        // Counters that were never touched are still always present at 0 — a
+        // scrape must be able to alert on them without waiting for a first event.
+        assert!(text.contains("\ntv_shell_quickshell_multi_instance_total 0\n"));
+        assert!(text.contains("\ntv_shell_quickshell_warnings_total 0\n"));
         // Trailing newline (textfile collector requirement).
         assert!(text.ends_with('\n'));
         // No gauges when sys is None; no build_info when build is None.
@@ -700,4 +946,178 @@ mod tests {
 
     // The interval default/clamp now lives in
     // `DaemonConfig::metrics_interval_secs()` and is tested in daemon_config.rs.
+
+    // ── Quickshell warning scanner ───────────────────────────────────────────
+
+    #[test]
+    fn count_warning_lines_matches_the_restart_tail_predicate() {
+        // WARN and ERROR, in the shapes quickshell actually emits.
+        assert_eq!(count_warning_lines("qml: WARN something\n"), 1);
+        assert_eq!(count_warning_lines("ERROR: failed to load\n"), 1);
+        // Case-insensitive: Qt category lines are lowercase, QML console.warn is not.
+        assert_eq!(
+            count_warning_lines("warning: x\nWarning: y\nqt.svg.draw: error here\n"),
+            3
+        );
+        // Lines containing neither are not counted.
+        assert_eq!(count_warning_lines("info: started\ndebug: tick\n"), 0);
+        // Empty input.
+        assert_eq!(count_warning_lines(""), 0);
+        // Mixed body: only the WARN/ERROR lines count.
+        assert_eq!(
+            count_warning_lines("info: a\nWARN b\ndebug: c\nERROR d\n"),
+            2
+        );
+        // A trailing line with no newline still counts (str::lines yields it).
+        assert_eq!(count_warning_lines("WARN no trailing newline"), 1);
+    }
+
+    #[test]
+    fn count_warning_lines_does_not_filter_icon_noise() {
+        // The `/dev/restart-shell` tail used to drop these unconditionally. The
+        // filter is gone on purpose (docs/OBSERVABILITY.md) — hiding it at the
+        // reader would hide exactly the regression this counter exists to catch.
+        let icon_flood = "qt.gui.icc: WARNING: COULD NOT LOAD ICON application-x-foo\n".repeat(5);
+        assert_eq!(count_warning_lines(&icon_flood), 5);
+        assert_eq!(
+            count_warning_lines("qt.svg.draw: The requested buffer size is too big, ignoring\n"),
+            0,
+            "a line with neither WARN nor ERROR is still not counted"
+        );
+    }
+
+    #[test]
+    fn quickshell_warnings_render() {
+        let m = Metrics::default();
+        m.add_quickshell_warnings(3);
+        m.add_quickshell_warnings(4);
+        let text = render(&m, None, None);
+
+        assert!(text.contains("# HELP tv_shell_quickshell_warnings_total"));
+        assert!(text.contains("# TYPE tv_shell_quickshell_warnings_total counter"));
+        assert!(text.contains("\ntv_shell_quickshell_warnings_total 7\n"));
+    }
+
+    #[test]
+    fn warning_delta_seeds_without_counting_history() {
+        // The daemon restarts independently of the shell, so its FIRST read of an
+        // existing log must not replay a whole session into one scrape interval.
+        let mut st = ScanState::default();
+        assert_eq!(warning_delta(&mut st, 4096, Some(7), 500), 0);
+        // ...but it now tracks that file, so subsequent appends do count.
+        assert_eq!(warning_delta(&mut st, 4200, Some(7), 503), 3);
+    }
+
+    #[test]
+    fn warning_delta_counts_a_cold_boot_burst_after_an_absent_log() {
+        // THE regression this metric exists to catch is a cold-boot warning
+        // flood, and the scanner's first tick fires before the shell has created
+        // /tmp/qs-log.txt at all. The absent log must therefore seed at ZERO
+        // (not be skipped), so the burst that lands moments later is an ordinary
+        // append and gets counted. If this returns 0, the counter sits at 0
+        // through exactly the event it was added to alert on.
+        let mut st = ScanState::default();
+        assert_eq!(
+            warning_delta(&mut st, 0, None, 0),
+            0,
+            "absent log seeds at zero"
+        );
+        assert_eq!(
+            warning_delta(&mut st, 3923, Some(1), 37),
+            37,
+            "the shell's startup burst must be counted, not swallowed by the seed"
+        );
+    }
+
+    #[test]
+    fn warning_delta_still_ignores_history_on_a_daemon_re_exec() {
+        // The companion to the test above: /dev/restart-daemon re-execs into a
+        // fresh ScanState while the shell keeps running, so the FIRST observation
+        // is a pre-existing non-empty log. That history must NOT be replayed into
+        // one scrape interval. Both behaviours have to hold at once — a change
+        // that "fixes" either by breaking the other fails here.
+        let mut st = ScanState::default();
+        assert_eq!(warning_delta(&mut st, 3923, Some(1), 37), 0);
+        assert_eq!(warning_delta(&mut st, 4100, Some(1), 39), 2);
+    }
+
+    #[test]
+    fn warning_delta_counts_appends_only() {
+        let mut st = ScanState::default();
+        warning_delta(&mut st, 0, Some(7), 0); // seed on an empty file
+        assert_eq!(warning_delta(&mut st, 100, Some(7), 2), 2);
+        assert_eq!(
+            warning_delta(&mut st, 100, Some(7), 2),
+            0,
+            "no growth, no delta"
+        );
+        assert_eq!(warning_delta(&mut st, 300, Some(7), 9), 7);
+    }
+
+    #[test]
+    fn warning_delta_treats_a_shrink_as_a_fresh_file() {
+        // `tee` truncates the SAME inode on every shell start: size shrinks,
+        // inode unchanged. The whole new count is new.
+        let mut st = ScanState::default();
+        warning_delta(&mut st, 0, Some(7), 0);
+        assert_eq!(warning_delta(&mut st, 9000, Some(7), 40), 40);
+        assert_eq!(
+            warning_delta(&mut st, 120, Some(7), 3),
+            3,
+            "truncate + 3 fresh warnings = 3, not a saturating 0 and never negative"
+        );
+        // And it keeps counting from the new baseline afterwards.
+        assert_eq!(warning_delta(&mut st, 400, Some(7), 5), 2);
+    }
+
+    #[test]
+    fn warning_delta_treats_an_inode_change_as_a_fresh_file() {
+        // An unlink-and-replace can leave the file LARGER than before, so the
+        // length check alone would miscount it as an append.
+        let mut st = ScanState::default();
+        warning_delta(&mut st, 100, Some(7), 5);
+        assert_eq!(warning_delta(&mut st, 900, Some(8), 6), 6);
+    }
+
+    #[test]
+    fn warning_delta_without_inodes_falls_back_to_length() {
+        // Non-unix / metadata unavailable: `None` inodes must not be read as a
+        // replacement on every single tick.
+        let mut st = ScanState::default();
+        warning_delta(&mut st, 100, None, 5);
+        assert_eq!(warning_delta(&mut st, 200, None, 8), 3);
+        assert_eq!(
+            warning_delta(&mut st, 10, None, 1),
+            1,
+            "shrink still detected"
+        );
+    }
+
+    #[test]
+    fn sample_log_reads_counts_and_reports_missing_files() {
+        // See `crate::testutil` for why this is based on `current_exe()` rather
+        // than the system temp dir.
+        let dir = crate::testutil::scratch_dir("qs-warning-scan-test");
+        let path = dir.join("qs-log.txt");
+
+        // Missing file → Ok(None), the pre-first-shell-start / CI / non-Linux case.
+        assert!(sample_log(&path)
+            .expect("missing file is not an error")
+            .is_none());
+
+        let body = "info: start\nWARN a\nERROR b\n";
+        std::fs::write(&path, body).unwrap();
+        let s = sample_log(&path).unwrap().expect("file exists");
+        assert_eq!(s.count, 2);
+        assert_eq!(s.len, body.len() as u64);
+
+        // Truncate + rewrite through the same path (what `tee` does): the sample
+        // shrinks, which is what `warning_delta` keys off.
+        std::fs::write(&path, "WARN only\n").unwrap();
+        let s2 = sample_log(&path).unwrap().expect("file exists");
+        assert_eq!(s2.count, 1);
+        assert!(s2.len < s.len);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
