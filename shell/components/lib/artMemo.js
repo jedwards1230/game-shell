@@ -35,7 +35,7 @@
 // would reintroduce that blank-poster bug for the rest of the session.
 //
 // So SteamLibraryView calls `reset()` on every host-unreachable -> reachable
-// transition. Re-trying a handful of genuinely-404 URLs once per host recovery is
+// transition. Re-trying a handful of permanently missing URLs once per host recovery is
 // far cheaper than the failure it prevents.
 //
 // Pure `.pragma library` (one shared instance per QML engine) so it is

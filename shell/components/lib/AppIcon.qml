@@ -32,7 +32,7 @@ Item {
     //    re-fetched (`cache: false` below guarantees the second fetch), and it
     //    would let the negative memo learn from failures observed at the wrong
     //    scale. Waiting costs nothing visible: the letter fallback already renders.
-    //  * `iconSize >= 8` — a 0/near-0 size reaches the provider as
+    //  * `iconSize >= 8` — a zero or near-zero size reaches the provider as
     //    `Qt.size(0, 0)`, which it clamps to 1px × DPR, i.e. the QSize(2, 2)
     //    requests that fail for EVERY icon whether or not it is in the theme.
     //
