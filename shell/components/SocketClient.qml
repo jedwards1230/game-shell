@@ -206,25 +206,27 @@ Item {
     // Staleness watchdog for subscribe streams — the ONLY thing that notices a
     // daemon restart.
     //
-    // WHY A TIMER AND NOT A SIGNAL: when the daemon exits, Quickshell's Socket
-    // keeps reporting `connected == true` and emits NO state change — just a
-    // logged QLocalSocket::PeerClosedError. So the disconnected branch of
-    // onConnectionStateChanged never runs, the reconnect loop is never armed,
-    // and the stream sits "connected" to a peer that is gone. (The same trap is
-    // documented for request mode in request() above, re #402; subscribe mode
-    // had it too, and nothing detected it.)
+    // DEFENCE IN DEPTH, not the primary recovery path. Be clear about which is
+    // which, because it was mis-attributed once already.
     //
-    // Observed on-device 2026-08-26: after a daemon restart the shell kept
-    // running and rendering but could neither send commands nor receive the
-    // `intent:*` broadcast, so Home and the nav drawer did nothing and the only
-    // recovery was restarting Quickshell over SSH — from the couch there was
-    // none.
+    // A daemon restart IS caught by the reconnect loop below: the socket does
+    // report the close, onConnectionStateChanged fires, and the loop retries
+    // until the daemon is back. Verified on-device 2026-08-26 — the daemon was
+    // restarted under a live shell, this watchdog never fired, and the shell
+    // recovered anyway.
     //
-    // The daemon therefore pings an idle stream every 10s (ipc.rs
-    // KEEPALIVE_INTERVAL) and this treats silence as death. The window is a
-    // generous multiple of that interval so a missed tick or a busy frame can
-    // never cause a spurious reconnect; a real death is still caught in well
-    // under a minute, and reconnecting is cheap and idempotent.
+    // What this covers is the case the loop CANNOT see: a peer that stops
+    // answering without a clean close, where the socket keeps reporting itself
+    // connected and no state change ever arrives. (request() above documents the
+    // same hazard for request-mode clients, re #402.) There is no local signal
+    // for that, so the only evidence available is silence — which is meaningless
+    // unless the stream is expected to say something. Hence the daemon pings an
+    // idle stream every 10s (ipc.rs KEEPALIVE_INTERVAL) and this treats a long
+    // gap as death.
+    //
+    // The window is a generous multiple of that interval so a missed tick or a
+    // busy frame can never cause a spurious reconnect; reconnecting is cheap and
+    // idempotent, so erring long costs nothing.
     property int staleMs: 35000
 
     Timer {

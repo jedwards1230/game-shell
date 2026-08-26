@@ -167,14 +167,17 @@ Register as an event subscriber. The daemon sends `subscribed\n`, then streams e
 recognise it may ignore it like any unknown event, so adding it cannot break an
 existing subscriber.
 
-It exists because **silence is the only way a client can detect that the daemon
-went away.** The daemon broadcasts only on change, so a healthy quiet stream and
-a dead peer look identical on the wire — and on the QML side they are
-indistinguishable locally too: after the daemon exits, Quickshell's `Socket`
-keeps reporting `connected == true` and emits no state change, only a logged
-`PeerClosedError`. Without the ping, a daemon restart left the shell
-permanently deaf (running and rendering, but unable to send commands or receive
-`intent:*`), which stranded the user in a fullscreen app with no way back.
+It exists for the case a client **cannot** detect locally: a peer that stops
+answering without a clean close, where the socket keeps reporting itself
+connected and no state change ever arrives. The daemon broadcasts only on change,
+so a healthy quiet stream and a dead peer are otherwise identical on the wire.
+The ping makes silence meaningful.
+
+A normal daemon restart does NOT need it — the socket reports that close, and a
+client that retries until it reconnects recovers on its own. (Verified
+on-device: with a retry loop in place, a daemon restart under a live shell
+recovered without the keepalive watchdog firing.) The failure this guards
+against is the one where that signal never comes.
 
 `SocketClient.qml` treats ~35s of silence as a dead peer and reconnects. Any
 client of this protocol should do something equivalent; the window should be a
