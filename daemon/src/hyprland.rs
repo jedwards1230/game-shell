@@ -1146,7 +1146,11 @@ async fn watch_events(
             // Snapshot on the way out so the windows that do not come back can
             // be NAMED, rather than leaving a silent ghost that only shows up
             // later as audio from an app nobody can find.
-            "monitorremoved" => {
+            // Both forms are handled: Hyprland 0.56 emits `monitorremoved` and
+            // `monitorremovedv2`, and which one arrives (or whether both do) is
+            // not something to depend on. First-removal-wins makes the twin a
+            // no-op, so handling both is free.
+            "monitorremoved" | "monitorremovedv2" => {
                 tracing::warn!(
                     "hyprland: monitor removed ({}); snapshotting windows to see which survive",
                     data.trim()
