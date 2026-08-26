@@ -351,7 +351,10 @@ screen and nothing else: `components/WorkspaceAudioMuter.qml` mutes the PipeWire
 playback streams of every app that is not on `displayedWorkspace`, with the
 decision pure in `components/audioOwnership.js`. There is **no per-app
 allowlist** — adding an app requires no change — and home needs no special case,
-since nothing can ever match the reserved empty workspace 1. Nodes are
+since nothing can ever match the reserved empty workspace 1. (The one exempt list,
+`SHELL_OWNED_BINARIES`, is the shell's OWN audio — the Settings speaker test's
+`pw-play`, which has no window and would be muted as an orphan. Not an app list:
+the rule is about apps, and an app is a thing with a window.) Nodes are
 attributed to windows by `application.process.binary`, never by pid (Steam's
 window pid owns no PipeWire client) and never by `application.name` (which is
 `"Steam"` for *both* Big Picture and the Remote Play stream). Full rationale and
