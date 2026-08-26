@@ -179,6 +179,38 @@ incident above, nothing. The shell now emits `resumeFailed` and returns to the
 home screen (`resume-abandoned`). It is deliberately **not** `appClosed`: the app
 is still running, and only the shell's belief that it came forward was wrong.
 
+**Resumes are generationed, because a verified miss now ACTS.** A resume is a
+chain of async hops — decide → read `hypr-monitors` → maybe `movetoworkspace` →
+focus → settle → read `hypr-active` → judge — and every hop is a place a second
+resume can start. All the state carrying one (`_pendingResumeDecision`,
+`_pendingFocusDecision`, the move's `pending`, the shared verify timer) is
+single-slot, and nothing recorded which resume owned which reply. Resuming two
+apps in quick succession therefore let the first resume's verification judge
+itself against compositor state the second had produced:
+
+```
+origin=resume-workspace address=0x…027310 workspace=2      (Steam)
+origin=resume-workspace address=0x…bdc010 workspace=2      (Plex)
+origin=resume-verify mode=address wanted=0x…027310 active=tv.plex.Plex
+  reason=active-address-mismatch
+origin=resume-abandoned mode=address wanted=0x…027310
+```
+
+Both consolidations were correct; only the bookkeeping crossed. This was latent
+for as long as a miss merely logged — a crossed verification was a spurious
+journal line nobody chased. Giving that branch a *consequence* is what promoted it
+to a bug, which is why the fix ships in the same change.
+
+`AppLifecycleManager._resumeGeneration` is bumped by every `focusByAddress` and
+stamped onto the decision (`resumeFocus.stamp`); each hop drops its work once the
+stamp is no longer current (`resumeFocus.isStale`). Suppression, not cancellation:
+a superseded chain's dispatches were already issued and are harmless — the newer
+resume's own dispatches land after them and win. What must not happen is a stale
+chain reaching a *conclusion*. The drop is silent by design; a resume the user
+replaced is not a fault, and logging it would train us to ignore real
+`resume-verify` lines. An unstamped decision is treated as current, so a caller
+that never opted into generations still works.
+
 **Companion windows (Steam Remote Play).** Launching a game via Remote Play maps
 the live video in a `streaming_client` toplevel while Big Picture stays mapped
 behind it. Enumerated naively that is two apps, and the Steam-looking resume row

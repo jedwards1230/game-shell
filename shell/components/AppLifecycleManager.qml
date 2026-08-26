@@ -74,6 +74,16 @@ Item {
     // next, which is the class of bug this path keeps producing.
     property var _pendingResumeDecision: null
 
+    // Monotonic id for the resume currently allowed to reach a conclusion.
+    // Bumped by every focusByAddress; each decision is stamped with the value
+    // live at its dispatch, and every async hop below drops its work once the
+    // stamp goes stale (resumeFocus.stamp / isStale). Without it, resuming two
+    // apps in quick succession lets the FIRST resume's verification judge itself
+    // against compositor state the SECOND resume produced — which reads as a
+    // focus miss and, since a miss now recovers, bounces the user to the shell
+    // mid-resume.
+    property int _resumeGeneration: 0
+
     // True between a launch being initiated and its window being confirmed
     // mapped — gates windowConfirmed so it fires exactly once per launch and not
     // on every subsequent poll (#193).
@@ -311,6 +321,12 @@ Item {
             return;
         }
 
+        // Claim this resume's generation BEFORE any state is published, so a
+        // resume started while an earlier one is still in flight immediately
+        // invalidates every hop the earlier one has yet to run.
+        root._resumeGeneration = root._resumeGeneration + 1;
+        ResumeFocus.stamp(decision, root._resumeGeneration);
+
         runningAppClass = decision.windowClass;
         // Only an address we actually resolved may be tracked as the foreground
         // window. On the class fallback we deliberately leave it empty (as
@@ -367,7 +383,10 @@ Item {
     // decision and the dispatch without duplicating the selector branch, and so
     // every path that gives up on consolidating still lands in ONE place.
     function _dispatchResumeFocus(decision) {
-        if (!decision)
+        // Stale check here too, not only at the call sites: this is the single
+        // choke point every consolidation path funnels through, so guarding it
+        // means a hop added later cannot reintroduce the race by forgetting to.
+        if (!decision || ResumeFocus.isStale(decision, root._resumeGeneration))
             return;
         if (decision.mode === ResumeFocus.MODE_ADDRESS) {
             focusWindowAddr.addr = decision.address;
@@ -385,7 +404,10 @@ Item {
         onResponseReceived: line => {
             let decision = root._pendingResumeDecision;
             root._pendingResumeDecision = null;
-            if (!decision)
+            // A newer resume has taken over: its own probe is already in flight
+            // and will consolidate + focus ITS target. Consolidating this one's
+            // would move a window the user has since navigated away from.
+            if (!decision || ResumeFocus.isStale(decision, root._resumeGeneration))
                 return;
             let monitors = [];
             try {
@@ -767,7 +789,10 @@ Item {
     // verification are gated on (see assertFullscreen above for why acting here
     // would be wrong).
     function _afterFocusDispatch() {
-        if (!root._pendingFocusDecision)
+        // The stale case returns without arming the timer at all: a superseded
+        // resume has nothing left to verify, and re-arming the SHARED timer here
+        // would push the newer resume's settle interval out by another 400ms.
+        if (!root._pendingFocusDecision || ResumeFocus.isStale(root._pendingFocusDecision, root._resumeGeneration))
             return;
         // Give the compositor one settle interval before reading back. Hyprland
         // applies focus + the on_focus_under_fullscreen swap asynchronously, so
@@ -784,7 +809,7 @@ Item {
         interval: 400
         repeat: false
         onTriggered: {
-            if (root._pendingFocusDecision)
+            if (root._pendingFocusDecision && !ResumeFocus.isStale(root._pendingFocusDecision, root._resumeGeneration))
                 activeWindowProbe.request("hypr-active");
         }
     }
@@ -799,7 +824,14 @@ Item {
         onResponseReceived: line => {
             let decision = root._pendingFocusDecision;
             root._pendingFocusDecision = null;
-            if (!decision)
+            // THE RACE THIS GUARD EXISTS FOR. A superseded resume must never
+            // judge itself against compositor state a NEWER resume produced: the
+            // window it aimed at is legitimately no longer active, so verifyFocus
+            // would call a correct resume a miss and the recovery below would
+            // yank the user out of the app they just switched to. Silent by
+            // design — this is not a fault, it is a resume the user replaced, and
+            // logging it would train us to ignore real `resume-verify` lines.
+            if (!decision || ResumeFocus.isStale(decision, root._resumeGeneration))
                 return;
             let active = {};
             try {

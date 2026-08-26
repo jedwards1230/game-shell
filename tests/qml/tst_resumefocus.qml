@@ -363,4 +363,57 @@ TestCase {
         compare(ResumeFocus.workspaceSelector("games"), "name:games");
         compare(ResumeFocus.workspaceSelector(""), "");
     }
+
+    // --- stamp()/isStale(): superseded-resume suppression -------------------
+    //
+    // A resume is a chain of async hops and every one is a place a second resume
+    // can start. This is the field failure, reduced: two resumes in quick
+    // succession, and the FIRST one's verification running against state the
+    // SECOND one produced. Before generations that read as a focus miss, and
+    // (once a miss started recovering) bounced the user to the shell mid-resume.
+
+    function test_a_stamped_decision_is_current_at_its_own_generation() {
+        var d = ResumeFocus.stamp(ResumeFocus.resolve("0xaaa", "", [_win("0xaaa", "steam")]), 7);
+        compare(d.generation, 7);
+        verify(!ResumeFocus.isStale(d, 7));
+    }
+
+    function test_a_superseded_decision_is_stale() {
+        var first = ResumeFocus.stamp(ResumeFocus.resolve("0xaaa", "", [_win("0xaaa", "steam")]), 1);
+        // A second resume claims the next generation.
+        verify(ResumeFocus.isStale(first, 2), "the earlier resume must be suppressed once a newer one starts");
+    }
+
+    // The exact shape of the observed journal lines: Steam resumed, then Plex
+    // resumed, then Steam's verification arrives to find Plex active. It must be
+    // dropped rather than reported as a miss.
+    function test_the_observed_crossed_verification_is_suppressed() {
+        var windows = [_wsWin("0xsteam", "steam", "4"), _wsWin("0xplex", "tv.plex.Plex", "1")];
+        var steam = ResumeFocus.stamp(ResumeFocus.resolve("0xsteam", "", windows), 1);
+        ResumeFocus.stamp(ResumeFocus.resolve("0xplex", "", windows), 2);
+
+        // Steam's verification would otherwise judge itself against Plex.
+        var wouldMiss = ResumeFocus.verifyFocus(steam, {
+            "class": "tv.plex.Plex",
+            "address": "0xplex"
+        });
+        verify(!wouldMiss.ok, "sanity: without generations this reads as a miss");
+        compare(wouldMiss.reason, ResumeFocus.REASON_ADDRESS_MISMATCH);
+
+        // With generations it never gets that far.
+        verify(ResumeFocus.isStale(steam, 2), "the crossed verification must be dropped before it judges anything");
+    }
+
+    // An unstamped decision must still be acted on — dropping work for a caller
+    // that never opted into generations would be worse than the race.
+    function test_an_unstamped_decision_is_never_stale() {
+        var d = ResumeFocus.resolve("0xaaa", "", [_win("0xaaa", "steam")]);
+        compare(d.generation, undefined);
+        verify(!ResumeFocus.isStale(d, 99));
+    }
+
+    function test_stamp_and_isStale_handle_null_inputs() {
+        compare(ResumeFocus.stamp(null, 3), null);
+        verify(!ResumeFocus.isStale(null, 3));
+    }
 }

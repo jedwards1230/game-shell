@@ -345,6 +345,58 @@ function resolveWorkspaceMove(decision, monitors, runningWindows) {
     };
 }
 
+// === Resume generations (superseded-resume suppression) ===================
+//
+// A resume is not one dispatch but a CHAIN of async hops — decide, read
+// `hypr-monitors`, maybe `movetoworkspace`, focus, wait a settle interval, read
+// `hypr-active`, judge. Every hop is a place a SECOND resume can start, and the
+// state carrying the first one (`_pendingResumeDecision`, `_pendingFocusDecision`,
+// the move's `pending`, the shared verify timer) is single-slot. Nothing recorded
+// which resume owned which reply.
+//
+// Observed in the field (2026-08-25): resuming two apps in quick succession left
+// the first resume's verification to run after the second's `movetoworkspace` had
+// already focused a different window. It judged its own target missing —
+//
+//   origin=resume-verify mode=address wanted=0x…027310 active=tv.plex.Plex
+//     reason=active-address-mismatch
+//   origin=resume-abandoned mode=address wanted=0x…027310
+//
+// — and the recovery path bounced the user back to the shell mid-resume. The
+// consolidation itself was correct BOTH times; only the bookkeeping crossed.
+//
+// Note this became user-visible only once a verified miss started ACTING (the
+// `resumeFailed` recovery). While a miss merely logged, a crossed verification
+// was a spurious journal line nobody chased. Adding a consequence to that branch
+// is what promoted a latent race into a bug — so the two belong in the same
+// change.
+//
+// A resume's generation is stamped on its decision at dispatch time; every later
+// hop drops its work if the stamp is no longer current. Suppression, NOT
+// cancellation: the superseded chain's dispatches were already issued and are
+// harmless (the newer resume's own dispatches land after them and win). What must
+// not happen is a stale chain reaching a CONCLUSION about a compositor state that
+// belongs to a newer one.
+function stamp(decision, generation) {
+    if (!decision)
+        return decision;
+    decision.generation = generation;
+    return decision;
+}
+
+// True when `decision` belongs to a resume that has since been superseded.
+//
+// An UNSTAMPED decision (no `generation`) is deliberately treated as current: the
+// only producers of decisions are resolve() + stamp(), so an unstamped one can
+// only come from a caller that never opted into generations, and silently
+// dropping its work would be a far worse failure than the race this prevents.
+function isStale(decision, generation) {
+    var d = decision || {};
+    if (d.generation === undefined || d.generation === null)
+        return false;
+    return d.generation !== generation;
+}
+
 // Format a workspace NAME as a Hyprland workspace selector.
 //
 // `hypr-clients`/`hypr-monitors` report the workspace *name*. For the ordinary
