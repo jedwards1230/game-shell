@@ -1183,7 +1183,7 @@ reply `error:unsupported on this platform\n`. User-triggered, one-shot
 compositor *actions* (`hyprctl dispatch exec/closewindow`) stay shell-outs in
 the QML. The one exception: on every `openwindow` event the actor itself
 dispatches `focuswindow address:<addr>` + `fullscreen 0 set` to force the new
-window to take over the screen, class-agnostic — see `force_fullscreen` in
+window to take over the screen, class-agnostic — see the workspace assignment in
 `hyprland.rs`. That's a blanket kiosk policy, not a per-app QML decision, so it
 lives in the actor that already owns the event.
 
@@ -2679,7 +2679,7 @@ longer raise the shell overlay over the stream. The gamepad force-quit combo
 `grab`/`release`/`handoff` are the *explicit* presenter switches the shell
 requests. On top of those, the Hyprland actor's `activewindow` event watcher
 drives the presenter *continuously*, mirroring the kiosk fullscreen enforcement
-pattern (`hyprland.rs`'s `enforce_active_fullscreen`). The focused window's
+pattern (`hyprland.rs`'s workspace reconcile). The focused window's
 **input contract** *is* the presenter it selects:
 
 - **empty class** (no toplevel focused — the shell's own layer-shell surface

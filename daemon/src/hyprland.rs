@@ -7,19 +7,25 @@
 //! list, plus active-window / fullscreen change events. User-triggered,
 //! one-shot compositor *actions* (`hyprctl dispatch exec/closewindow`)
 //! deliberately stay shell-outs in the QML. The one exception is kiosk
-//! fullscreen enforcement, class-agnostic and CONTINUOUS: on `openwindow`
-//! [`force_fullscreen`] fullscreens the address the event names (a window
-//! may not have won focus yet at map time — see its doc comment); on
-//! `closewindow`, `movewindowv2`, and `activewindowv2`
-//! [`enforce_active_fullscreen`] re-checks whatever Hyprland now considers
-//! the active window and fullscreens it if the tiler left it windowed. That
-//! second half is what keeps the kiosk invariant "exactly one app fills the
-//! screen" holding *after* a window disappears or the active window changes
-//! for any other reason — not just at launch. This has to live here rather
-//! than in QML because it must react to Hyprland's own event stream — an
-//! event this actor already owns — and it's not a per-app decision QML
-//! makes, it's a blanket compositor policy that also needs to fire even if
-//! Quickshell is slow to start or has crashed.
+//! workspace assignment: on `openwindow` this actor parks the new window on
+//! its app's workspace (see [`crate::workspaces`]), which is what makes the
+//! invariant "exactly one app fills the screen" STRUCTURAL — two apps on
+//! different workspaces cannot share the screen, so there is nothing to
+//! re-assert afterwards.
+//!
+//! This replaced a continuous fullscreen backstop that re-fullscreened
+//! whatever Hyprland considered active on `openwindow`, `closewindow`,
+//! `movewindowv2`, and `activewindowv2`. That backstop resolved its target
+//! from the *active window*, which names a stale toplevel while the shell's
+//! layer surface is on screen — hence the `shell-focus` gate it needed, and
+//! the "launched Steam, Plex came to the front" bug the gate existed to
+//! prevent. Assignment has no such ambiguity: it acts on the address the
+//! event itself names.
+//!
+//! It has to live here rather than in QML because it must react to Hyprland's
+//! own event stream — which this actor already owns — and it must fire even
+//! if Quickshell is slow to start or has crashed, including for windows the
+//! shell never launched (Steam spawns `streaming_client` on its own).
 //!
 //! This REPLACES the `hyprctl clients -j` shell-out in
 //! `components/HyprctlClients.qml` and feeds `AppLifecycleManager.qml`'s
@@ -43,6 +49,7 @@
 
 use crate::protocol::Event;
 use crate::state::Reply;
+use crate::workspaces;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -190,11 +197,13 @@ pub async fn run(
     mut rx: mpsc::Receiver<HyprReq>,
     events_tx: broadcast::Sender<Event>,
     active_window_tx: watch::Sender<String>,
-    shell_focus_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     {
         let events_tx = events_tx.clone();
-        let shell_focus_rx = shell_focus_rx.clone();
+        // Sticky class -> workspace map, owned OUTSIDE the reconnect loop so a
+        // compositor restart (or a dropped event socket) doesn't reshuffle every
+        // app's workspace under the user.
+        let registry = Arc::new(Mutex::new(workspaces::Registry::new()));
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
             // Count consecutive failed (re)connect attempts so a *persistent*
@@ -213,7 +222,7 @@ pub async fn run(
                 match watch_events(
                     events_tx.clone(),
                     active_window_tx.clone(),
-                    shell_focus_rx.clone(),
+                    Arc::clone(&registry),
                 )
                 .await
                 {
@@ -970,7 +979,7 @@ async fn restore(p: &Pending, cause: RevertCause) -> String {
 async fn watch_events(
     events_tx: broadcast::Sender<Event>,
     active_window_tx: watch::Sender<String>,
-    shell_focus_rx: watch::Receiver<bool>,
+    registry: Arc<Mutex<workspaces::Registry>>,
 ) -> Result<()> {
     let dir = socket_dir()?;
     let sock = dir.join(".socket2.sock");
@@ -981,6 +990,13 @@ async fn watch_events(
     // naming the live socket dir on each successful (re)connect makes a stale
     // attach diagnosable from the journal at a glance.
     tracing::info!("hyprland: event listener attached to {}", dir.display());
+    // Adopt windows that are ALREADY mapped. They produced their `openwindow`
+    // before we were listening — on a daemon restart mid-session, or when the
+    // daemon starts after the compositor — so without this they would keep
+    // whatever workspace they happen to share and the kiosk invariant would only
+    // become true again after a reboot. Runs on every (re)connect, because a
+    // reconnect means we were deaf for a while and may have missed opens.
+    reconcile_workspaces(&registry).await;
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
         let Some((event, data)) = line.split_once(">>") else {
@@ -1018,43 +1034,107 @@ async fn watch_events(
             // remainder and may contain commas. Build compact JSON so commas in
             // titles can't break QML parsing.
             "openwindow" => {
-                if let Some(address) = openwindow_address(data) {
-                    let address = address.to_string();
-                    if kiosk_may_enforce(&shell_focus_rx, "openwindow") {
-                        tokio::spawn(async move { force_fullscreen(&address).await });
+                // Park the new window on its app's workspace. This is the ONLY
+                // place the kiosk invariant is maintained now: one class per
+                // workspace means two apps cannot share the screen, so there is
+                // nothing left to re-assert afterwards.
+                //
+                // Note there is no shell-focus gate here, unlike the fullscreen
+                // backstop this replaced. That gate existed because the backstop
+                // resolved its target from Hyprland's *active window*, which names
+                // a stale toplevel while the shell (a layer surface) is on screen —
+                // so it could yank the screen to the wrong app. This resolves its
+                // target from the event's own address and moves it SILENTLY, so it
+                // can neither pick the wrong window nor change what is displayed.
+                if let (Some(address), Some(class)) =
+                    (openwindow_address(data), openwindow_class(data))
+                {
+                    let assigned = registry
+                        .lock()
+                        .expect("workspace registry mutex poisoned")
+                        .assign(class);
+                    if let Some(ws) = assigned {
+                        let cmd = workspaces::move_command(ws, address);
+                        let class = class.to_string();
+                        tokio::spawn(async move {
+                            if let Err(e) = request(&cmd).await {
+                                tracing::warn!(
+                                    "hyprland: failed to park {class} on workspace {ws}: {e}"
+                                );
+                            } else {
+                                tracing::debug!("hyprland: parked {class} on workspace {ws}");
+                            }
+                        });
                     }
                 }
                 let json = parse_openwindow(data);
                 let _ = events_tx.send(Event::HyprOpenWindow(json));
             }
-            // `closewindow>>ADDRESS` — just the window address. Whatever
-            // window Hyprland promotes to active next (if any) needs
-            // re-fullscreening: the tiler reclaims the layout on close and
-            // splits the survivor(s) instead of leaving one fullscreen. This
-            // is the case that used to slip through — fullscreen was only
-            // ever enforced on open.
+            // `closewindow>>ADDRESS` — just the window address. Nothing to
+            // repair: the closing window was alone on its workspace, so there is
+            // no survivor for the tiler to re-split. (Under the stacked model this
+            // arm had to re-fullscreen whatever Hyprland promoted next.)
             "closewindow" => {
-                maybe_enforce_active_fullscreen(&shell_focus_rx, "closewindow");
                 let _ = events_tx.send(Event::HyprCloseWindow(data.trim().to_string()));
-            }
-            // `movewindowv2>>ADDRESS,WORKSPACEID,WORKSPACENAME` — a window
-            // changed workspace, which can leave it (or whatever it displaced)
-            // tiled on either side. No data fields are needed: re-check
-            // whichever window is active now.
-            "movewindowv2" => {
-                maybe_enforce_active_fullscreen(&shell_focus_rx, "movewindowv2");
-            }
-            // `activewindowv2>>ADDRESS` — focus changed for any reason not
-            // already covered above (e.g. a keybind focus-cycle). Re-assert
-            // fullscreen on the newly-active window so the invariant holds
-            // regardless of *why* focus moved.
-            "activewindowv2" => {
-                maybe_enforce_active_fullscreen(&shell_focus_rx, "activewindowv2");
             }
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Park every already-mapped window on its class's workspace.
+///
+/// Idempotent by construction: a window already on the right workspace is moved
+/// to the workspace it is already on, which Hyprland treats as a no-op.
+/// Best-effort throughout — an unreadable client list or a failed dispatch
+/// leaves the window where it is, which is exactly the pre-reconcile state.
+///
+/// Note this reads the CLIENT LIST and feeds the registry from it, rather than
+/// the other way round. That ordering matters on a restart: the live windows are
+/// the ground truth, and the registry is rebuilt to agree with them.
+async fn reconcile_workspaces(registry: &Arc<Mutex<workspaces::Registry>>) {
+    let body = match request("j/clients").await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("hyprland: workspace reconcile skipped, client list unreadable: {e}");
+            return;
+        }
+    };
+    let Ok(Value::Array(clients)) = serde_json::from_str::<Value>(body.trim()) else {
+        return;
+    };
+    for c in clients {
+        let class = c.get("class").and_then(Value::as_str).unwrap_or("").trim();
+        let address = c.get("address").and_then(Value::as_str).unwrap_or("");
+        if class.is_empty() || address.is_empty() {
+            continue;
+        }
+        let assigned = registry
+            .lock()
+            .expect("workspace registry mutex poisoned")
+            .assign(class);
+        let Some(ws) = assigned else {
+            continue;
+        };
+        if let Err(e) = request(&workspaces::move_command(ws, address)).await {
+            tracing::warn!("hyprland: reconcile failed to park {class} on workspace {ws}: {e}");
+        } else {
+            tracing::info!("hyprland: reconciled {class} onto workspace {ws}");
+        }
+    }
+}
+
+/// Extract the window CLASS from an `openwindow` event's raw data
+/// (`ADDRESS,WORKSPACENAME,CLASS,TITLE`), or `None` when the field is missing
+/// or empty.
+///
+/// The class is the app identity the workspace registry keys on, so an empty one
+/// is rejected here rather than downstream: assigning a workspace to a classless
+/// surface would move it somewhere the switcher can never reach.
+fn openwindow_class(data: &str) -> Option<&str> {
+    let class = data.split(',').nth(2)?.trim();
+    (!class.is_empty()).then_some(class)
 }
 
 /// Parse the `openwindow` event data string into a compact JSON object.
@@ -1093,131 +1173,6 @@ fn openwindow_address(data: &str) -> Option<&str> {
 
 /// Kiosk enforcement: force a newly-mapped window to take over the screen,
 /// independent of its class. This exists because the static
-/// `windowrule = fullscreen` effect (`config/hyprland.conf`) only applies if
-/// the new window also wins initial keyboard focus on the same map —
-/// Hyprland gates the static effect on `!m_noInitialFocus` in its own
-/// `onMap()` — and on this kiosk a second app can map while something else
-/// (Quickshell's layer surface, or the previous app) still holds focus, so
-/// the windowrule silently no-ops and the new window lands tiled with
-/// whatever else is on the workspace.
-///
-/// Doing it imperatively here, after the window has already mapped,
-/// sidesteps that race entirely: `focuswindow` resolves the window by
-/// address regardless of who currently has focus, and `fullscreen 0 set`
-/// (not the bare toggle form) is idempotent, so this is safe to fire on
-/// every open even if a window somehow already fullscreened itself. Runs on
-/// its own spawned task so a slow/failed dispatch can't stall the event
-/// reader loop. Best-effort: a failed dispatch (Hyprland socket hiccup, or a
-/// window that closed again before the dispatch reached it) just leaves the
-/// window as Hyprland's own layout put it — never panics, but IS logged so a
-/// pattern of failures (e.g. the request socket going away) is visible
-/// rather than silently swallowed.
-///
-/// This is the open-time half of kiosk fullscreen enforcement; the
-/// continuous half — re-asserting fullscreen after a window closes, moves,
-/// or focus otherwise changes — is [`enforce_active_fullscreen`].
-/// Whether the kiosk fullscreen backstop may act right now.
-///
-/// It may NOT while the shell owns the screen. Both entry points below resolve
-/// their target from Hyprland's *active window* — but the shell is a
-/// wlr-layer-shell surface that never appears there, so while the shell is on
-/// screen `activewindow` still names whatever toplevel was focused last: a
-/// backgrounded, already-fullscreen app. Acting on that is not a harmless no-op,
-/// because [`force_fullscreen`] issues a `dispatch focuswindow` *before*
-/// `fullscreen 0 set` — it would actively yank focus (and the screen) to that
-/// stale window out from under the shell. That is the "launched Steam, Plex came
-/// to the front instead" bug: Plex was prewarmed, held the active-window slot,
-/// and the backstop kept re-fullscreening it.
-///
-/// The shell re-asserts `shell-focus` on a heartbeat, so this gate reopens on
-/// its own once the shell genuinely hands the screen to an app.
-fn kiosk_may_enforce(shell_focus_rx: &watch::Receiver<bool>, event: &str) -> bool {
-    if *shell_focus_rx.borrow() {
-        tracing::debug!(
-            event,
-            "hyprland: kiosk fullscreen backstop skipped — the shell owns the screen"
-        );
-        return false;
-    }
-    true
-}
-
-/// Re-assert fullscreen on whatever window is active, unless the shell owns the
-/// screen ([`kiosk_may_enforce`]). Wraps the gate + spawn so callers stay a
-/// single statement inside their match arm.
-fn maybe_enforce_active_fullscreen(shell_focus_rx: &watch::Receiver<bool>, event: &str) {
-    if kiosk_may_enforce(shell_focus_rx, event) {
-        tokio::spawn(enforce_active_fullscreen());
-    }
-}
-
-async fn force_fullscreen(address: &str) {
-    if let Err(e) = request(&format!("dispatch focuswindow address:{address}")).await {
-        tracing::warn!("hyprland: force_fullscreen: failed to focus {address}: {e}");
-    }
-    if let Err(e) = request("dispatch fullscreen 0 set").await {
-        tracing::warn!("hyprland: force_fullscreen: failed to fullscreen {address}: {e}");
-    }
-}
-
-/// Whether the active-window JSON from `j/activewindow` names a window this
-/// kiosk should force-fullscreen: something is actually focused (`class`
-/// non-empty — an empty document, or an object with no `class`, means
-/// nothing is focused: e.g. the last window just closed and only
-/// Quickshell's layer-shell surface remains, which never appears in
-/// `j/activewindow` at all, so it's naturally exempt from this whole
-/// mechanism) and it isn't already fullscreen. The latter check is what
-/// keeps [`enforce_active_fullscreen`] a true no-op on the common case and
-/// stops it feeding back into its own `fullscreen`/`activewindowv2` events.
-fn needs_fullscreen(v: &Value) -> bool {
-    let focused = v
-        .get("class")
-        .and_then(Value::as_str)
-        .is_some_and(|c| !c.is_empty());
-    focused && !is_fullscreen(v)
-}
-
-/// Continuous kiosk enforcement: ask Hyprland who's active *right now* and
-/// fullscreen it if the tiler left it windowed. Fired after `closewindow`,
-/// `movewindowv2`, and `activewindowv2` — any event where the previously
-/// enforced fullscreen window may have been reclaimed by the tiler (most
-/// visibly: a window closes and Hyprland re-tiles the survivor(s) into a
-/// split instead of leaving one fullscreen).
-///
-/// Unlike [`force_fullscreen`], this has no window address of its own to
-/// act on and deliberately skips the explicit `focuswindow` dispatch — there
-/// is no wrong-window-has-focus race here (the window is already active by
-/// definition), only a wrong-layout one, so a bare `fullscreen 0 set`
-/// suffices. See [`needs_fullscreen`] for the skip conditions.
-async fn enforce_active_fullscreen() {
-    let body = match request("j/activewindow").await {
-        Ok(body) => body,
-        Err(e) => {
-            tracing::debug!("hyprland: enforce_active_fullscreen: activewindow query failed: {e}");
-            return;
-        }
-    };
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let v = match serde_json::from_str::<Value>(trimmed) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(
-                "hyprland: enforce_active_fullscreen: activewindow reply not valid JSON: {e}"
-            );
-            return;
-        }
-    };
-    if !needs_fullscreen(&v) {
-        return;
-    }
-    if let Err(e) = request("dispatch fullscreen 0 set").await {
-        tracing::warn!("hyprland: enforce_active_fullscreen: failed to fullscreen: {e}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,34 +1409,25 @@ mod tests {
     }
 
     #[test]
-    fn needs_fullscreen_true_when_focused_and_windowed() {
-        let v: Value =
-            serde_json::from_str(r#"{"class":"steam","address":"0x1","fullscreen":0}"#).unwrap();
-        assert!(needs_fullscreen(&v));
+    fn openwindow_class_is_the_third_field() {
+        // `openwindow>>ADDRESS,WORKSPACENAME,CLASS,TITLE`; the title is the
+        // remainder and may itself contain commas.
+        assert_eq!(
+            openwindow_class("0x1,2,streaming_client,Red Dead Redemption 2 [Streaming]"),
+            Some("streaming_client")
+        );
+        assert_eq!(
+            openwindow_class("0x1,2,steam,Steam, Big Picture, Mode"),
+            Some("steam")
+        );
     }
 
     #[test]
-    fn needs_fullscreen_false_when_already_fullscreen() {
-        // Both the bool and integer-mode fullscreen encodings must suppress
-        // enforcement — this is the loop-prevention no-op.
-        let v: Value =
-            serde_json::from_str(r#"{"class":"steam","address":"0x1","fullscreen":true}"#).unwrap();
-        assert!(!needs_fullscreen(&v));
-        let v: Value =
-            serde_json::from_str(r#"{"class":"steam","address":"0x1","fullscreen":2}"#).unwrap();
-        assert!(!needs_fullscreen(&v));
-    }
-
-    #[test]
-    fn needs_fullscreen_false_when_nothing_focused() {
-        // Empty object (no active window at all) and an object with an empty
-        // `class` (Hyprland's "nothing focused" shape) both must no-op —
-        // e.g. right after the last window closes and only Quickshell's
-        // layer-shell surface remains.
-        let empty: Value = serde_json::from_str("{}").unwrap();
-        assert!(!needs_fullscreen(&empty));
-        let no_class: Value =
-            serde_json::from_str(r#"{"class":"","address":"","fullscreen":0}"#).unwrap();
-        assert!(!needs_fullscreen(&no_class));
+    fn openwindow_class_rejects_malformed_or_empty() {
+        assert_eq!(openwindow_class(""), None);
+        assert_eq!(openwindow_class("0x1,2"), None);
+        // An empty class must not reach the registry — it would burn a workspace
+        // slot on a surface the user can never switch to.
+        assert_eq!(openwindow_class("0x1,2,,Title"), None);
     }
 }

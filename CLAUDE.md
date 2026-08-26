@@ -326,32 +326,40 @@ The table above reflects the deliberate split: the daemon owns all *reads* of
 system state (D-Bus, Hyprland IPC, Sunshine), while shell-outs remain only for
 write/action commands (`nmcli` join, `wpctl`, `hyprctl dispatch`, `systemctl`).
 
-**Kiosk window model** (single-app-fullscreen contract — see
+**Kiosk window model** (one workspace per app — see
 [docs/KIOSK_WINDOW_MODEL.md](docs/KIOSK_WINDOW_MODEL.md)): the invariant "exactly
 one app window fills the screen; backgrounded apps keep running but never share
-it" is held **declaratively** by `config/hyprland.conf` first — a fresh launch
-maps fullscreen via the QML `[fullscreen]` exec-rule prefix + the
-`windowrule = fullscreen` backstop; a resume swaps fullscreen atomically via
-`misc:on_focus_under_fullscreen = 1`; a close promotes the survivor via
-`misc:exit_window_retains_fullscreen = true`; and `windowrule = suppress_event
-fullscreen maximize` stops apps churning that state themselves. The daemon's
-Hyprland actor is the **single idempotent backstop** on top of those rules
-(`force_fullscreen` on `openwindow`, `enforce_active_fullscreen` on
-`closewindow`/`movewindowv2`/`activewindowv2`, both `fullscreen 0 set`). QML does
-not re-assert fullscreen on **launch** — a non-idempotent `fullscreen 0` toggle
-there used to race the daemon and toggle a resumed window back OUT of
-fullscreen, which produced the two-app split view. On **resume** QML does assert
-it (#347), but only via the idempotent **`fullscreen 0 set`** form the daemon
-uses — never the bare toggle: prewarmed apps map tiled (`[silent]`), so focusing
-one under a fullscreen window changes focus but not the screen, and `set` is a
-no-op when the declarative swap already fired. The resume path also verifies the
-focus actually landed by reading `hypr-active` once (`hyprctl dispatch` exits 0
-even when it matched no window) and logs a `resume`/`resume-verify` trace on a
-miss; the decision logic is pure in `components/resumeFocus.js`. The daemon actor also
-**self-heals its compositor attachment**: it re-resolves the live Hyprland
-instance on each reconnect (`session_env::resolve_hypr_signature` scans
-`$XDG_RUNTIME_DIR/hypr/` before trusting an inherited signature) so a killed +
-restarted Hyprland doesn't leave it silently deaf.
+it" is **structural**. Each app class owns a Hyprland workspace, assigned by the
+daemon's Hyprland actor on `openwindow` (`daemon/src/workspaces.rs`, dispatched
+with `movetoworkspacesilent` so assignment can never steal the screen).
+Workspace 1 is reserved and left EMPTY for the home screen. Two apps on
+different workspaces cannot share a screen, so split view is unrepresentable
+rather than prevented.
+
+**Switching is one primitive**: `hyprctl dispatch workspace N`. Launch, resume,
+and return-to-home all funnel through `AppLifecycleManager.showWorkspace()` /
+`showHome()`, and the decision logic is pure in `components/resumeFocus.js`
+(`resolveTarget` → `workspaceSelector` → `verifyLanding`). Verification is one
+integer: read `hypr-monitors` and compare `activeWorkspace`.
+
+**This replaced a focus-based model, and the reason matters.** `dispatch
+focuswindow` is a *request a window can decline* — a Steam Remote Play
+`streaming_client` window reporting `acceptsInput: false` made the dispatch a
+silent no-op and left a live game unreachable. A workspace switch is a
+compositor-level operation nothing can refuse. Deleted with it:
+`misc:on_focus_under_fullscreen`, `misc:exit_window_retains_fullscreen`, the
+daemon's `force_fullscreen`/`enforce_active_fullscreen` backstop and the
+`shell-focus` watch channel that gated it, and QML's `fullscreen 0 set`
+assertion plus its `hypr-active` verification. With `gaps_in/gaps_out = 0` a
+lone tiled window already fills its workspace, so **do not reintroduce
+fullscreen assertions** — they are not needed and every past bug on this path
+came from one. `windowrule = fullscreen on` and `suppress_event fullscreen
+maximize` remain, but only as cosmetic anti-flash/anti-self-resize measures.
+
+The daemon reconciles on every event-socket (re)connect (reading `j/clients` and
+parking each mapped window), so a daemon restart repairs the layout rather than
+waiting for a reboot.
+
 **Screen ownership is declared, never inferred.** The shell is a
 **wlr-layer-shell surface**, so it never appears in Hyprland's `activewindow` —
 which keeps naming the last-focused *toplevel* (a backgrounded, still-fullscreen
@@ -361,9 +369,11 @@ is the user looking at?". Instead `shell.qml` owns one predicate,
 `WlrLayershell.keyboardFocus` (so "drawn but unfocused" is unrepresentable) and
 is pushed to the daemon as **`shell-focus on|off`** (see
 [docs/IPC_PROTOCOL.md](docs/IPC_PROTOCOL.md)). While the shell owns the screen the
-daemon routes the pad to the shell key-map, suppresses follow-focus, and stands
-the kiosk fullscreen backstop down — the three consumers that previously acted on
-the stale active window. The shell re-asserts it on a ~3s heartbeat, so a missed
+daemon routes the pad to the shell key-map and suppresses follow-focus — the two
+remaining consumers that would otherwise act on the stale active window. (A third,
+the kiosk fullscreen backstop, was deleted along with the focus-based window model
+above; it was the only reader of the `shell-focus` watch channel, which went with
+it.) The shell re-asserts it on a ~3s heartbeat, so a missed
 edge (an app that closes to background, a timed-out launch, a daemon restart)
 self-heals within a tick instead of wedging.
 

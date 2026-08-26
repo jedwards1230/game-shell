@@ -4,6 +4,66 @@ How tv-shell guarantees the kiosk contract on Hyprland, why the previous
 reactive approach kept failing, and how the current implementation makes it
 structural.
 
+> ## ⚠️ 2026-08-26 — the model changed: one workspace per app
+>
+> **Everything below that describes stacking every app on one workspace and
+> maintaining a per-window fullscreen bit is HISTORY.** It is kept because the
+> incidents it records are still the reason the current design looks the way it
+> does, but it no longer describes the code.
+>
+> **What changed.** Each app class now owns its own Hyprland workspace, assigned
+> by the daemon (`daemon/src/workspaces.rs`) on `openwindow` via
+> `movetoworkspacesilent`. Workspace 1 is reserved and left empty for the home
+> screen. Switching apps — on launch, on resume, and on returning home — is one
+> dispatch: `hyprctl dispatch workspace N`.
+>
+> **Why.** The old model's switching primitive was **focus**, and focus is a
+> request a window can decline. Observed in the field: a Steam Remote Play
+> `streaming_client` window sat tiled at half width behind a fullscreen `steam`,
+> reporting `acceptsInput: false`. `dispatch focuswindow address:0x…` returned
+> `ok` and did nothing, so the live game could not be brought back at all — the
+> user saw either a black screen or a bounce to the home screen. The config even
+> documented the gap it could not close: `on_focus_under_fullscreen` "cannot
+> recover a state where BOTH windows are already tiled", which is exactly the
+> state that box was in.
+>
+> `dispatch workspace N` is a compositor-level operation. No window can refuse
+> it, and it cannot half-succeed.
+>
+> **What that deleted.** Four cooperating mechanisms plus their coordination:
+>
+> | Removed | Was for |
+> |---|---|
+> | `misc:on_focus_under_fullscreen` (config) | atomic fullscreen swap on resume |
+> | `misc:exit_window_retains_fullscreen` (config) | promote the survivor on close |
+> | `force_fullscreen` / `enforce_active_fullscreen` (daemon) | reactive backstop on 4 events |
+> | `kiosk_may_enforce` + the `shell-focus` watch channel (daemon) | stop the backstop acting on a stale active window |
+> | `assertFullscreen` + `hypr-active` verification (QML) | resume-path fullscreen guarantee |
+> | workspace consolidation onto the displayed workspace (QML) | pull drifted windows back together |
+>
+> With `gaps_in/gaps_out = 0`, a lone tiled window on its own workspace already
+> fills the screen, so fullscreen stopped being load-bearing at all.
+>
+> **Verification got cheaper and stronger.** "Did the switch land?" is now one
+> integer — read `hypr-monitors`, compare `activeWorkspace`. It used to mean
+> reading `activewindow`, which names a stale backgrounded toplevel the whole
+> time the shell's layer surface is up (the reason `shellOwnsScreen` exists), and
+> an address match could not distinguish "the switch missed" from "the window
+> declined focus".
+>
+> **Split view is now unrepresentable** rather than prevented. Two apps on
+> different workspaces cannot share a screen.
+>
+> **Retained:** `windowrule = fullscreen on` (cosmetic — avoids a brief tiled
+> flash in the window between map and the daemon's silent move) and
+> `windowrule = suppress_event fullscreen maximize` (stops an app floating or
+> shrinking itself). Neither is load-bearing any more.
+>
+> **Self-healing:** the daemon reconciles on every event-socket (re)connect,
+> reading `j/clients` and parking each already-mapped window on its class's
+> workspace — so a daemon restart mid-session repairs the layout instead of
+> waiting for a reboot.
+
 **The contract.** Exactly one app window is visible and fills the screen; the
 shell (Quickshell) sits deterministically above/below it; backgrounded apps
 (Plex HTPC, Steam) keep running but never share the screen. Two app windows must

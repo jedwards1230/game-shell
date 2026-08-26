@@ -312,9 +312,6 @@ pub(crate) fn set_shell_focus(sh: &mut Shared, fleet: &mut Fleet, on: bool) {
         return;
     }
     sh.shell_focus = on;
-    // Publish to the Hyprland actor so the kiosk fullscreen backstop stops
-    // force-focusing a stale active window while the shell owns the screen.
-    let _ = sh.shell_focus_tx.send(on);
     let grab = should_grab(sh.shell_focus, sh.overlay_focus, sh.presenter);
     info!(
         shell_focus = on,

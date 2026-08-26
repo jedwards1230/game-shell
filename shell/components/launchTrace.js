@@ -122,7 +122,7 @@ function logResume(mode, address, windowClass, reason) {
     console.warn(formatResume(mode, address, windowClass, reason));
 }
 
-// Format the post-dispatch focus verification (resumeFocus.js verifyFocus()).
+// Format the post-dispatch landing verification (resumeFocus.js verifyLanding()).
 // `hyprctl dispatch` exits 0 even when its selector matched no window, so this
 // line — not an exit code — is the evidence that a resume actually landed.
 //   wanted — the selector we dispatched (address or class).
@@ -138,31 +138,28 @@ function logFocusMiss(mode, wanted, active, reason) {
     console.warn(formatFocusVerify(mode, wanted, active, reason));
 }
 
-// Format a resume-time workspace consolidation
-// (resumeFocus.js resolveWorkspaceMove()).
-//   address   — the window being pulled onto the displayed workspace.
-//   workspace — the destination, i.e. the workspace actually on screen.
-function formatWorkspaceMove(address, workspace) {
-    return PREFIX + " " + [_field("origin", "resume-workspace"), _field("address", address), _field("workspace", workspace)].join(" ");
+// Format a workspace switch — the one primitive that puts an app on screen
+// (resumeFocus.js resolveTarget() -> AppLifecycleManager.showWorkspace()).
+//   windowClass — the app being shown.
+//   workspace   — the workspace it owns, which is now the displayed one.
+function formatWorkspaceSwitch(windowClass, workspace) {
+    return PREFIX + " " + [_field("origin", "resume-workspace"), _field("class", windowClass), _field("workspace", workspace)].join(" ");
 }
 
-// Logged on EVERY consolidation, not only on a fault — the opposite of
-// logFocusMiss's rule, and deliberately so. A move means the kiosk's
-// single-workspace invariant had already been broken by something OUTSIDE this
-// shell (nothing in tv-shell or the Hyprland config dispatches a workspace
-// change), so each line is evidence about a drift whose cause is still unknown.
-// A silent self-heal would erase exactly the trail needed to find it.
-// `console.log` rather than `warn`: consolidating is correct behaviour, not a
-// fault — the fault is whatever moved the window in the first place.
-function logWorkspaceMove(address, workspace) {
-    console.log(formatWorkspaceMove(address, workspace));
+// Logged on EVERY switch, not only on a fault. A switch is the normal, correct
+// path — the line exists so the sequence of what was put on screen is
+// reconstructable from the journal, which is what turned the Steam-stream bug
+// from four hypotheses into one grep. `console.log` rather than `warn`
+// accordingly.
+function logWorkspaceSwitch(windowClass, workspace) {
+    console.log(formatWorkspaceSwitch(windowClass, workspace));
 }
 
 // Format a resume that was verified NOT to have landed and was therefore
 // abandoned back to the shell (AppLifecycleManager's `resumeFailed` signal).
 //   mode   — the selector mode that was dispatched.
 //   wanted — the selector we aimed at.
-//   reason — the verifyFocus() reason the resume was judged a miss.
+//   reason — the verifyLanding() reason the resume was judged a miss.
 function formatResumeAbandoned(mode, wanted, reason) {
     return PREFIX + " " + [_field("origin", "resume-abandoned"), _field("mode", mode), _field("wanted", wanted), _field("reason", reason)].join(" ");
 }

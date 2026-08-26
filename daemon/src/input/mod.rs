@@ -243,11 +243,6 @@ pub(crate) struct Shared {
     /// re-asserts the truth within one tick. In-memory only.
     shell_focus: bool,
 
-    /// Publishes [`Self::shell_focus`] to the Hyprland actor, whose kiosk
-    /// fullscreen backstop must not force-focus a stale active window while the
-    /// shell owns the screen (see `hyprland::kiosk_may_enforce`).
-    shell_focus_tx: watch::Sender<bool>,
-
     /// Whether our logind session is the foreground (active) one. Maintained by
     /// `Control::SetSessionActive` (the `session` actor). While `false` the
     /// physical `EVIOCGRAB` is dropped on every pad and their events are ignored,
@@ -446,7 +441,6 @@ pub async fn run_supervised(
     config_changed: std::sync::Arc<tokio::sync::Notify>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
     active_window_rx: watch::Receiver<String>,
-    shell_focus_tx: watch::Sender<bool>,
 ) {
     // Bounded respawns: enough to ride out a transient fault, few enough that a
     // hard-looping panic gives up quickly and stays visibly down.
@@ -464,7 +458,6 @@ pub async fn run_supervised(
             std::sync::Arc::clone(&config_changed),
             std::sync::Arc::clone(&metrics),
             active_window_rx.clone(),
-            shell_focus_tx.clone(),
         ))
         .catch_unwind()
         .await;
@@ -549,7 +542,6 @@ pub async fn run(
     config_changed: std::sync::Arc<tokio::sync::Notify>,
     metrics: std::sync::Arc<crate::metrics::Metrics>,
     mut active_window_rx: watch::Receiver<String>,
-    shell_focus_tx: watch::Sender<bool>,
 ) {
     let (internal_tx, mut internal_rx) = mpsc::channel::<Internal>(256);
 
@@ -610,7 +602,6 @@ pub async fn run(
         presenter: Presenter::Shell,
         overlay_focus: false,
         shell_focus: true,
-        shell_focus_tx,
         session_active: true,
         // Per-app contracts + the Meta/combo timing knobs are read once at
         // startup (like every other config.toml section); `global()` is populated

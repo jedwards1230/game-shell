@@ -119,6 +119,11 @@ pub mod power;
 #[cfg(target_os = "linux")]
 pub mod hyprland;
 
+// App -> workspace assignment for the kiosk window model. Pure data + string
+// formatting, so it is NOT Linux-gated: it stays compiled and tested on the
+// cross-platform CI legs even though only `hyprland` dispatches its output.
+pub mod workspaces;
+
 // HDMI-CEC actor (#94): persistent libcec connection via cec-rs. Linux-only AND
 // feature-gated (`cec`) — libcec-sys links a C lib, so default builds exclude it
 // to keep the no-system-C-deps invariant (evdev/zbus/bluer are pure Rust).

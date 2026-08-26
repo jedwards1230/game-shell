@@ -60,19 +60,10 @@ Item {
     // shell.  A stale address here must not suppress future launches.
     property string _foregroundAddress: ""
 
-    // The resumeFocus.js decision for the focus dispatch currently in flight,
-    // held across the async gap so the post-dispatch verification knows what we
-    // were AIMING at (#347). Null when no resume is in flight.
+    // The resumeFocus.js target for the workspace switch currently in flight,
+    // held across the async gap so the post-dispatch verification knows which
+    // workspace we were AIMING at. Null when no resume is in flight.
     property var _pendingFocusDecision: null
-
-    // The decision waiting on the `hypr-monitors` read that precedes a resume's
-    // focus dispatch (workspace consolidation). Distinct from
-    // `_pendingFocusDecision` above because they cover different async gaps:
-    // this one spans decision → workspace read → focus DISPATCH, that one spans
-    // dispatch → verification. Collapsing them into one property would make a
-    // verification arriving late for one resume clear the pending state of the
-    // next, which is the class of bug this path keeps producing.
-    property var _pendingResumeDecision: null
 
     // Monotonic id for the resume currently allowed to reach a conclusion.
     // Bumped by every focusByAddress; each decision is stamped with the value
@@ -274,26 +265,16 @@ Item {
         }
     }
 
+    // Resume by class alone — the "focus this recent app" path, which holds a
+    // desktop entry rather than a specific window.
+    //
+    // Now a thin delegation to focusByAddress: with the workspace as the
+    // switching primitive, class and address differ only in HOW the target window
+    // is found, never in what is dispatched afterwards. They used to be separate
+    // code paths with separate Processes and subtly different verification, which
+    // is precisely how the class path ended up the weaker of the two.
     function focusApp(windowClass) {
-        runningAppClass = windowClass;
-        // Resuming an existing window (not a fresh launch): clear in-flight launch
-        // tracking so a delayed closewindow for a PRIOR launch's address can't
-        // fire appClosed() on this app (#203). No address is known here, so the
-        // poll fallback handles this window's eventual close.
-        root._foregroundAddress = "";
-        root._awaitingWindow = false;
-        // A deliberate class-targeted focus (not an address-miss fallback), so
-        // no `reason` — but it still gets the same post-dispatch fullscreen
-        // assertion + landing verification as every other resume (#347).
-        root._pendingFocusDecision = {
-            mode: ResumeFocus.MODE_CLASS,
-            address: "",
-            windowClass: windowClass,
-            reason: ""
-        };
-        focusWindow.windowClass = windowClass;
-        focusWindow.running = true;
-        appLaunched();
+        focusByAddress("", windowClass);
     }
 
     // Address-based focus/close for the per-window home cards. Each running
@@ -308,16 +289,16 @@ Item {
     // hypotheses to corner. Callers that hold the row's class now pass it so the
     // miss degrades to a class-targeted focus instead of vanishing.
     function focusByAddress(address, windowClass) {
-        // The decision itself is pure and headlessly tested (resumeFocus.js) —
-        // this function only carries it out.
-        let decision = ResumeFocus.resolve(address, windowClass, runningWindows);
+        // The decision is pure and headlessly tested (resumeFocus.js) — this
+        // function only carries it out.
+        let target = ResumeFocus.resolveTarget(address, windowClass, runningWindows);
 
-        if (decision.mode === ResumeFocus.MODE_NONE) {
-            // The former silent `return`. There is genuinely nothing to focus
-            // (unknown address AND no class), but that is a FINDING, not a
-            // no-op — log it so the next occurrence costs a grep, not a
+        if (!ResumeFocus.canDispatch(target)) {
+            // Nothing to switch to. That is a FINDING, not a no-op: the row the
+            // user pressed came from a window model that no longer matches the
+            // compositor. Log it so the next occurrence costs a grep, not a
             // four-hypothesis investigation.
-            LaunchTrace.logResume(decision.mode, decision.address, decision.windowClass, decision.reason);
+            LaunchTrace.logResume("workspace", target.address, target.windowClass, target.reason);
             return;
         }
 
@@ -325,142 +306,68 @@ Item {
         // resume started while an earlier one is still in flight immediately
         // invalidates every hop the earlier one has yet to run.
         root._resumeGeneration = root._resumeGeneration + 1;
-        ResumeFocus.stamp(decision, root._resumeGeneration);
+        ResumeFocus.stamp(target, root._resumeGeneration);
 
-        runningAppClass = decision.windowClass;
-        // Only an address we actually resolved may be tracked as the foreground
-        // window. On the class fallback we deliberately leave it empty (as
-        // focusApp does): claiming an address we could not verify would let a
-        // later closewindow for it fire appClosed() on the wrong app (#203).
-        root._foregroundAddress = (decision.mode === ResumeFocus.MODE_ADDRESS) ? decision.address : "";
+        runningAppClass = target.windowClass;
+        root._foregroundAddress = target.address;
         root._awaitingWindow = false;
-        root._pendingFocusDecision = decision;
+        root._pendingFocusDecision = target;
 
-        if (decision.mode !== ResumeFocus.MODE_ADDRESS) {
-            // Falling back off the precise path is worth a line: it means the
-            // window model the UI rendered from no longer matches the compositor.
-            LaunchTrace.logResume(decision.mode, decision.address, decision.windowClass, decision.reason);
-        }
-
-        // CONSOLIDATE BEFORE FOCUSING. `dispatch focuswindow` does not reliably
-        // follow across workspaces (hyprwm/Hyprland#1611), so if the target has
-        // drifted off the displayed workspace, focusing it changes nothing that
-        // is on screen — and because the shell unmaps on `appLaunched()` below,
-        // "nothing on screen" is a BLACK TV, not a visible no-op. Read the
-        // displayed workspace first and pull the window onto it; the decision is
-        // pure and tested (resumeFocus.resolveWorkspaceMove).
+        // ONE dispatch, and it is the same one a launch uses (see showWorkspace).
+        // No workspace consolidation, no focuswindow, no fullscreen assertion:
+        // the target already owns a workspace, and putting that workspace on
+        // screen is the entire operation.
         //
-        // The focus dispatch is therefore deferred into the probe's reply
-        // handler rather than issued here. On ANY failure to establish the
-        // workspaces the handler focuses immediately anyway, so the worst case is
-        // exactly the pre-change behaviour plus one local-socket round trip.
-        //
-        // ORDERING IS LOAD-BEARING — `appLaunched()` MUST stay ahead of the move.
-        // Consolidation deliberately raises the number of toplevels sharing one
-        // workspace, which is the exact condition the tiler splits on, so it
-        // depends on the daemon's kiosk backstop re-fullscreening the moved
-        // window (`movewindowv2` -> `enforce_active_fullscreen`, hyprland.rs).
-        // That backstop is GATED: `kiosk_may_enforce` refuses to act while
-        // `shell-focus` is on, because the shell is a layer-shell surface and
-        // Hyprland's `activewindow` would still name a backgrounded app.
-        //
-        // `appLaunched()` is what closes that gate: it drives shell.qml's
-        // `shellOwnsScreen` false, which pushes `shell-focus off` synchronously
-        // in this same tick — whereas the move below cannot happen until an async
-        // socket reply arrives. So the gate is already open when `movewindowv2`
-        // fires. Move `appLaunched()` after the focus dispatch (a tempting way to
-        // keep the shell up over the transition) and the gate is still CLOSED
-        // when the move lands: the backstop skips, and two tiled windows sit
-        // there until the verified assert 400ms later. That is a visible split
-        // view — incident 1 in KIOSK_WINDOW_MODEL.md, reintroduced.
-        root._pendingResumeDecision = decision;
-        workspaceProbe.request("hypr-monitors");
+        // Ordering note, because the previous implementation had a load-bearing
+        // one: consolidation raised the number of toplevels sharing a workspace
+        // and leaned on a daemon fullscreen backstop gated on `shell-focus`, so
+        // `appLaunched()` had to run BEFORE the move or a split view appeared.
+        // A workspace switch has no such coupling — neither call depends on the
+        // other's timing.
+        showWorkspace(target);
         appLaunched();
     }
 
-    // Carry out a resolved decision's focus dispatch. Split out of
-    // focusByAddress so the workspace-consolidation step can sit between the
-    // decision and the dispatch without duplicating the selector branch, and so
-    // every path that gives up on consolidating still lands in ONE place.
-    function _dispatchResumeFocus(decision) {
-        // Stale check here too, not only at the call sites: this is the single
-        // choke point every consolidation path funnels through, so guarding it
-        // means a hop added later cannot reintroduce the race by forgetting to.
-        if (!decision || ResumeFocus.isStale(decision, root._resumeGeneration))
+    // Put a resolved target's workspace on screen. THE switching primitive:
+    // launch, resume, and "go home" all funnel through here, which is why they no
+    // longer have separate failure modes to debug.
+    function showWorkspace(target) {
+        if (!ResumeFocus.canDispatch(target))
             return;
-        if (decision.mode === ResumeFocus.MODE_ADDRESS) {
-            focusWindowAddr.addr = decision.address;
-            focusWindowAddr.running = true;
-        } else {
-            focusWindow.windowClass = decision.windowClass;
-            focusWindow.running = true;
-        }
+        LaunchTrace.logWorkspaceSwitch(target.windowClass, target.workspace);
+        switchWorkspace.command = ["hyprctl", "dispatch", "workspace", ResumeFocus.workspaceSelector(target.workspace)];
+        switchWorkspace.running = true;
     }
 
-    // Reads `hypr-monitors` to learn which workspace is actually on screen, then
-    // consolidates the resume target onto it before focusing.
-    SocketClient {
-        id: workspaceProbe
-        onResponseReceived: line => {
-            let decision = root._pendingResumeDecision;
-            root._pendingResumeDecision = null;
-            // A newer resume has taken over: its own probe is already in flight
-            // and will consolidate + focus ITS target. Consolidating this one's
-            // would move a window the user has since navigated away from.
-            if (!decision || ResumeFocus.isStale(decision, root._resumeGeneration))
-                return;
-            let monitors = [];
-            try {
-                monitors = JSON.parse(line) || [];
-            } catch (e) {
-                // A malformed reply establishes nothing, so it must not produce a
-                // move — an empty list is the fail-safe input that makes
-                // resolveWorkspaceMove return move:false.
-                monitors = [];
-            }
-            let plan = ResumeFocus.resolveWorkspaceMove(decision, monitors, root.runningWindows);
-            if (!plan.move) {
-                root._dispatchResumeFocus(decision);
-                return;
-            }
-            // Move first, focus in its onExited — sequencing them matters:
-            // Hyprland applies a workspace move asynchronously, and a focus
-            // dispatched alongside it can resolve against the window's OLD
-            // placement. The move dispatcher also focuses what it moved, so the
-            // follow-up focus is usually redundant; it is kept because "usually"
-            // is not the standard the rest of this path is held to, and because
-            // the verification below is gated on having dispatched a focus we can
-            // name.
-            LaunchTrace.logWorkspaceMove(plan.address, plan.workspace);
-            moveToWorkspace.pending = decision;
-            moveToWorkspace.command = ["hyprctl", "dispatch", "movetoworkspace", ResumeFocus.workspaceSelector(plan.workspace) + ",address:" + plan.address];
-            moveToWorkspace.running = true;
-        }
-        onRequestFailed: {
-            let decision = root._pendingResumeDecision;
-            root._pendingResumeDecision = null;
-            // Can't read the displayed workspace, so we cannot know whether a
-            // move is needed OR where to move to. Focus anyway: that is the
-            // behaviour this path had before consolidation existed, and a resume
-            // that might work beats one that certainly does not.
-            root._dispatchResumeFocus(decision);
-        }
+    // Show the reserved, deliberately EMPTY home workspace. Mirrors
+    // `workspaces::HOME_WORKSPACE` in the daemon, which never hands workspace 1
+    // to an app.
+    //
+    // Unverified on purpose, unlike a resume: there is no window to land on, so
+    // there is nothing a read-back could disprove — and the shell's own surface
+    // is what the user sees either way.
+    function showHome() {
+        // Invalidate any resume still in flight FIRST. Without this, a resume
+        // whose verification is still pending would read back workspace 1, judge
+        // itself a miss, and call resumeFailed() — which routes straight back
+        // into returnToShell() and showHome() again. Bumping the generation
+        // makes every outstanding hop drop its work (resumeFocus.isStale), and
+        // clearing the pending target stops _afterSwitchDispatch below from
+        // arming a verification for a switch that has no window to land on.
+        root._resumeGeneration = root._resumeGeneration + 1;
+        root._pendingFocusDecision = null;
+        switchWorkspace.command = ["hyprctl", "dispatch", "workspace", "1"];
+        switchWorkspace.running = true;
     }
 
     Process {
-        id: moveToWorkspace
-        property var pending: null
+        id: switchWorkspace
         command: ["true"]
         onExited: {
-            // Deliberately NOT gated on the exit code. `hyprctl dispatch` exits 0
-            // whether or not its selector matched (the same property that made
-            // #347 invisible), so the code carries no information — and a move
-            // that silently did nothing is precisely the case that still needs
-            // the focus attempt. The `hypr-active` verification below is what
-            // actually reports whether the resume landed.
-            let decision = moveToWorkspace.pending;
-            moveToWorkspace.pending = null;
-            root._dispatchResumeFocus(decision);
+            // Deliberately NOT gated on the exit code: `hyprctl dispatch` exits 0
+            // even when it did nothing (the same property that made #347
+            // invisible). The workspace read-back is what reports the landing.
+            root._afterSwitchDispatch();
         }
     }
 
@@ -714,170 +621,92 @@ Item {
         }
     }
 
-    Process {
-        id: focusWindowAddr
-        property string addr: ""
-        command: ["hyprctl", "dispatch", "focuswindow", "address:" + addr]
-        onExited: exitCode => {
-            // A failed focuswindow (the target vanished mid-resume) means the app
-            // is gone. Note this catches only a HARD failure — `hyprctl dispatch`
-            // exits 0 even when its selector matched nothing, so a zero exit is
-            // NOT evidence the resume landed; _afterFocusDispatch owns that.
-            if (exitCode !== 0 && root.shellState === "appRunning") {
-                root._pendingFocusDecision = null;
-                root.appClosed();
-                return;
-            }
-            root._afterFocusDispatch();
-        }
-    }
-
-    // === Kiosk fullscreen assertion for a resume (#347) ===
+    // Runs after the workspace dispatch returns. It does NOT judge — it only
+    // schedules the single read-back.
     //
-    // TOGGLE vs SET — the distinction this whole component got wrong once before.
-    // #308 removed a client-side `hyprctl dispatch fullscreen 0` from the resume
-    // path, and that removal was CORRECT: the bare form is a TOGGLE. Fired at an
-    // already-fullscreen window it flips it back OUT of fullscreen, which — with
-    // a second app backgrounded — let the tiler split the screen. Because it
-    // raced Hyprland's own on_focus_under_fullscreen swap, whether it helped or
-    // broke things depended on who won, i.e. it was non-deterministic
-    // (docs/KIOSK_WINDOW_MODEL.md, incident 1).
-    //
-    // `fullscreen 0 set` is the IDEMPOTENT form: it SETS fullscreen state rather
-    // than inverting it, so issuing it against a window that is already
-    // fullscreen is a no-op instead of a regression. That is precisely why the
-    // daemon's own enforcement (`force_fullscreen` / `enforce_active_fullscreen`
-    // in daemon/src/hyprland.rs) uses this exact form on every openwindow,
-    // closewindow, movewindowv2 and activewindowv2 — this matches that idiom
-    // rather than reintroducing a competing one. Two idempotent writers of the
-    // same state cannot race into a wrong result the way a toggle and a setter
-    // could.
-    //
-    // WHY QML NEEDS IT AT ALL, given the daemon backstop: prewarmed apps map
-    // TILED (the `[silent]` exec rule, #238) while foreground apps map fullscreen.
-    // Focusing a tiled window that sits UNDER a fullscreen one changes focus but
-    // not what is on screen, so the resume appears to do nothing. The declarative
-    // on_focus_under_fullscreen swap plus the daemon's activewindowv2 backstop
-    // are supposed to promote it; when they miss, the resumed window is
-    // focused-but-invisible and nothing else ever corrects it. This is the
-    // resume-path guarantee that closes that gap — and being idempotent, it costs
-    // nothing when they did fire.
-    //
-    // ORDERING REQUIREMENT — THIS DISPATCH MUST NOT BE MOVED EARLIER.
-    // `fullscreen 0 set` takes NO window selector: it acts on whatever is ACTIVE
-    // when it runs (measured on-device — with nothing active it prints "Window
-    // not found" and still exits 0, so it cannot even report having hit the wrong
-    // thing). Hyprland applies focus asynchronously, so at the moment the focus
-    // Process returns, the active window may still be the PREVIOUS one — firing
-    // this there would fullscreen that previous window. In the #347 scenario
-    // (resume a tiled Plex while a fullscreen Steam is active) that re-asserts
-    // fullscreen on STEAM, i.e. reproduces the bug. Idempotence does not save it:
-    // `set` is idempotent in which STATE it applies, not which WINDOW.
-    //
-    // It is therefore fired ONLY from the verified `hypr-active` read below,
-    // where the compositor has confirmed our intended window is the active one —
-    // which makes "act on the active window" provably correct rather than a race.
-    // The cost is one settle interval before the window goes fullscreen. That
-    // delay is the correctness mechanism, not latency to be tuned away.
-    Process {
-        id: assertFullscreen
-        command: ["hyprctl", "dispatch", "fullscreen", "0", "set"]
-    }
-
-    // Runs after a focus dispatch returns. It does NOT act — it only schedules the
-    // single read-back that both the fullscreen assertion and the landing
-    // verification are gated on (see assertFullscreen above for why acting here
-    // would be wrong).
-    function _afterFocusDispatch() {
+    // There is no fullscreen assertion here any more, and that is the point. The
+    // old resume path had to fire a selectorless `fullscreen 0 set`, which meant
+    // it first had to PROVE the intended window was active (a `hypr-active` read
+    // with a 400ms settle) or risk fullscreening somebody else's window — the
+    // #347 bug. One window per workspace with `gaps_in/gaps_out = 0` already
+    // fills the screen, so the dispatch, the proof it needed, and the class of
+    // bug it could cause are all gone together.
+    function _afterSwitchDispatch() {
         // The stale case returns without arming the timer at all: a superseded
         // resume has nothing left to verify, and re-arming the SHARED timer here
         // would push the newer resume's settle interval out by another 400ms.
         if (!root._pendingFocusDecision || ResumeFocus.isStale(root._pendingFocusDecision, root._resumeGeneration))
             return;
-        // Give the compositor one settle interval before reading back. Hyprland
-        // applies focus + the on_focus_under_fullscreen swap asynchronously, so
-        // querying immediately would report the PREVIOUS active window and cry
-        // wolf on every successful resume. This is a single delayed read, NOT a
-        // retry loop — one verification is enough to turn an invisible failure
-        // into a greppable line, and polling the compositor to death would be a
-        // worse bug than the one being fixed.
-        focusVerifyTimer.restart();
+        // Give the compositor one settle interval before reading back — Hyprland
+        // applies a workspace switch asynchronously. A single delayed read, NOT a
+        // retry loop: one verification turns an invisible failure into a
+        // greppable line, and polling the compositor would be a worse bug than
+        // the one being fixed.
+        workspaceVerifyTimer.restart();
     }
 
     Timer {
-        id: focusVerifyTimer
+        id: workspaceVerifyTimer
         interval: 400
         repeat: false
         onTriggered: {
             if (root._pendingFocusDecision && !ResumeFocus.isStale(root._pendingFocusDecision, root._resumeGeneration))
-                activeWindowProbe.request("hypr-active");
+                workspaceVerifyProbe.request("hypr-monitors");
         }
     }
 
-    // Reads the daemon's `hypr-active` IPC (docs/IPC_PROTOCOL.md). This one read
-    // answers BOTH questions the exit code cannot: did the focus dispatch land,
-    // and is it therefore safe to fullscreen "the active window"? Both decisions
-    // are pure (resumeFocus.js) and headlessly tested — this handler only carries
-    // them out.
+    // Reads the daemon's `hypr-monitors` IPC (docs/IPC_PROTOCOL.md) and compares
+    // ONE INTEGER: is the workspace we switched to the one on screen?
+    //
+    // This replaced a `hypr-active` read that compared window addresses. That was
+    // both harder and weaker: `activewindow` names a stale backgrounded toplevel
+    // the whole time the shell's layer surface is up, and an address match could
+    // not distinguish "the switch missed" from "the window declined focus" —
+    // which is exactly the `acceptsInput: false` case that made a live Steam
+    // stream unreachable.
     SocketClient {
-        id: activeWindowProbe
+        id: workspaceVerifyProbe
         onResponseReceived: line => {
             let decision = root._pendingFocusDecision;
             root._pendingFocusDecision = null;
             // THE RACE THIS GUARD EXISTS FOR. A superseded resume must never
             // judge itself against compositor state a NEWER resume produced: the
-            // window it aimed at is legitimately no longer active, so verifyFocus
-            // would call a correct resume a miss and the recovery below would
-            // yank the user out of the app they just switched to. Silent by
-            // design — this is not a fault, it is a resume the user replaced, and
-            // logging it would train us to ignore real `resume-verify` lines.
+            // workspace it aimed at is legitimately no longer displayed, so the
+            // recovery below would yank the user out of the app they just
+            // switched to. Silent by design — this is not a fault, it is a resume
+            // the user replaced, and logging it would train us to ignore real
+            // `resume-verify` lines.
             if (!decision || ResumeFocus.isStale(decision, root._resumeGeneration))
                 return;
-            let active = {};
+            let monitors = [];
             try {
-                active = JSON.parse(line) || {};
+                monitors = JSON.parse(line) || [];
             } catch (e) {
-                // A malformed reply is itself a failed verification — fall
-                // through with an empty object so it logs rather than throwing.
-                active = {};
+                // A malformed reply establishes nothing — fall through with an
+                // empty list so it reports "cannot verify" rather than throwing.
+                monitors = [];
             }
-            // Fullscreen FIRST, gated on the read: only now is the active window
-            // known to be the one we aimed at, which is what makes a selectorless
-            // `fullscreen 0 set` safe (see assertFullscreen above — a miss here
-            // would fullscreen somebody else's window).
-            let fs = ResumeFocus.shouldAssertFullscreen(decision, active);
-            if (fs.assert && !assertFullscreen.running)
-                assertFullscreen.running = true;
-            let res = ResumeFocus.verifyFocus(decision, active);
-            if (!res.ok) {
-                let wanted = decision.mode === ResumeFocus.MODE_ADDRESS ? decision.address : decision.windowClass;
-                LaunchTrace.logFocusMiss(decision.mode, wanted, active["class"] || "", res.reason);
-                // RECOVER, don't just record. Until now this branch logged and
-                // returned — but by this point `appLaunched()` has already put
-                // the shell in `appRunning` and UNMAPPED its surface, so a resume
-                // that provably did not land leaves the TV showing whatever is
-                // beneath: the previous app, or (the reported bug) nothing at
-                // all. The user's only escape was the Home button, on a screen
-                // giving no indication it would do anything.
-                //
-                // Consolidation above should make this rare; that is exactly why
-                // it is safe to act on. Falling back to the shell is the
-                // conservative move — the shell is always renderable, and the
-                // resume row is still right there to try again.
-                if (root.shellState === "appRunning") {
-                    LaunchTrace.logResumeAbandoned(decision.mode, wanted, res.reason);
-                    root.resumeFailed();
-                }
+            let res = ResumeFocus.verifyLanding(decision, monitors);
+            if (res.landed)
+                return;
+            LaunchTrace.logFocusMiss("workspace", decision.workspace, ResumeFocus.activeWorkspaceOf(monitors), res.reason);
+            // RECOVER, don't just record: by this point `appLaunched()` has put
+            // the shell in `appRunning` and UNMAPPED its surface, so a resume that
+            // provably did not land leaves the TV showing whatever is beneath.
+            //
+            // But ONLY on a real miss. An unreadable probe is not evidence the
+            // resume failed, and bouncing the user home over a socket hiccup
+            // would be its own bug (isRealMiss draws that line).
+            if (ResumeFocus.isRealMiss(res) && root.shellState === "appRunning") {
+                LaunchTrace.logResumeAbandoned("workspace", decision.workspace, res.reason);
+                root.resumeFailed();
             }
         }
         onRequestFailed: {
             root._pendingFocusDecision = null;
-            // Can't verify — so we also do NOT assert fullscreen: with no read of
-            // who is active, a selectorless `fullscreen 0 set` is a guess, and the
-            // wrong guess is #347. The daemon's activewindowv2 backstop remains.
             // The resume may well have worked; what failed is our ability to
-            // confirm it.
-            console.warn("AppLifecycleManager: hypr-active probe failed; resume landing unverified, fullscreen not asserted");
+            // confirm it. Nothing is asserted on the strength of a failed read.
+            console.warn("AppLifecycleManager: hypr-monitors probe failed; resume landing unverified");
         }
     }
 
@@ -925,6 +754,26 @@ Item {
                     }
                     root._launchedApps = tracked;
 
+                    // BRING THE LAUNCHED APP TO THE FRONT.
+                    //
+                    // Required now, and it was not before. The daemon parks every
+                    // new window on its app's workspace with
+                    // `movetoworkspacesilent` (daemon/src/workspaces.rs) — silent
+                    // precisely so a prewarmed background app can never steal the
+                    // screen. A foreground launch therefore has to ASK for the
+                    // screen, which it does with the same switch a resume uses.
+                    //
+                    // Under the old stacked model this was implicit: the window
+                    // mapped fullscreen on the one workspace and took the screen
+                    // whether or not anybody wanted it to, which is why a
+                    // prewarmed app occasionally appeared unbidden.
+                    root.showWorkspace({
+                        address: clients[i]["address"] || "",
+                        windowClass: clients[i]["class"],
+                        workspace: clients[i]["workspace"] || "",
+                        reason: ""
+                    });
+
                     // New window mapped — hide the launch overlay (#193).
                     root._confirmWindow();
                     break;
@@ -951,23 +800,6 @@ Item {
         }
     }
 
-    Process {
-        id: focusWindow
-        property string windowClass: ""
-        command: ["hyprctl", "dispatch", "focuswindow", "class:" + windowClass]
-        onExited: exitCode => {
-            // See focusWindowAddr above. A class selector is the WEAKER of the
-            // two — `class:` matching nothing still exits 0 — so the
-            // _afterFocusDispatch verification matters most on this path.
-            if (exitCode !== 0 && root.shellState === "appRunning") {
-                root._pendingFocusDecision = null;
-                root.appClosed();
-                return;
-            }
-            root._afterFocusDispatch();
-        }
-    }
-
     function _handleWindowQueryResult(clients) {
         let app = _pendingApp;
         if (!app)
@@ -976,10 +808,9 @@ Item {
 
         for (let i = 0; i < clients.length; i++) {
             if (WindowMatcher.matchesApp(app, clients[i])) {
-                root.runningAppClass = clients[i]["class"];
-                focusWindow.windowClass = clients[i]["class"];
-                focusWindow.running = true;
-                appLaunched();
+                // Already running: resume it rather than launching a second copy.
+                // focusByAddress calls appLaunched() itself.
+                focusByAddress(clients[i]["address"] || "", clients[i]["class"]);
                 return;
             }
         }
@@ -1029,7 +860,7 @@ Item {
                     // has always carried it and this poller has always dropped
                     // it — which is why the resume path had no way to notice a
                     // window had drifted off the displayed workspace. It is the
-                    // input to resumeFocus.resolveWorkspaceMove().
+                    // input to resumeFocus.resolveTarget().
                     workspace: c["workspace"] || "",
                     title: c["title"] || cls,
                     name: appName,
