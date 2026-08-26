@@ -198,6 +198,52 @@ TestCase {
         compare(AudioOwnership.desiredMutedIds(nodes, [], "1").length, 2);
     }
 
+    // --- shell-owned audio ---------------------------------------------------
+
+    // The Settings ▸ Audio speaker test execs `pw-play`, which has no window and
+    // so attributes to nothing. Without the exemption it would be muted as an
+    // orphan and the user would press "test the centre channel" and hear
+    // silence — intermittently, since it only bites when a cycle happens to run
+    // while the tone plays.
+    function _tone() {
+        return {
+            id: "120",
+            binary: "pw-play",
+            appName: "pw-play",
+            nodeName: "pw-play",
+            mediaName: "tv-shell-tone.wav"
+        };
+    }
+
+    function test_shell_speaker_test_is_never_muted() {
+        verify(AudioOwnership.isShellOwned(_tone()));
+        // On home, where everything else goes quiet.
+        compare(AudioOwnership.desiredMutedIds([_tone()], fleet, "1"), []);
+        // ...and while an app is displayed.
+        compare(AudioOwnership.desiredMutedIds([_tone()], fleet, "3"), []);
+    }
+
+    // The exemption must not survive into the app streams around it.
+    function test_shell_exemption_does_not_spare_app_audio() {
+        let muted = AudioOwnership.desiredMutedIds([_tone(), _plexNode("70")], fleet, "1");
+        compare(muted, ["70"]);
+    }
+
+    // Matched EXACTLY, so the exemption cannot quietly widen the way the fuzzy
+    // relatedness test would let it.
+    function test_shell_exemption_is_an_exact_binary_match() {
+        let lookalike = {
+            id: "121",
+            binary: "pw-playback-helper",
+            appName: "x",
+            nodeName: "x",
+            mediaName: "x"
+        };
+        verify(!AudioOwnership.isShellOwned(lookalike));
+        verify(!AudioOwnership.isShellOwned(_plexNode()));
+        verify(!AudioOwnership.isShellOwned(null));
+    }
+
     // --- nodesFrom -----------------------------------------------------------
 
     // Only an app's own sink-inputs are ever candidates. A bug that let a SINK

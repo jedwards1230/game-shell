@@ -197,6 +197,9 @@ ShellRoot {
         id: workspaceAudioMuter
         activeWorkspace: appLifecycle.displayedWorkspace
         runningWindows: appLifecycle.runningWindows
+        // A freshness gate, not the predicate — see the component. The window
+        // list it reasons over is only refreshed in these states.
+        shellState: root.state
     }
 
     function _resetIdleTimer() {

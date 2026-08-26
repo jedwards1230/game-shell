@@ -88,6 +88,30 @@
 // silences the wrong app. Both sides must clear it.
 var MIN_TOKEN_LENGTH = 3;
 
+// Playback the SHELL ITSELF produces, which this policy must never touch.
+//
+// This is not a per-app allowlist creeping back in — it is the opposite end of
+// the problem. The rule above is about APPS, and an app is a thing with a
+// window. The Settings ▸ Audio speaker test (`AudioSettings.qml`) execs
+// `pw-play` to play a test tone; it has no window by construction, so it
+// attributes to nothing and would be muted as an orphan. The user would press
+// "test the centre channel" and hear silence — an intermittent, miserable bug,
+// since it only bites when a cycle happens to run while the tone plays.
+//
+// Matched EXACTLY against `application.process.binary`, not by the fuzzy
+// relatedness test, so this cannot quietly widen.
+var SHELL_OWNED_BINARIES = ["pw-play"];
+
+// Is this node the shell's own audio rather than an app's?
+function isShellOwned(node) {
+    var binary = _lc((node || {}).binary);
+    for (var i = 0; i < SHELL_OWNED_BINARIES.length; i++) {
+        if (binary === SHELL_OWNED_BINARIES[i])
+            return true;
+    }
+    return false;
+}
+
 function _s(v) {
     return (v === undefined || v === null) ? "" : ("" + v);
 }
@@ -206,6 +230,8 @@ function desiredMutedIds(nodes, runningWindows, activeWorkspace) {
     var muted = [];
     var list = nodes || [];
     for (var j = 0; j < list.length; j++) {
+        if (isShellOwned(list[j]))
+            continue;
         var owner = ownerClassOf(list[j], classes);
         var onScreen = owner !== "" && workspaceOf[owner] === ws;
         if (!onScreen)

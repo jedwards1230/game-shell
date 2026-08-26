@@ -131,6 +131,33 @@ it (the window is gone), loose credits it to `steam` via `"Steam"`, and it is
 muted everywhere except the Steam workspace. Running strict first is what stops
 the loose pass from stealing a live stream away from its own workspace.
 
+### Where the rule deliberately stands down
+
+Two exemptions, both narrow and both load-bearing:
+
+- **The shell's own audio.** Settings ▸ Audio's speaker test execs `pw-play`,
+  which has no window and so attributes to nothing — it would be muted as an
+  orphan, and the user would press "test the centre channel" and hear silence.
+  `SHELL_OWNED_BINARIES` in `audioOwnership.js` exempts it, matched **exactly**
+  against `application.process.binary` so it cannot quietly widen. This is not a
+  per-app allowlist returning: the rule is about *apps*, and an app is a thing
+  with a window.
+- **While the shell is `streaming` or `reconnecting`.** `runningWindows` is
+  refreshed by `AppLifecycleManager`'s `windowPollTimer`, which runs only in
+  `idle`/`appRunning`, and Moonlight is launched as a bare `Process` that never
+  goes through `showWorkspace()`. So in those states the workspace model stops
+  describing the screen, and reconciling against it would find the live stream's
+  audio unattributable and mute it. `WorkspaceAudioMuter.shellState` mirrors that
+  poll gate on purpose. The coupling previously existed *by accident* — a frozen
+  window list happened to mean no cycle ever fired — so widening the poll gate
+  would have silently silenced streams. It is now enforced rather than lucky.
+
+`displayedWorkspace` starts **unknown (`""`)**, not `"1"`, and is seeded once
+from `hypr-monitors` at startup. Restarting Quickshell is the normal deploy loop
+and can happen while an app owns the screen; a `"1"` default would assert "home
+is up" until the first switch arrived and mute the app the user is watching. An
+unknown workspace means no policy, so nothing is touched until the truth arrives.
+
 ### Two consequences, stated rather than buried
 
 - **A node that attributes to nothing is muted.** That is deliberate — an

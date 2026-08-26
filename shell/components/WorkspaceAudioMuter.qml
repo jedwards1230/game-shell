@@ -16,9 +16,10 @@ import "audioOwnership.js" as AudioOwnership
 // behind it (including why PID matching does not work and why
 // `application.process.binary` does) live in `audioOwnership.js`.
 //
-// Inputs, both injected by shell.qml:
+// Inputs, all injected by shell.qml:
 //   - activeWorkspace ← appLifecycle.displayedWorkspace  (workspace NAME, "1" = home)
 //   - runningWindows  ← appLifecycle.runningWindows      ([{windowClass, workspace, …}])
+//   - shellState      ← root.state                       (a freshness gate, NOT the predicate)
 //
 // Shape of a cycle: enumerate the graph -> decide (pure) -> apply the diff. The
 // desired set is recomputed from scratch on every input change and a serialized
@@ -32,6 +33,24 @@ Item {
     property string activeWorkspace: ""
     property var runningWindows: []
 
+    // A FRESHNESS GATE, not a predicate. The predicate is the workspace, always.
+    //
+    // `runningWindows` is refreshed by AppLifecycleManager's `windowPollTimer`,
+    // which runs only while the shell owns the state machine (`idle` or
+    // `appRunning`). In `streaming`/`reconnecting` the window list is frozen and
+    // Moonlight is launched as a bare Process that never goes through
+    // `showWorkspace()`, so the shell's workspace model stops describing the
+    // screen. Reconciling on a stale model would find the live stream's audio
+    // unattributable and MUTE IT — video with no sound, in the one state where
+    // that is least acceptable.
+    //
+    // So this mirrors `windowPollTimer.running` deliberately. That coupling used
+    // to exist by accident (a frozen window list happened to mean no cycle ever
+    // fired); stating it here makes it enforced instead of lucky, and widening
+    // the poll gate later cannot silently silence a stream.
+    property string shellState: "idle"
+    readonly property bool _modelDescribesScreen: shellState === "idle" || shellState === "appRunning"
+
     // Node ids this component currently holds muted. The source of truth for
     // what to undo; nothing outside this list is ever unmuted.
     property var _appliedIds: []
@@ -42,19 +61,57 @@ Item {
 
     // Re-read the graph and reconcile. Every input change lands here.
     function _evaluate() {
-        if (_cycleRunning) {
+        if (!muter._modelDescribesScreen)
+            return;
+        // Guard on the RUNTIME's own state as well as our flag. Re-arming a
+        // Process from inside its own `onExited` is only safe if Quickshell has
+        // already cleared `running`; if it has not, the write is silently
+        // dropped, and with `_cycleRunning` set below no further `exited` would
+        // ever arrive — the component would be dead for the session, with no log
+        // line. Treating a still-running process as "busy" makes that
+        // unrepresentable rather than dependent on emission order.
+        if (_cycleRunning || enumerateProc.running || applyProc.running) {
             // A snapshot taken before this change would decide on stale inputs.
             // Let the in-flight cycle finish and immediately run another.
             muter._restartQueued = true;
             return;
         }
         muter._cycleRunning = true;
+        cycleWatchdog.restart();
         enumerateProc.collected = "";
         enumerateProc.running = true;
     }
 
     onActiveWorkspaceChanged: _evaluate()
     onRunningWindowsChanged: _evaluate()
+    // Leaving streaming re-opens the gate; reconcile against whatever changed
+    // while it was shut. Hooked to `shellState` rather than to the derived
+    // `_modelDescribesScreen` because a change handler for an underscore-prefixed
+    // property is the parse-passes-but-fails-to-load trap this repo keeps
+    // stepping in — `_evaluate` re-checks the gate itself anyway.
+    onShellStateChanged: _evaluate()
+
+    // `_cycleRunning` is cleared by a process EXITING. A `pw-dump` or `wpctl`
+    // that hangs — or a Process that fails to start without emitting `exited` —
+    // would otherwise leave it stuck true and the muter would never reconcile
+    // again. The component this replaced self-healed here for free because it
+    // guarded on `muteProc.running` (the runtime's own state) rather than a
+    // shadow flag; this restores that property.
+    Timer {
+        id: cycleWatchdog
+        interval: 10000
+        repeat: false
+        onTriggered: {
+            if (!muter._cycleRunning)
+                return;
+            console.warn("WorkspaceAudioMuter: audio cycle did not finish within 10s; releasing the pump");
+            muter._cycleRunning = false;
+            if (muter._restartQueued) {
+                muter._restartQueued = false;
+                Qt.callLater(muter._evaluate);
+            }
+        }
+    }
 
     // Enumerate the PipeWire graph.
     //
@@ -77,7 +134,10 @@ Item {
 
         // The trailing `echo` terminates that one long line. SplitParser splits on
         // newlines, and a final un-terminated chunk is not something to depend on.
-        command: ["bash", "-c", "pw-dump 2>/dev/null | tr '\\n' ' '; echo"]
+        // `pipefail` is what makes the exit code mean anything: without it the
+        // status would be `echo`'s, so a missing or crashed `pw-dump` would look
+        // like success and the `exitCode` check below would be dead code.
+        command: ["bash", "-c", "set -o pipefail; pw-dump 2>/dev/null | tr '\\n' ' '; rc=$?; echo; exit $rc"]
 
         stdout: SplitParser {
             onRead: line => {
@@ -154,11 +214,17 @@ Item {
     }
 
     // End a cycle, and run one more if inputs moved while it was in flight.
+    //
+    // The re-run goes through `Qt.callLater` so it never re-arms a Process from
+    // inside that Process's own `onExited`. Whether that is safe depends on
+    // whether Quickshell has cleared `running` by the time the handler runs;
+    // deferring to the next event-loop pass means it does not have to be true.
     function _finishCycle() {
+        cycleWatchdog.stop();
         muter._cycleRunning = false;
         if (muter._restartQueued) {
             muter._restartQueued = false;
-            _evaluate();
+            Qt.callLater(muter._evaluate);
         }
     }
 }
