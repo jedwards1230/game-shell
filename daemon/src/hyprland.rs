@@ -130,10 +130,54 @@ fn socket_dir() -> Result<PathBuf> {
     Ok(legacy)
 }
 
+/// How long any single Hyprland request may take before it is abandoned.
+///
+/// The socket is local and Hyprland answers in single-digit milliseconds, so
+/// this is not a latency budget — it is a liveness floor. `read_to_end` on a
+/// connection Hyprland accepted but never writes to (or never closes) waits
+/// forever.
+///
+/// The biggest win is not the park path but the ACTOR: `active_window_json`,
+/// `clients_json`, `monitors_json` and `set_mode` are all awaited inline in the
+/// actor's request loop, so a single hung read wedged the entire Hyprland actor
+/// and left every pending IPC `oneshot` unanswered forever — the shell's window
+/// reads, display queries and resume verification all dead at once, with nothing
+/// logged. An await that can hang forever is a bug regardless of what triggers
+/// it.
+///
+/// `/keyword` is deliberately exempt — see [`KEYWORD_TIMEOUT`].
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Send one command to Hyprland's request socket (`.socket.sock`) and return the
 /// full response. The `j/` prefix asks Hyprland for JSON; the server writes the
 /// reply and closes the connection, so we read to EOF.
+///
+/// Bounded by [`REQUEST_TIMEOUT`], and an expiry is logged rather than folded
+/// into a generic error — a request that timed out and one that failed to
+/// connect are different problems, and last time the journal could not tell them
+/// apart because neither left a line.
 async fn request(cmd: &str) -> Result<String> {
+    request_within(cmd, REQUEST_TIMEOUT).await
+}
+
+/// [`request`] with an explicit budget, for the one command whose latency is
+/// bounded by display hardware rather than by IPC.
+async fn request_within(cmd: &str, budget: Duration) -> Result<String> {
+    match tokio::time::timeout(budget, request_unbounded(cmd)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                "hyprland: request {cmd:?} timed out after {}s; abandoning it",
+                budget.as_secs()
+            );
+            Err(anyhow!("hyprland request {cmd:?} timed out"))
+        }
+    }
+}
+
+/// The unbounded body of [`request`]. Never call this directly — the timeout is
+/// the point.
+async fn request_unbounded(cmd: &str) -> Result<String> {
     let sock = socket_dir()?.join(".socket.sock");
     let mut stream = UnixStream::connect(&sock).await?;
     stream.write_all(cmd.as_bytes()).await?;
@@ -611,8 +655,21 @@ impl RevertCause {
 /// error string otherwise — and it answers `ok` for a *parsed* keyword, so a
 /// successful reply means "accepted", not "the display lit up". That gap is
 /// precisely what the revert timer covers.
+/// Budget for `/keyword`, which is NOT an IPC read.
+///
+/// A `keyword monitor …` triggers a real modeset — on this shell's target that
+/// is a 4K120 HDR chain through an AV receiver, so the reply waits on an HDMI
+/// re-handshake and can legitimately take seconds. Capping it at
+/// [`REQUEST_TIMEOUT`] would be actively dangerous: `apply_change` returns early
+/// on `Err` and therefore never arms the auto-revert timer, so a *slow but
+/// successful* modeset would leave a live display change with nothing scheduled
+/// to undo it — a black TV on a couch with no keyboard, which is the exact
+/// outcome that timer exists to prevent. Generous enough that only a genuine
+/// hang trips it.
+const KEYWORD_TIMEOUT: Duration = Duration::from_secs(60);
+
 async fn keyword(arg: &str) -> Result<()> {
-    let reply = request(&format!("/keyword {arg}")).await?;
+    let reply = request_within(&format!("/keyword {arg}"), KEYWORD_TIMEOUT).await?;
     let trimmed = reply.trim();
     if trimmed.eq_ignore_ascii_case("ok") {
         Ok(())
@@ -997,6 +1054,12 @@ async fn watch_events(
     // become true again after a reboot. Runs on every (re)connect, because a
     // reconnect means we were deaf for a while and may have missed opens.
     reconcile_workspaces(&registry).await;
+    // Window bookkeeping across output changes (see `MonitorWatch`). A
+    // `watch_events` local on purpose: it dies with the connection, and a
+    // reconnect runs `reconcile_workspaces` fresh above, so a snapshot stranded
+    // by a mid-sequence reconnect is discarded rather than diffed against a
+    // world that moved on.
+    let mut monitor_watch = MonitorWatch::default();
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
         let Some((event, data)) = line.split_once(">>") else {
@@ -1050,7 +1113,16 @@ async fn watch_events(
                     let address = address.to_string();
                     let hint = openwindow_class(data).unwrap_or("").to_string();
                     let registry = Arc::clone(&registry);
-                    tokio::spawn(park_window(registry, address, hint));
+                    spawn_park_window(registry, address, hint);
+                } else {
+                    // No spawn, and this used to be the quietest exit of all:
+                    // `park_window` never ran, so not even its failure paths
+                    // could log. A malformed or truncated `openwindow` line
+                    // produced a window that was simply never parked, with the
+                    // journal showing nothing at all.
+                    tracing::warn!(
+                        "hyprland: openwindow with no usable address; window left unparked (data {data:?})"
+                    );
                 }
                 let json = parse_openwindow(data);
                 let _ = events_tx.send(Event::HyprOpenWindow(json));
@@ -1062,10 +1134,113 @@ async fn watch_events(
             "closewindow" => {
                 let _ = events_tx.send(Event::HyprCloseWindow(data.trim().to_string()));
             }
+            // An output going away is not a cosmetic event on this box. The TV
+            // sits behind an AV receiver, and a link drop (`drm: Connector
+            // HDMI-A-1 disconnected`) DESTROYS the app windows on it while
+            // their processes keep running — observed ~10x in one session, with
+            // Quickshell falling back to a placeholder screen. The app is then
+            // unreachable forever: there is no window left to switch to, and
+            // until now the layout only repaired itself when the daemon was
+            // restarted.
+            //
+            // Snapshot on the way out so the windows that do not come back can
+            // be NAMED, rather than leaving a silent ghost that only shows up
+            // later as audio from an app nobody can find.
+            // Both forms are handled: Hyprland 0.56 emits `monitorremoved` and
+            // `monitorremovedv2`, and which one arrives (or whether both do) is
+            // not something to depend on. First-removal-wins makes the twin a
+            // no-op, so handling both is free.
+            "monitorremoved" | "monitorremovedv2" => {
+                tracing::warn!(
+                    "hyprland: monitor removed ({}); snapshotting windows to see which survive",
+                    data.trim()
+                );
+                match request("j/clients").await {
+                    Ok(body) => monitor_watch.on_removed(Instant::now(), client_index(&body)),
+                    Err(e) => tracing::warn!(
+                        "hyprland: could not snapshot windows before the output went away: {e}"
+                    ),
+                }
+            }
+            // Deliberately inline rather than spawned. This blocks the event
+            // loop for the length of one reconcile, which is the right trade:
+            // events queue in the socket buffer rather than being lost, and a
+            // reconcile racing the events that follow it is how the layout ends
+            // up half-repaired.
+            "monitoradded" | "monitoraddedv2" => {
+                tracing::info!("hyprland: monitor added ({})", data.trim());
+                {
+                    // An unreadable client list must not diff — see
+                    // `MonitorWatch::on_added`. `Err` here is not rare noise: a
+                    // monitor add lands mid-DRM-handshake, which is exactly when
+                    // a request is most likely to time out.
+                    let after = request("j/clients").await.ok().map(|b| client_index(&b));
+                    for (address, class) in monitor_watch.on_added(Instant::now(), after.as_deref())
+                    {
+                        // `error`, not `warn`: the app is still running and still
+                        // producing sound, but it can never be shown again. That
+                        // is data loss waiting to happen (it is somebody's live
+                        // game), and the process is deliberately NOT killed here
+                        // — a wrong guess costs them their session.
+                        tracing::error!(
+                            "hyprland: window {class} ({address}) did not survive the output change; \
+                             its process may still be running and unreachable"
+                        );
+                    }
+                }
+                // Debounced: Hyprland emits the v1 and v2 add together, and a
+                // flapping connector arrives in bursts. Each reconcile is a
+                // client read plus one dispatch per window, all awaited on this
+                // reader — collapsing the burst is what keeps it from going deaf
+                // while windows are still mapping.
+                if monitor_watch.should_reconcile(Instant::now()) {
+                    reconcile_workspaces(&registry).await;
+                }
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Ceiling on one park attempt.
+///
+/// `park_window`'s own worst case is `resolve_window_class`'s retry loop —
+/// 10 × (100ms sleep + a bounded request) — plus one dispatch, so this sits
+/// above that. It is not a latency budget; it exists so "spawned and hung" is a
+/// log line rather than a task that lives forever holding a window nobody can
+/// reach.
+const PARK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Spawn [`park_window`] so neither a panic nor a hang inside it can vanish.
+///
+/// A detached `tokio::spawn` discards its `JoinHandle`, and with it the task's
+/// outcome. A panic is not literally silent — the default hook writes to stderr,
+/// which is the journal under systemd — but it arrives with no attribution, so
+/// nothing says WHICH window was left unparked. A hang is genuinely silent.
+///
+/// Both matter here because a window that fails to park is exactly the split
+/// view this module exists to prevent, and the last time it happened the journal
+/// could not distinguish "never spawned" from "spawned and stuck". This wrapper
+/// makes both cases nameable. It does not claim to be the cause of that
+/// incident — it removes the reason it was undiagnosable.
+fn spawn_park_window(registry: Arc<Mutex<workspaces::Registry>>, address: String, hint: String) {
+    tokio::spawn(async move {
+        let logged = address.clone();
+        let mut task = tokio::spawn(park_window(registry, address, hint));
+        match tokio::time::timeout(PARK_TIMEOUT, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!("hyprland: park task for {logged} died: {e}"),
+            Err(_) => {
+                task.abort();
+                tracing::error!(
+                    "hyprland: park task for {logged} hung past {}s and was abandoned; \
+                     the window may be sharing a workspace",
+                    PARK_TIMEOUT.as_secs()
+                );
+            }
+        }
+    });
 }
 
 /// Park one freshly-mapped window on its app's workspace.
@@ -1103,6 +1278,10 @@ async fn park_window(registry: Arc<Mutex<workspaces::Registry>>, address: String
         .expect("workspace registry mutex poisoned")
         .assign(&class);
     let Some(ws) = assigned else {
+        // Unreachable in practice (both resolve paths yield a non-empty class),
+        // but it used to return in total silence. Every exit from this function
+        // now says something — see the log-line note below.
+        tracing::warn!("hyprland: {address} resolved to an empty class; left unparked");
         return;
     };
 
@@ -1113,7 +1292,14 @@ async fn park_window(registry: Arc<Mutex<workspaces::Registry>>, address: String
     // Deliberately `info`, not `debug`. A default deploy runs at info level, and
     // when this silently did nothing the journal held no record either way —
     // which turned a one-line bug into a live-debugging session.
-    tracing::info!("hyprland: parked {class} on workspace {ws}");
+    //
+    // The ADDRESS is in the line for a reason learned the hard way. This used to
+    // log only the class, so a park line could not be attributed to a window —
+    // and when a split view turned up with `steam` and `streaming_client` sharing
+    // a workspace, "there is no park line for that window" could not be
+    // established from the journal at all. A line naming only the class is
+    // indistinguishable from the same class being parked for a different window.
+    tracing::info!("hyprland: parked {class} ({address}) on workspace {ws}");
 }
 
 /// The authoritative window class for `address`, or `None` if it never appears.
@@ -1211,6 +1397,15 @@ async fn reconcile_workspaces(registry: &Arc<Mutex<workspaces::Registry>>) {
         let class = c.get("class").and_then(Value::as_str).unwrap_or("").trim();
         let address = c.get("address").and_then(Value::as_str).unwrap_or("");
         if class.is_empty() || address.is_empty() {
+            // An XWayland window that has not set WM_CLASS yet lands here. It is
+            // a legitimate skip, but a SILENT one was indistinguishable from
+            // "reconcile never saw this window" when a split view had to be
+            // explained after the fact.
+            tracing::debug!(
+                "hyprland: reconcile skipped a client with no class/address (address {:?}, class {:?})",
+                address,
+                class
+            );
             continue;
         }
         let assigned = registry
@@ -1220,12 +1415,145 @@ async fn reconcile_workspaces(registry: &Arc<Mutex<workspaces::Registry>>) {
         let Some(ws) = assigned else {
             continue;
         };
+        // Address included for the same reason as in `park_window`: a line
+        // naming only the class cannot be attributed to a window.
         if dispatch_ok(&workspaces::move_command(ws, address)).await {
-            tracing::info!("hyprland: reconciled {class} onto workspace {ws}");
+            tracing::info!("hyprland: reconciled {class} ({address}) onto workspace {ws}");
         } else {
-            tracing::warn!("hyprland: reconcile failed to park {class} on workspace {ws}");
+            tracing::warn!(
+                "hyprland: reconcile failed to park {class} ({address}) on workspace {ws}"
+            );
         }
     }
+}
+
+/// How long a pre-output-loss window snapshot stays meaningful.
+///
+/// A connector that is coming back comes back in seconds. Without a bound the
+/// snapshot outlives the event that took it — TV off for the evening, the user
+/// closes apps normally in the meantime, and the next `monitoradded` reports
+/// every one of them as destroyed by an output change that happened hours ago.
+const MONITOR_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
+
+/// Minimum gap between layout reconciles triggered by monitor events.
+///
+/// Hyprland emits the v1 and v2 forms of an add together, and a flapping
+/// connector produces bursts (~10 disconnects in one observed session). Each
+/// reconcile is a `j/clients` plus one dispatch per window, all awaited inline
+/// on the event reader — so collapsing a burst into one pass is what keeps the
+/// reader from going deaf while windows are mapping.
+const MONITOR_RECONCILE_DEBOUNCE: Duration = Duration::from_secs(1);
+
+/// Window bookkeeping across an output change.
+///
+/// Extracted from the event loop so the SEQUENCING is testable — which is where
+/// the bugs live. The pure diff was never the risky part; "what happens when the
+/// client list cannot be read", "what happens when two outputs drop before
+/// either returns", and "what happens when the add never comes" are.
+#[derive(Debug, Default)]
+struct MonitorWatch {
+    /// Windows seen just before an output went away, and when.
+    snapshot: Option<(Instant, Vec<(String, String)>)>,
+    /// When a monitor-triggered reconcile last ran.
+    last_reconcile: Option<Instant>,
+}
+
+impl MonitorWatch {
+    /// Record the pre-loss window set. **First removal wins**: on a two-output
+    /// chain (both HDMI outs into one AV receiver) a link drop arrives as
+    /// `remove(A), remove(B), add(A), add(B)`, and windows destroyed with A are
+    /// already gone by the time B is removed. Overwriting would drop exactly the
+    /// windows this exists to name.
+    fn on_removed(&mut self, now: Instant, index: Vec<(String, String)>) {
+        if self.snapshot.is_none() {
+            self.snapshot = Some((now, index));
+        }
+    }
+
+    /// Windows that did not survive, given the client list read after the add.
+    ///
+    /// `after` is `None` when the client list could not be read. That case must
+    /// NOT diff: an unreadable list looks identical to "every window was
+    /// destroyed", and reporting a live game as lost — in the one path whose
+    /// whole purpose is a trustworthy journal — is worse than reporting nothing.
+    /// The snapshot is kept so the next add can still try. An EMPTY list is
+    /// treated the same way: a compositor that just gained an output and has no
+    /// clients at all is a reading, not a state.
+    fn on_added(
+        &mut self,
+        now: Instant,
+        after: Option<&[(String, String)]>,
+    ) -> Vec<(String, String)> {
+        let Some((taken, before)) = self.snapshot.take() else {
+            return Vec::new();
+        };
+        if now.duration_since(taken) > MONITOR_SNAPSHOT_TTL {
+            return Vec::new();
+        }
+        let Some(after) = after.filter(|a| !a.is_empty()) else {
+            // Put it back — this add told us nothing.
+            self.snapshot = Some((taken, before));
+            return Vec::new();
+        };
+        vanished_windows(&before, after)
+    }
+
+    /// Whether a reconcile should run now, or be collapsed into the last one.
+    fn should_reconcile(&mut self, now: Instant) -> bool {
+        let due = match self.last_reconcile {
+            Some(last) => now.duration_since(last) >= MONITOR_RECONCILE_DEBOUNCE,
+            None => true,
+        };
+        if due {
+            self.last_reconcile = Some(now);
+        }
+        due
+    }
+}
+
+/// Reduce a `j/clients` body to `(address, class)` pairs.
+///
+/// Split out from the reconcile/monitor paths so the window-set bookkeeping is
+/// testable without a compositor. Entries missing an address are dropped — an
+/// address is the only stable identity a window has — while an empty class is
+/// KEPT, because an XWayland window that has not set `WM_CLASS` yet is exactly
+/// the window most worth noticing when it disappears.
+fn client_index(body: &str) -> Vec<(String, String)> {
+    let Ok(Value::Array(clients)) = serde_json::from_str::<Value>(body.trim()) else {
+        return Vec::new();
+    };
+    clients
+        .iter()
+        .filter_map(|c| {
+            let address = c.get("address").and_then(Value::as_str)?.trim();
+            if address.is_empty() {
+                return None;
+            }
+            let class = c
+                .get("class")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            Some((address.to_string(), class))
+        })
+        .collect()
+}
+
+/// Windows present in `before` and absent from `after`, matched by address.
+///
+/// Used across an output change to name the windows an HDMI link drop destroyed.
+/// Matching on address rather than class is what makes it precise: two windows
+/// of one class are distinct entries, so losing one of them is still reported.
+fn vanished_windows(
+    before: &[(String, String)],
+    after: &[(String, String)],
+) -> Vec<(String, String)> {
+    before
+        .iter()
+        .filter(|(address, _)| !after.iter().any(|(seen, _)| seen == address))
+        .cloned()
+        .collect()
 }
 
 /// Extract the window CLASS from an `openwindow` event's raw data
@@ -1279,6 +1607,205 @@ fn openwindow_address(data: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The live shape, from `hyprctl -j clients` on the deploy box.
+    fn clients_body() -> &'static str {
+        r#"[{"address":"0x1","class":"tv.plex.Plex","workspace":{"id":2}},
+            {"address":"0x2","class":"steam","workspace":{"id":4}},
+            {"address":"0x3","class":"streaming_client","workspace":{"id":3}}]"#
+    }
+
+    #[test]
+    fn client_index_pairs_address_with_class() {
+        let idx = client_index(clients_body());
+        assert_eq!(
+            idx,
+            vec![
+                ("0x1".to_string(), "tv.plex.Plex".to_string()),
+                ("0x2".to_string(), "steam".to_string()),
+                ("0x3".to_string(), "streaming_client".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn client_index_keeps_classless_windows_but_drops_addressless_ones() {
+        // An XWayland window that has not set WM_CLASS yet is the window most
+        // worth noticing when it vanishes, so it must survive indexing.
+        let body = r#"[{"address":"0x9","class":""},{"class":"orphan"},{"address":"  "}]"#;
+        assert_eq!(client_index(body), vec![("0x9".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn client_index_degrades_to_empty_on_junk() {
+        assert!(client_index("").is_empty());
+        assert!(client_index("not json").is_empty());
+        assert!(client_index("{}").is_empty());
+    }
+
+    // The failure this exists for: an HDMI link drop destroys app windows while
+    // their processes keep running, leaving an app that can never be shown again.
+    #[test]
+    fn vanished_windows_names_what_did_not_come_back() {
+        let before = client_index(clients_body());
+        let after = client_index(r#"[{"address":"0x1","class":"tv.plex.Plex"}]"#);
+        assert_eq!(
+            vanished_windows(&before, &after),
+            vec![
+                ("0x2".to_string(), "steam".to_string()),
+                ("0x3".to_string(), "streaming_client".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn vanished_windows_is_empty_when_everything_survives() {
+        let before = client_index(clients_body());
+        assert!(vanished_windows(&before, &before).is_empty());
+        // A window ADDED across the change is not a loss.
+        let mut after = before.clone();
+        after.push(("0x4".to_string(), "newcomer".to_string()));
+        assert!(vanished_windows(&before, &after).is_empty());
+    }
+
+    // Matched by address, not class: two windows of one class are distinct
+    // destinations under the kiosk model, so losing one still has to report.
+    #[test]
+    fn vanished_windows_matches_on_address_not_class() {
+        let before = vec![
+            ("0xa".to_string(), "steam".to_string()),
+            ("0xb".to_string(), "steam".to_string()),
+        ];
+        let after = vec![("0xa".to_string(), "steam".to_string())];
+        assert_eq!(
+            vanished_windows(&before, &after),
+            vec![("0xb".to_string(), "steam".to_string())]
+        );
+    }
+
+    // A window whose class only resolved AFTER the snapshot must not read as a
+    // loss — it is the same window, and the address is what says so.
+    #[test]
+    fn vanished_windows_tolerates_a_class_resolving_late() {
+        let before = vec![("0xc".to_string(), String::new())];
+        let after = vec![("0xc".to_string(), "streaming_client".to_string())];
+        assert!(vanished_windows(&before, &after).is_empty());
+    }
+
+    // A modeset on a 4K120 HDR chain behind an AV receiver can legitimately take
+    // seconds. If `/keyword` shared the IPC budget, a slow-but-successful mode
+    // change would return Err, `apply_change` would skip arming the auto-revert,
+    // and a live change would have nothing scheduled to undo it — a black TV
+    // with no keyboard. Pin the separation, not the numbers' exact values.
+    #[test]
+    fn keyword_gets_a_far_larger_budget_than_an_ipc_read() {
+        assert!(KEYWORD_TIMEOUT >= REQUEST_TIMEOUT * 10);
+    }
+
+    // --- MonitorWatch: the sequencing, which is where the bugs are ---
+
+    fn idx(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(a, c)| (a.to_string(), c.to_string()))
+            .collect()
+    }
+
+    // THE false-alarm case. An unreadable client list is indistinguishable from
+    // "every window was destroyed", and a monitor add lands mid-DRM-handshake —
+    // exactly when a request is most likely to time out. Reporting a live game
+    // as lost, in the one path whose purpose is a trustworthy journal, is worse
+    // than reporting nothing.
+    #[test]
+    fn unreadable_client_list_reports_nothing_and_keeps_the_snapshot() {
+        let mut w = MonitorWatch::default();
+        let t0 = Instant::now();
+        w.on_removed(t0, idx(&[("0x1", "steam"), ("0x2", "streaming_client")]));
+
+        assert!(
+            w.on_added(t0, None).is_empty(),
+            "no diff on an unreadable list"
+        );
+        // An add that yields zero clients is a reading, not a state.
+        assert!(
+            w.on_added(t0, Some(&[])).is_empty(),
+            "no diff on an empty list"
+        );
+        // The snapshot survived both, so a later good read still works.
+        assert_eq!(
+            w.on_added(t0, Some(&idx(&[("0x1", "steam")]))),
+            idx(&[("0x2", "streaming_client")])
+        );
+    }
+
+    // Both HDMI outs run into one AV receiver, so a link drop arrives as
+    // remove(A), remove(B), add(A), add(B). Windows destroyed with A are already
+    // gone when B is removed, so overwriting the snapshot would discard exactly
+    // the windows this feature exists to name.
+    #[test]
+    fn first_removal_wins_so_a_second_output_cannot_erase_the_evidence() {
+        let mut w = MonitorWatch::default();
+        let t0 = Instant::now();
+        w.on_removed(t0, idx(&[("0x1", "steam"), ("0x2", "streaming_client")]));
+        // Second output drops; steam's window is already destroyed by now.
+        w.on_removed(t0, idx(&[("0x2", "streaming_client")]));
+
+        assert_eq!(
+            w.on_added(t0, Some(&idx(&[("0x2", "streaming_client")]))),
+            idx(&[("0x1", "steam")]),
+            "the window lost with the FIRST output must still be reported"
+        );
+    }
+
+    // TV off for the evening: apps get closed normally in between, and the next
+    // add must not blame an output change that happened hours ago.
+    #[test]
+    fn a_stale_snapshot_is_discarded_rather_than_blamed() {
+        let mut w = MonitorWatch::default();
+        let t0 = Instant::now();
+        w.on_removed(t0, idx(&[("0x1", "steam")]));
+        let much_later = t0 + MONITOR_SNAPSHOT_TTL + Duration::from_secs(1);
+        assert!(w.on_added(much_later, Some(&idx(&[]))).is_empty());
+        // ...and it is gone, not lurking for the next add.
+        assert!(w
+            .on_added(much_later, Some(&idx(&[("0x9", "other")])))
+            .is_empty());
+    }
+
+    #[test]
+    fn an_add_with_no_prior_removal_reports_nothing() {
+        let mut w = MonitorWatch::default();
+        assert!(w
+            .on_added(Instant::now(), Some(&idx(&[("0x1", "steam")])))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_is_consumed_by_the_add_that_uses_it() {
+        let mut w = MonitorWatch::default();
+        let t0 = Instant::now();
+        w.on_removed(t0, idx(&[("0x1", "steam")]));
+        assert_eq!(
+            w.on_added(t0, Some(&idx(&[("0x2", "other")]))),
+            idx(&[("0x1", "steam")])
+        );
+        // The v2 twin of the same add must not re-report it.
+        assert!(w.on_added(t0, Some(&idx(&[("0x2", "other")]))).is_empty());
+    }
+
+    // Hyprland emits the v1 and v2 add together, and a flapping connector
+    // arrives in bursts. Each reconcile is awaited on the event reader, so
+    // collapsing the burst is what keeps the reader from going deaf while
+    // windows are still mapping.
+    #[test]
+    fn reconciles_are_debounced_across_a_burst() {
+        let mut w = MonitorWatch::default();
+        let t0 = Instant::now();
+        assert!(w.should_reconcile(t0), "the first one always runs");
+        assert!(!w.should_reconcile(t0), "the v2 twin collapses into it");
+        assert!(!w.should_reconcile(t0 + Duration::from_millis(100)));
+        assert!(w.should_reconcile(t0 + MONITOR_RECONCILE_DEBOUNCE));
+    }
 
     #[test]
     fn reconnect_counter_lifecycle() {

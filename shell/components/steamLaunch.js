@@ -14,9 +14,10 @@
 // The Steam home widget (default-disabled) shows the host's Steam library poster
 // grid, but activation launches Steam LOCALLY on this machine, via the normal
 // LOCAL app-launch path (appLaunchRequested → AppLifecycleManager.checkAndLaunchApp),
-// landing the shell in `appRunning` with window class `steam` — kiosk fullscreen
-// (class-agnostic) and StreamAudioMuter's mute-on-background (`streamClasses:
-// ["steam"]`) cover it automatically. This is NOT the streaming state machine, and
+// landing the shell in `appRunning` with window class `steam` — the kiosk window
+// model (class-agnostic) and WorkspaceAudioMuter (which follows the displayed
+// workspace, with no per-app list) cover it automatically. This is NOT the
+// streaming state machine, and
 // it does NOT touch the host-side `steam-launch`/`steam-bigpicture` daemon commands
 // below (those stay wired to the MOONLIGHT widget, for navigating/streaming the
 // GAMING HOST's Big Picture over Moonlight).

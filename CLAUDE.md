@@ -55,6 +55,7 @@ shell/                       # QML shell — Quickshell config root (-c tv-shell
     prewarm.js               # Pure .pragma library: login-prewarm key resolution + launch decisions (dedup against mapped windows AND the process table) (headless-testable)
     appQuirks.js             # Pure .pragma library: per-app behaviour overrides keyed by prewarm.keyFor() — first quirk is `quitCommand` for apps that close-to-background instead of exiting (Steam) (headless-testable)
     resumeFocus.js           # Pure .pragma library: resume focus-selector decision (known address → class fallback → nothing) + post-dispatch landing verification against hypr-active, since `hyprctl dispatch` exits 0 on a no-match (headless-testable)
+    audioOwnership.js        # Pure .pragma library: which PipeWire playback streams to mute so you only hear the displayed workspace — node→window attribution by application.process.binary (pid and application.name both mislead for Steam) (headless-testable)
     screenScale.js           # Pure .pragma library: the sticky screen-height filter behind Units.screenHeight/screenReady — holds the last VALID height across a transiently-empty Quickshell.screens or a ~0-height ShellScreen, and reports whether the scale is known yet (headless-testable)
     StreamOverlay.qml        # Reconnecting/error overlay
     lib/                     # Shared reusable component library (own qmldir module)
@@ -340,7 +341,24 @@ rather than prevented.
 and return-to-home all funnel through `AppLifecycleManager.showWorkspace()` /
 `showHome()`, and the decision logic is pure in `components/resumeFocus.js`
 (`resolveTarget` → `workspaceSelector` → `verifyLanding`). Verification is one
-integer: read `hypr-monitors` and compare `activeWorkspace`.
+integer: read `hypr-monitors` and compare `activeWorkspace`. Those two functions
+also publish `AppLifecycleManager.displayedWorkspace` — the shell is the only
+switcher, so that property is a record of what it told the compositor, not a
+guess (the verify probe corrects it from `hypr-monitors` as a self-heal).
+
+**Audio ownership follows workspace ownership.** You hear the workspace on
+screen and nothing else: `components/WorkspaceAudioMuter.qml` mutes the PipeWire
+playback streams of every app that is not on `displayedWorkspace`, with the
+decision pure in `components/audioOwnership.js`. There is **no per-app
+allowlist** — adding an app requires no change — and home needs no special case,
+since nothing can ever match the reserved empty workspace 1. (The one exempt list,
+`SHELL_OWNED_BINARIES`, is the shell's OWN audio — the Settings speaker test's
+`pw-play`, which has no window and would be muted as an orphan. Not an app list:
+the rule is about apps, and an app is a thing with a window.) Nodes are
+attributed to windows by `application.process.binary`, never by pid (Steam's
+window pid owns no PipeWire client) and never by `application.name` (which is
+`"Steam"` for *both* Big Picture and the Remote Play stream). Full rationale and
+the measurements behind it: [docs/KIOSK_WINDOW_MODEL.md](docs/KIOSK_WINDOW_MODEL.md).
 
 **This replaced a focus-based model, and the reason matters.** `dispatch
 focuswindow` is a *request a window can decline* — a Steam Remote Play

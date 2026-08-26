@@ -189,14 +189,20 @@ ShellRoot {
         onMediaPlayingChanged: root._pushShellState()
     }
 
-    // Mute a backgrounded native stream app (Steam Remote Play) so its audio
-    // doesn't play behind the shell; unmute on refocus / exit. Narrowly scoped
-    // to the allowlisted stream classes inside the component. Bound to the same
-    // two signals it reasons over: the shell state and the running app's class.
-    Components.StreamAudioMuter {
-        id: streamAudioMuter
+    // Audio ownership follows workspace ownership: you hear the workspace on
+    // screen and nothing else. Home owns the empty workspace 1, so it is silent.
+    // Bound to the two facts it reasons over — which workspace is displayed, and
+    // which class sits on each — with no per-app allowlist anywhere.
+    Components.WorkspaceAudioMuter {
+        id: workspaceAudioMuter
+        activeWorkspace: appLifecycle.displayedWorkspace
+        runningWindows: appLifecycle.runningWindows
+        // The user's own sticky mutes, which BEAT the workspace policy. The
+        // drawer writes them; nothing else does.
+        userMutedClasses: Components.SettingsStore.mutedApps
+        // A freshness gate, not the predicate — see the component. The window
+        // list it reasons over is only refreshed in these states.
         shellState: root.state
-        runningAppClass: appLifecycle.runningAppClass
     }
 
     function _resetIdleTimer() {

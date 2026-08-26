@@ -64,6 +64,278 @@ structural.
 > workspace — so a daemon restart mid-session repairs the layout instead of
 > waiting for a reboot.
 
+## Audio ownership follows workspace ownership
+
+The screen is not the only thing an app can hold while backgrounded. Once each
+app owned a workspace, the sound contract could be stated in the same terms as
+the picture contract:
+
+> **You hear the workspace that is on screen, and nothing else.**
+
+`shell/components/WorkspaceAudioMuter.qml` mutes the PipeWire playback streams
+of every app that is not on the displayed workspace, and unmutes them when its
+workspace comes back. The decision is pure and headlessly tested in
+`shell/components/audioOwnership.js` / `tests/qml/tst_audioownership.qml`; the
+rule has no special case for the home screen, because home owns the reserved,
+deliberately empty workspace 1 and no window's workspace can ever equal it — so
+everything falls on the "not on screen" side and goes quiet.
+
+There is no per-app allowlist, and adding an app requires no change here.
+
+### Why the previous version looked random
+
+It muted one hard-coded window class, `"steam"`, whenever `shellState ===
+"idle"`. Three things were wrong with that, and the second is why the symptom
+came and went:
+
+1. **It matched the wrong window.** Steam Remote Play's live game window has
+   class `streaming_client`, and `"streaming_client"` does not contain
+   `"steam"` — `str-e-am` versus `st-e-am`. So it engaged for Big Picture and
+   never for the window the game audio belongs to.
+2. **It reasoned over a single `runningAppClass`** — the last-resumed app. Under
+   one-workspace-per-app several apps run at once, each on its own workspace.
+   Nothing ever muted Plex.
+3. **`shellState === "idle"` is not "the shell is on screen."** It predates the
+   workspace model and misses overlay states. What the user is looking at is now
+   exactly the active workspace id.
+
+It also emitted a "Stream muted" / "Stream unmuted" toast. That reported a
+routine internal consequence of switching workspaces; it is gone.
+
+### Attributing a PipeWire node to a window
+
+A playback stream does not say which window owns it, and the obvious mappings do
+not survive contact with Steam. Measured on a live box running Plex, Big Picture
+and a Remote Play stream at once:
+
+| Approach | Result |
+|---|---|
+| PipeWire client pid == Hyprland window pid | Exact for Plex. **Fails for both Steam windows** — Big Picture's window pid is a `steamwebhelper` that owns no PipeWire client. |
+| Walk the audio pid's process ancestry | **Fails.** The stream's audio sits under `streaming_client → reaper → IPC:CSteamEngine → steam`, a branch that never passes through the window's pid. They are siblings, not ancestors. |
+| `application.name` / `node.name` | **Misleads.** On the Remote Play stream node both are literally `"Steam"` — the same token as the Big Picture window class, collapsing two workspaces into one. |
+| `application.process.binary` | **Works.** The real executable name lined up with the window class for all three apps, with no cross-attribution. |
+
+Hence a strict pass on the binary, and — only when that names nothing — a loose
+pass on the display names:
+
+| binary | class | related? |
+|---|---|---|
+| `Plex` | `tv.plex.Plex` | yes (class contains binary) |
+| `steam` / `steamwebhelper` | `steam` | yes |
+| `streaming_client` | `streaming_client` | yes (exact) |
+| `streaming_client` | `steam` | **no** — the discrimination the whole design rests on |
+
+The loose pass exists for one real state, observed live: **a stream process
+outliving its window, still holding a playing node.** Strict finds no class for
+it (the window is gone), loose credits it to `steam` via `"Steam"`, and it is
+muted everywhere except the Steam workspace. Running strict first is what stops
+the loose pass from stealing a live stream away from its own workspace.
+
+### The user can override it, and their override wins
+
+The automatic policy owns every app the user has not spoken about. The nav
+drawer's X popover lets them mute an app by hand, and that mute is **sticky and
+beats the policy**: a user-muted app stays muted even when its workspace is
+displayed, until they clear it. A manual mute the policy stomped on the next
+workspace switch would be worse than having no manual mute at all.
+
+`desiredMutedIds` is the union of the policy set and the user set. Because a
+user-muted class is always in the desired set, `reconcile` can never place it in
+the unmute list — the release path cannot revoke a user's choice as a side
+effect. That is structural, not a check somewhere. The user's mutes also apply
+when the active workspace is **unknown**: policy needs to know what is on screen,
+a manual mute does not, and a shell restart must not silently unmute what the
+user muted. Persisted in `settings.json` as `mutedApps`, keyed by window class so
+the mute survives the app closing and reopening.
+
+**A user mute and an adopted mute must never be confused.** An adopted mute
+(above) is one whose *author is unknown*; a user mute is a recorded choice.
+Adoption populates the applied set of node ids and never writes back into the
+user's list — only the drawer does. Were adoption to manufacture a user mute, the
+user would end up with an app they never muted and no obvious way out.
+
+### The drawer's mute indicator, and the one that was deliberately removed
+
+Each running-app row in the drawer can show a single glyph, 🔇, conditionally
+rendered — so a row you have not muted looks exactly as it did before this
+existed. It means **the user muted this app by hand**, never the policy mute:
+the policy mutes nearly every app at any moment, so rendering it would light up
+every row while carrying no information.
+
+There was briefly a second indicator — a speaker, meaning "this app has a live
+playback stream" — and **removing it is worth recording, because the reasoning
+generalises.** It was answering *"what is making noise that I cannot hear?"*, and
+that is a question this policy has already made unaskable: the app on screen is
+the only one you can hear, by construction. An indicator whose answer the system
+guarantees is not information, it is reassurance, and it cost a live PipeWire
+attribution path into the drawer, a ~12s anti-flicker latch, a per-row activity
+flag, and a republish comparison to stop the audio sweep rebuilding the nav list
+under the user's thumb. All of it deleted with the icon.
+
+What survived the deletion, because it fixed real bugs independent of any icon:
+the drawer's row focus is keyed on the app's **window address** rather than a row
+index (see below), and `runningWindows` remains signature-gated upstream, so the
+row model now republishes only on genuine membership or ordering changes.
+
+### Where the rule deliberately stands down
+
+Two exemptions, both narrow and both load-bearing:
+
+- **The shell's own audio.** Settings ▸ Audio's speaker test execs `pw-play`,
+  which has no window and so attributes to nothing — it would be muted as an
+  orphan, and the user would press "test the centre channel" and hear silence.
+  `SHELL_OWNED_BINARIES` in `audioOwnership.js` exempts it, matched **exactly**
+  against `application.process.binary` so it cannot quietly widen. This is not a
+  per-app allowlist returning: the rule is about *apps*, and an app is a thing
+  with a window.
+- **While the shell is `streaming` or `reconnecting`.** `runningWindows` is
+  refreshed by `AppLifecycleManager`'s `windowPollTimer`, which runs only in
+  `idle`/`appRunning`, and Moonlight is launched as a bare `Process` that never
+  goes through `showWorkspace()`. So in those states the workspace model stops
+  describing the screen, and reconciling against it would find the live stream's
+  audio unattributable and mute it. `WorkspaceAudioMuter.shellState` mirrors that
+  poll gate on purpose. The coupling previously existed *by accident* — a frozen
+  window list happened to mean no cycle ever fired — so widening the poll gate
+  would have silently silenced streams. It is now enforced rather than lucky.
+
+### Surviving a shell restart
+
+Mutes live in the PipeWire graph and **outlive the shell process**; the set of
+ids the shell holds muted does not. "Only unmute what we muted" is what keeps
+this component from touching audio it has no business touching, and within a
+session it is exactly right — but across a restart it strands. A node the
+previous instance muted is one the new instance will never release, because it
+starts with an empty applied set and no memory of setting it.
+
+That is not an exotic path. **Restarting Quickshell is the deploy loop**, so
+every deploy that happened while an app was backgrounded left that app
+permanently silent, and going home and back could not clear it. Observed in the
+field on 2026-08-26: a live stream on the *displayed* workspace, playing to a
+muted node.
+
+So the first cycle **adopts** whatever it finds already muted
+(`adoptableMutedIds`). The previous instance is the only plausible author — the
+shell's own volume control mutes the *sink*, not individual streams — and
+reconciliation then releases it the moment its workspace is displayed. Adopting a
+mute we did not set is recoverable; stranding one is not. The shell's own test
+tone is excluded, since adopting it would mean unmuting it later: the same
+overreach in the other direction.
+
+No headless test could have caught this. It exists only across a process
+boundary — which is the argument for verifying on the device rather than
+declaring victory on a green suite.
+
+`displayedWorkspace` starts **unknown (`""`)**, not `"1"`, and is seeded once
+from `hypr-monitors` at startup. Restarting Quickshell is the normal deploy loop
+and can happen while an app owns the screen; a `"1"` default would assert "home
+is up" until the first switch arrived and mute the app the user is watching. An
+unknown workspace means no policy, so nothing is touched until the truth arrives.
+
+### Two consequences, stated rather than buried
+
+- **A node that attributes to nothing is muted.** That is deliberate — an
+  orphaned stream must go quiet on the home screen, and "unattributable" is
+  exactly what an orphan looks like. The cost is that if attribution ever failed
+  for the app you are *looking at*, you would get video with no sound. That is
+  the direction a miss falls.
+- **Music in a backgrounded app is muted while the home screen is up**, so the
+  Now Playing widget can show a track you cannot hear. That follows directly
+  from the rule; if it ever needs an exception, the exception belongs in
+  `audioOwnership.js`, not in a per-app list.
+
+Reconciliation is **event-driven plus a 5-second sweep**, and the sweep is not
+belt-and-braces. The component's inputs are the displayed workspace and the
+window set, and neither moves when a backgrounded app simply *begins* playing —
+Plex rolling into the next episode, or a Steam stream reconnecting with a fresh
+node while the user sits on the home screen. Reacting only to the screen changing
+cannot deliver "you never hear what you cannot see"; the graph has to be looked
+at too. The cadence matches `windowPollTimer`, and when nothing changed the diff
+is empty and no `wpctl` runs at all.
+
+The graph is read with `pw-dump` and parsed as real JSON in QML — not scraped
+from `wpctl status`, and not filtered through `jq` (which is not a declared
+dependency). That is a safety decision: this policy enumerates the whole graph,
+and a mis-parsed id from a text scrape could land on the output **sink** and
+silence the box. Only `media.class == "Stream/Output/Audio"` — an app's own
+sink-inputs — is ever a candidate, and only ids the shell itself muted are ever
+unmuted.
+
+## When the model meets real conditions
+
+Two failures found while verifying the audio work, both about the window model
+rather than the sound. Neither has a proven root cause; what follows is
+deliberately defensive, and says so.
+
+### An output loss destroys windows while their processes survive
+
+An HDMI link drop — `drm: Connector … disconnected`, with Quickshell falling
+back to `There are no outputs - creating placeholder screen` — **destroys the app
+windows on that output while their processes keep running.** Observed ~10 times
+in one session on a TV behind an AV receiver. The window is gone for good, so the
+app is permanently unreachable: resume correctly has nothing to switch to, and it
+keeps producing audio from a window nobody can find. It ignored `SIGTERM`.
+
+**This is where orphaned audio comes from.** The orphan case the audio policy
+handles is not an edge case; it is the steady-state result of a TV link drop.
+
+The daemon now reconciles on `monitoradded`, so the layout self-repairs instead
+of waiting for a daemon restart, and it **names the windows that did not come
+back** by diffing a snapshot taken when the output went away — turning a silent
+ghost into one journal line.
+
+Deliberately **not** done, and why:
+
+- **No auto-killing of orphaned processes.** That is somebody's live game
+  session, and a wrong guess costs them their progress. The audio policy already
+  removes the audible symptom.
+- **No UI surfacing yet.** Doing it properly needs pid tracking the daemon does
+  not have, plus an affordance for acting on it. A detector with nothing to do is
+  worse than none.
+
+The bookkeeping lives in `MonitorWatch` (`daemon/src/hyprland.rs`) because the
+sequencing, not the diff, is where the bugs are: an **unreadable** client list
+must never diff (empty looks identical to "everything was destroyed", and a
+monitor add lands mid-DRM-handshake — exactly when a request is likeliest to time
+out); the **first** removal wins (both outputs run into one receiver, so a drop
+arrives as remove, remove, add, add); snapshots **expire** (a TV off for the
+evening must not blame an output change for every app closed since); and
+reconciles are **debounced** (Hyprland emits the v1 and v2 add together, and each
+reconcile is awaited on the event reader, which is deaf while it runs).
+
+### The park path could not explain itself
+
+A genuine split view appeared — two classes sharing a workspace, which this model
+is supposed to make unrepresentable — with **no park line in the journal**, while
+the event socket was connected and the daemon had neither restarted nor panicked.
+That leaves "the park task was never spawned" or "it was spawned and hung", and
+**the evidence cannot separate them.** No root cause is claimed here.
+
+It could not be separated because `park_window` had more silent exits than logged
+ones. All of these are now closed:
+
+| Silent exit | Now |
+|---|---|
+| `request()` had **no timeout at all** — `read_to_end` on a connection Hyprland accepts but never writes to waits forever | Bounded, and expiry is logged |
+| `tokio::spawn` dropped the `JoinHandle` | A hang and a panic are both logged, with the address |
+| `openwindow_address → None` spawned nothing and logged nothing | Logged |
+| Park/reconcile lines named only the **class**, never the address | Address included |
+
+That last one is why the evidence is inconclusive: a line naming only a class
+cannot be attributed to a window, so "there is no park line for that window" was
+never establishable from the journal.
+
+The biggest exposure was not the park path but the **actor**: client, monitor,
+active-window and set-mode reads are all awaited inline in its request loop, so a
+single hung read wedged the entire Hyprland actor and left every pending IPC
+reply unanswered — silently.
+
+`/keyword` is deliberately **exempt** from the IPC budget. It triggers a real
+modeset, so seconds are legitimate; sharing the short cap would have been
+actively dangerous, because `apply_change` returns early on an error and never
+arms the auto-revert, leaving a *slow but successful* mode change live with
+nothing scheduled to undo it. That is the black-TV-no-keyboard outcome the revert
+timer exists to prevent.
+
 **The contract.** Exactly one app window is visible and fills the screen; the
 shell (Quickshell) sits deterministically above/below it; backgrounded apps
 (Plex HTPC, Steam) keep running but never share the screen. Two app windows must

@@ -11,6 +11,26 @@ Item {
 
     property string runningAppClass: ""
     property var runningWindows: []
+    // The workspace currently on screen, by NAME (matching hypr-clients'
+    // `workspace` field). "1" is home — reserved and deliberately empty, see
+    // `workspaces::HOME_WORKSPACE` in the daemon.
+    //
+    // Authoritative because this component is the ONLY switcher: every workspace
+    // change in the kiosk goes through showWorkspace()/showHome() below, so
+    // setting it there is not a guess about the compositor, it is the record of
+    // what we just told the compositor to do. The resume verification probe
+    // corrects it from `hypr-monitors` as a self-heal.
+    //
+    // Consumed by WorkspaceAudioMuter, which mutes every playback stream that
+    // does not belong here.
+    //
+    // Starts "" — UNKNOWN, not "1". A shell restart mid-session is the normal
+    // deploy loop, and it can happen while an app owns the screen; defaulting to
+    // "1" would assert "the home screen is up" for as long as it took the first
+    // switch to arrive, and the muter would silence the app the user is actually
+    // watching. "" means no policy, so nothing is touched until the seed below
+    // reads the truth from the compositor.
+    property string displayedWorkspace: ""
     // Signature of the last published runningWindows; gate reassignment on it
     // so an unchanged poll doesn't rebuild the home row and drop controller focus.
     property string _runningWindowsSig: ""
@@ -335,6 +355,11 @@ Item {
         if (!ResumeFocus.canDispatch(target))
             return;
         LaunchTrace.logWorkspaceSwitch(target.windowClass, target.workspace);
+        // Publish BEFORE the dispatch, not after it exits: audio policy should
+        // follow the screen, and the switch is what the user perceives as
+        // instantaneous. `hyprctl dispatch` exits 0 regardless, so waiting on it
+        // would buy no extra certainty — only latency.
+        root.displayedWorkspace = "" + target.workspace;
         switchWorkspace.command = ["hyprctl", "dispatch", "workspace", ResumeFocus.workspaceSelector(target.workspace)];
         switchWorkspace.running = true;
     }
@@ -356,6 +381,7 @@ Item {
         // arming a verification for a switch that has no window to land on.
         root._resumeGeneration = root._resumeGeneration + 1;
         root._pendingFocusDecision = null;
+        root.displayedWorkspace = "1";
         switchWorkspace.command = ["hyprctl", "dispatch", "workspace", "1"];
         switchWorkspace.running = true;
     }
@@ -686,6 +712,16 @@ Item {
                 // empty list so it reports "cannot verify" rather than throwing.
                 monitors = [];
             }
+            // Self-heal `displayedWorkspace` from what the compositor actually
+            // shows. It is set optimistically at dispatch time, and this is the
+            // one place the shell reads the truth back — so a switch that landed
+            // somewhere else corrects the audio policy instead of leaving it
+            // muting against a workspace nobody is on. An unreadable probe
+            // ("") changes nothing.
+            let observed = ResumeFocus.activeWorkspaceOf(monitors);
+            if (observed !== "")
+                root.displayedWorkspace = observed;
+
             let res = ResumeFocus.verifyLanding(decision, monitors);
             if (res.landed)
                 return;
@@ -767,6 +803,17 @@ Item {
                     // mapped fullscreen on the one workspace and took the screen
                     // whether or not anybody wanted it to, which is why a
                     // prewarmed app occasionally appeared unbidden.
+                    // Supersede any resume still in flight, exactly as
+                    // focusByAddress does before its own switch. Without this a
+                    // launch landing inside a resume's 400ms verify window
+                    // leaves that probe believing it is current: it reads
+                    // `hypr-monitors` from before this switch applied and writes
+                    // the older workspace over the newer one, leaving
+                    // `displayedWorkspace` — and with it the audio policy —
+                    // pointing at a workspace nobody is on.
+                    root._resumeGeneration = root._resumeGeneration + 1;
+                    root._pendingFocusDecision = null;
+
                     root.showWorkspace({
                         address: clients[i]["address"] || "",
                         windowClass: clients[i]["class"],
@@ -1148,7 +1195,37 @@ Item {
         root._onHyprWindowEvent();
     }
 
+    // Seed `displayedWorkspace` from the compositor once at startup.
+    //
+    // The shell is the only switcher, so after the first switch the optimistic
+    // write is authoritative — but it has no idea what was on screen BEFORE it
+    // started. A `systemctl --user restart tv-shell-quickshell.service` (the
+    // documented deploy loop) can happen with an app displayed, and without this
+    // read the shell would spend that gap asserting a workspace it never chose.
+    //
+    // One read, no retry: a failure leaves `displayedWorkspace` "" (no policy,
+    // nothing muted), and the first real switch supplies the truth anyway.
+    SocketClient {
+        id: displayedWorkspaceSeed
+        onResponseReceived: line => {
+            let monitors = [];
+            try {
+                monitors = JSON.parse(line) || [];
+            } catch (e) {
+                monitors = [];
+            }
+            let observed = ResumeFocus.activeWorkspaceOf(monitors);
+            // Never overwrite a switch that already happened — by the time this
+            // reply lands the shell may have moved, and its own write is the
+            // better answer.
+            if (observed !== "" && root.displayedWorkspace === "")
+                root.displayedWorkspace = observed;
+        }
+        onRequestFailed: console.warn("AppLifecycleManager: could not seed displayedWorkspace; audio policy idle until the first switch")
+    }
+
     Component.onCompleted: {
         hyprEventListener.start();
+        displayedWorkspaceSeed.request("hypr-monitors");
     }
 }

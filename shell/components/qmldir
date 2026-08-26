@@ -43,7 +43,7 @@ IdleInhibitController 1.0 IdleInhibitController.qml
 SocketClient 1.0 SocketClient.qml
 InputManager 1.0 InputManager.qml
 AppLifecycleManager 1.0 AppLifecycleManager.qml
-StreamAudioMuter 1.0 StreamAudioMuter.qml
+WorkspaceAudioMuter 1.0 WorkspaceAudioMuter.qml
 StreamManager 1.0 StreamManager.qml
 ScreenManager 1.0 ScreenManager.qml
 ShellLayout 1.0 ShellLayout.qml
