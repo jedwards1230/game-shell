@@ -338,6 +338,25 @@ Item {
         // handler rather than issued here. On ANY failure to establish the
         // workspaces the handler focuses immediately anyway, so the worst case is
         // exactly the pre-change behaviour plus one local-socket round trip.
+        //
+        // ORDERING IS LOAD-BEARING — `appLaunched()` MUST stay ahead of the move.
+        // Consolidation deliberately raises the number of toplevels sharing one
+        // workspace, which is the exact condition the tiler splits on, so it
+        // depends on the daemon's kiosk backstop re-fullscreening the moved
+        // window (`movewindowv2` -> `enforce_active_fullscreen`, hyprland.rs).
+        // That backstop is GATED: `kiosk_may_enforce` refuses to act while
+        // `shell-focus` is on, because the shell is a layer-shell surface and
+        // Hyprland's `activewindow` would still name a backgrounded app.
+        //
+        // `appLaunched()` is what closes that gate: it drives shell.qml's
+        // `shellOwnsScreen` false, which pushes `shell-focus off` synchronously
+        // in this same tick — whereas the move below cannot happen until an async
+        // socket reply arrives. So the gate is already open when `movewindowv2`
+        // fires. Move `appLaunched()` after the focus dispatch (a tempting way to
+        // keep the shell up over the transition) and the gate is still CLOSED
+        // when the move lands: the backstop skips, and two tiled windows sit
+        // there until the verified assert 400ms later. That is a visible split
+        // view — incident 1 in KIOSK_WINDOW_MODEL.md, reintroduced.
         root._pendingResumeDecision = decision;
         workspaceProbe.request("hypr-monitors");
         appLaunched();
