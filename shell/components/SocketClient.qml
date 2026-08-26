@@ -22,9 +22,9 @@ import QtQuick
 //
 //   • Subscribe stream (subscribe: true) — connect, send `subscribe`, and emit
 //     lineReceived(line) for every event line for the lifetime of the
-//     connection. Auto-reconnects after `reconnectMs` if the connection drops
-//     (mirroring the old per-listener reconnect timers). Start with start();
-//     stop with stop().
+//     connection. Retries every `reconnectMs` — in a LOOP, until it actually
+//     reconnects — if the connection drops, so a daemon restart is survivable.
+//     Start with start(); stop with stop().
 //
 // Socket path: TV_SHELL_SOCK (legacy GAME_SHELL_SOCK fallback via Brand.env) if
 // set, else $XDG_RUNTIME_DIR/tv-shell-input.sock (== /run/user/$UID/…), matching
@@ -42,7 +42,9 @@ Item {
     // practice; exposed so a future stream command could reuse this).
     property string subscribeCommand: "subscribe"
 
-    // Reconnect delay (ms) for subscribe streams after a dropped connection.
+    // Retry interval (ms) for subscribe streams after a dropped connection. The
+    // retry REPEATS at this interval until the socket is back, so this is a
+    // cadence, not a one-shot delay.
     property int reconnectMs: 2000
 
     // --- Signals ---
@@ -137,6 +139,11 @@ Item {
 
         onConnectionStateChanged: {
             if (connected) {
+                // Actually connected — stop retrying. This is the ONLY place the
+                // reconnect loop is cancelled, deliberately: a failed connect
+                // attempt gives no reliable signal, so the timer must keep firing
+                // until a real transition to `connected` proves the daemon is back.
+                reconnectTimer.stop();
                 // On connect, send the opening command:
                 //  • subscribe stream → the subscribe verb
                 //  • request/response → the queued command
@@ -184,12 +191,38 @@ Item {
         }
     }
 
+    // Reconnect loop for subscribe streams. REPEATING, and that is the whole
+    // point.
+    //
+    // It used to be one-shot, re-armed from onConnectionStateChanged's
+    // disconnected branch. That works only if a FAILED connect produces a state
+    // transition — and it does not: `connected` is already false, writing true
+    // and having the connect refused leaves it false, so the handler never fires
+    // and the timer is never re-armed. The shell therefore got exactly ONE
+    // reconnect attempt per client.
+    //
+    // Observed on-device (2026-08-26), timestamps from the journal: the daemon
+    // was restarted at 16:36:23, clients retried at 16:36:23.6, :24.0 and :25.1,
+    // and then stopped forever — while the daemon's socket had come back within
+    // those same two seconds. The shell stayed running and rendering but could
+    // no longer send commands OR receive the `intent:*` broadcast, so Home and
+    // the nav drawer did nothing and the user was stranded in a fullscreen app
+    // with no way back. A daemon restart is a routine deploy step, so this had
+    // to become a loop rather than a longer single delay.
     Timer {
         id: reconnectTimer
         interval: client.reconnectMs
+        repeat: true
         onTriggered: {
-            if (client.subscribe && client._running)
-                sock.connected = true;
+            if (!client.subscribe || !client._running) {
+                reconnectTimer.stop();
+                return;
+            }
+            // Do NOT stop on `sock.connected` here — only the confirmed
+            // transition in onConnectionStateChanged may cancel the loop. If a
+            // refused connect ever left the property reading true, stopping on it
+            // would re-create exactly the permanent deafness this fixes.
+            sock.connected = true;
         }
     }
 
