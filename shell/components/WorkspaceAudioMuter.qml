@@ -41,17 +41,6 @@ Item {
     // Nothing here ever writes back into this list; only the drawer does.
     property var userMutedClasses: []
 
-    // Window classes with a live playback stream right now, latched against
-    // sweep-boundary flicker. Read by the nav drawer's speaker indicator.
-    //
-    // FROZEN while the freshness gate below is shut. Nothing samples the graph
-    // in `streaming`/`reconnecting`, so the latch cannot expire and this holds
-    // its last value — stale, but the drawer is not presented in those states,
-    // and the first sweep after returning to `idle` re-filters by timestamp and
-    // corrects within one interval.
-    property var audioActiveClasses: []
-    property var _activityLatch: ({})
-
     // A FRESHNESS GATE, not a predicate. The predicate is the workspace, always.
     //
     // `runningWindows` is refreshed by AppLifecycleManager's `windowPollTimer`,
@@ -226,19 +215,6 @@ Item {
             muter._adoptedExisting = true;
             muter._appliedIds = AudioOwnership.adoptableMutedIds(nodes);
         }
-
-        // Publish what is making noise before deciding what to silence — the
-        // drawer's indicator should stay current even on a cycle that changes
-        // nothing about the mute set.
-        let now = Date.now();
-        muter._activityLatch = AudioOwnership.latchActivity(muter._activityLatch, AudioOwnership.activityByClass(nodes, muter.runningWindows), now);
-        let active = AudioOwnership.latchedClasses(muter._activityLatch, now);
-        // Republish ONLY on a real change. The drawer's row model is a binding
-        // over this property, so an unconditional assignment would rebuild the
-        // nav list — the very ListView the user is arrowing through — every
-        // sweep. The sweep is here to notice change, not to announce itself.
-        if (!AudioOwnership.sameClasses(active, muter.audioActiveClasses))
-            muter.audioActiveClasses = active;
 
         let desired = AudioOwnership.desiredMutedIds(nodes, muter.runningWindows, muter.activeWorkspace, muter.userMutedClasses);
         let diff = AudioOwnership.reconcile(desired, muter._appliedIds);

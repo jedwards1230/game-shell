@@ -29,35 +29,30 @@ function _classSet(list) {
 // represents, and the drawer hosts no home widgets. HomeScreen could later adopt
 // this module to DRY the duplicated merge.
 //
-// Entry shape (identical to HomeScreen's, consumed by AppCard, plus the two
-// audio flags below):
+// Entry shape (identical to HomeScreen's, consumed by AppCard, plus the audio
+// flag below):
 //   { windowClass, address, name, icon, exec, comment, running, focusHistoryId,
-//     audioActive, userMuted }
+//     userMuted }
 //
-// `audio` is optional: `{ activeClasses, mutedClasses }`, both lists of window
-// classes. Passing it in (rather than reaching for a singleton) keeps this module
-// QML-free, and both lists are produced upstream by `audioOwnership.js` — the
-// same attribution the muting decision uses, so an indicator cannot disagree
-// with what you actually hear.
+// `audio` is optional: `{ mutedClasses }`, a list of window classes the user has
+// muted BY HAND. Passing it in (rather than reaching for a singleton) keeps this
+// module QML-free.
 //
-// The two flags answer deliberately DIFFERENT questions, because the obvious
-// pair would be useless:
-//   * `audioActive` — this app has a live playback stream. Under the workspace
-//     policy this is the informative one: it names the app making noise you
-//     cannot hear.
-//   * `userMuted` — the user muted this app BY HAND. Never the policy mute,
-//     which is true of nearly every app at any moment and would light up every
-//     row while telling you nothing.
+// `userMuted` is deliberately NOT the policy mute. The workspace policy mutes
+// nearly every app at any moment, so rendering that would light up every row
+// while telling you nothing. There is no companion "producing audio" flag for
+// the same family of reason: the policy already guarantees the app on screen is
+// the only one you can hear, so "what is making noise" is a question the system
+// has made unaskable.
 //
-// Only RUNNING rows can carry either flag. A recent-but-not-running app has no
-// window and therefore no window class to attribute a stream to or key a mute
-// on; both read false, which is also why the drawer offers no mute toggle there.
+// Only RUNNING rows can carry the flag. A recent-but-not-running app has no
+// window and therefore no window class to key a mute on; it reads false, which
+// is also why the drawer offers no mute toggle there.
 function build(running, recents, allApps, matcher, audio) {
     running = running || [];
     recents = recents || [];
     allApps = allApps || [];
 
-    var audioActiveSet = _classSet((audio || {}).activeClasses);
     var userMutedSet = _classSet((audio || {}).mutedClasses);
 
     function runningMatchesRecent(win, recent) {
@@ -106,7 +101,6 @@ function build(running, recents, allApps, matcher, audio) {
             comment: "",
             running: true,
             focusHistoryId: (win.focusHistoryId !== undefined) ? win.focusHistoryId : 9999,
-            audioActive: audioActiveSet[win.windowClass || ""] === true,
             userMuted: userMutedSet[win.windowClass || ""] === true
         });
     }
@@ -128,9 +122,8 @@ function build(running, recents, allApps, matcher, audio) {
             comment: rec.comment || "",
             running: false,
             // A recent-but-not-running app has no window, so there is no class
-            // to attribute a stream to or to key a mute on.
+            // to key a mute on.
             focusHistoryId: 9999,
-            audioActive: false,
             userMuted: false
         });
     }

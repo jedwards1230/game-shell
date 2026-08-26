@@ -47,11 +47,6 @@ Drawer {
     signal appFocusRequested(string address, string windowClass)
     signal appCloseRequested(string address)
 
-    // Window classes with a live playback stream, from WorkspaceAudioMuter (the
-    // same attribution the muting decision uses — see audioOwnership.js). Wired
-    // in by ShellLayout; an empty list simply means no row shows the speaker.
-    property var audioActiveClasses: []
-
     // === Resume list — RUNNING windows only ===
     // resumeModel.build merges running windows + recents and resolves each entry's
     // name/icon (via the WindowMatcher singleton + AppDiscoveryManager). We keep
@@ -64,10 +59,11 @@ Drawer {
     // different destinations, and collapsing them removed the only route to the
     // live stream). See appQuirks.identifyCompanionWindows.
     readonly property var resumeModel: ResumeModel.build(AppQuirks.identifyCompanionWindows(root.runningWindows), RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher, {
-        activeClasses: root.audioActiveClasses,
         // The user's OWN mutes only. The workspace policy mutes nearly
         // everything at any moment, so showing that would light up every row and
-        // say nothing.
+        // say nothing — which is also why there is no "producing audio"
+        // indicator: the policy already guarantees the app on screen is the only
+        // one you can hear, so the question has been made unaskable.
         mutedClasses: SettingsStore.mutedApps
     })
     readonly property var resumeApps: root.resumeModel.filter(function (e) {
@@ -288,30 +284,15 @@ Drawer {
                         Layout.fillWidth: true
                     }
 
-                    // Audio indicators. BOTH are conditionally rendered, so a row
-                    // with no audio story looks exactly as it did before this
-                    // existed — the common row gains no clutter.
-                    //
-                    // Glyph-only on purpose: the box has no system icon theme
-                    // (see AppIcon's letter-initial fallback for the same
-                    // reason), so an `image://icon/` name would render nothing.
-
-                    // "This app has a live playback stream." The informative one:
-                    // under the workspace policy it names the app making noise
-                    // you cannot hear.
-                    Text {
-                        visible: modelData.kind === "resume" && modelData.entry && modelData.entry.audioActive === true
-                        Layout.alignment: Qt.AlignVCenter
-                        text: "\u{1F50A}"
-                        font.pixelSize: Theme.fontBody
-                        color: Theme.textPrimary
-                        Accessible.role: Accessible.Indicator
-                        Accessible.name: "Playing audio"
-                    }
-
                     // "You muted this app by hand." NEVER the policy mute, which
                     // is true of nearly every app at any moment and would light
                     // up every row while telling the user nothing.
+                    //
+                    // Conditionally rendered, so a row you have not muted looks
+                    // exactly as it did before this existed. Glyph-only on
+                    // purpose: the box has no system icon theme (see AppIcon's
+                    // letter-initial fallback), so an `image://icon/` name would
+                    // render nothing.
                     Text {
                         visible: modelData.kind === "resume" && modelData.entry && modelData.entry.userMuted === true
                         Layout.alignment: Qt.AlignVCenter

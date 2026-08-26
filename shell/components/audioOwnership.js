@@ -185,14 +185,7 @@ function nodesFrom(dump) {
             appName: _s(props["application.name"]),
             nodeName: _s(props["node.name"]),
             mediaName: _s(props["media.name"]),
-            muted: _mutedOf(info),
-            // PipeWire's `running` means the stream is ACTIVE IN THE GRAPH, not
-            // that the samples are non-zero. An app feeding silence still reads
-            // running. That is the right meaning for the drawer's speaker
-            // indicator — the question it answers is "which app has live audio
-            // output I cannot hear", and a brief false positive is far better
-            // than failing to show the app that is actually making noise.
-            running: _s(info.state) === "running"
+            muted: _mutedOf(info)
         });
     }
     return out;
@@ -299,102 +292,6 @@ function desiredMutedIds(nodes, runningWindows, activeWorkspace, userMutedClasse
             muted.push(_s(list[j].id));
     }
     return muted;
-}
-
-// --- what is actually making noise -------------------------------------------
-
-// Window classes with at least one playback stream live in the graph.
-//
-// This is the drawer's speaker indicator, and it deliberately answers a
-// different question from the mute indicator. Under this policy nearly every app
-// is muted at any moment, so "is muted" on a row would light up everywhere and
-// carry no information. "Is producing audio" is the useful one: it names the app
-// making noise you cannot hear.
-//
-// Attribution runs through `ownerClassOf`, the same path the muting decision
-// uses. Two implementations that can disagree is how you get an indicator that
-// contradicts what you actually hear.
-function activityByClass(nodes, runningWindows) {
-    var index = _workspaceIndex(runningWindows);
-    var active = [];
-    var seen = Object.create(null);
-    var list = nodes || [];
-    for (var i = 0; i < list.length; i++) {
-        var node = list[i];
-        if (!node || node.running !== true || isShellOwned(node))
-            continue;
-        var owner = ownerClassOf(node, index.classes);
-        if (owner === "" || seen[owner])
-            continue;
-        seen[owner] = true;
-        active.push(owner);
-    }
-    return active;
-}
-
-// How long a class keeps its "producing audio" indicator after its stream stops
-// being seen live.
-//
-// The graph is sampled on a sweep, so without a latch a stream that lands on the
-// wrong side of two consecutive samples toggles the icon on and off. At the
-// couch that reads as a broken indicator even when every individual sample was
-// correct. Longer than two sweeps, short enough that the icon is not obviously
-// stale.
-var ACTIVITY_LATCH_MS = 12000;
-
-// Fold a fresh activity reading into the latch. `latch` maps class -> the last
-// time it was seen live; entries older than the window are dropped.
-function latchActivity(previous, activeClasses, now) {
-    var next = Object.create(null);
-    var prev = previous || {};
-    for (var key in prev) {
-        if (now - prev[key] <= ACTIVITY_LATCH_MS)
-            next[key] = prev[key];
-    }
-    var active = activeClasses || [];
-    for (var i = 0; i < active.length; i++) {
-        var cls = _s(active[i]);
-        if (cls !== "")
-            next[cls] = now;
-    }
-    return next;
-}
-
-// The classes a latch currently reports as producing audio.
-//
-// Sorted, so a stable set produces a stable array. `pw-dump` does not promise a
-// node order, and the caller compares consecutive readings to decide whether to
-// republish — an order that wobbles would look like a change every time.
-function latchedClasses(latch, now) {
-    var out = [];
-    var map = latch || {};
-    for (var key in map) {
-        if (now - map[key] <= ACTIVITY_LATCH_MS)
-            out.push(key);
-    }
-    return out.sort();
-}
-
-// Do two class lists hold the same set?
-//
-// Guards a republish, and that matters more than it looks. The drawer's row
-// model is a binding over this list, so reassigning it rebuilds the nav model —
-// and the ListView underneath is what the user is currently arrowing through.
-// Republishing an unchanged list every sweep would rebuild the rows under their
-// cursor every few seconds. The sweep exists to notice change, not to announce
-// its own heartbeat.
-function sameClasses(a, b) {
-    var x = a || [];
-    var y = b || [];
-    if (x.length !== y.length)
-        return false;
-    var xs = x.slice().sort();
-    var ys = y.slice().sort();
-    for (var i = 0; i < xs.length; i++) {
-        if (_s(xs[i]) !== _s(ys[i]))
-            return false;
-    }
-    return true;
 }
 
 // --- reconciliation ----------------------------------------------------------

@@ -154,32 +154,28 @@ Adoption populates the applied set of node ids and never writes back into the
 user's list — only the drawer does. Were adoption to manufacture a user mute, the
 user would end up with an app they never muted and no obvious way out.
 
-### The two drawer indicators, and why they are not the obvious pair
+### The drawer's mute indicator, and the one that was deliberately removed
 
-Each running-app row in the drawer can show two glyphs, both conditionally
-rendered so a row with no audio story looks exactly as it did before they
-existed.
+Each running-app row in the drawer can show a single glyph, 🔇, conditionally
+rendered — so a row you have not muted looks exactly as it did before this
+existed. It means **the user muted this app by hand**, never the policy mute:
+the policy mutes nearly every app at any moment, so rendering it would light up
+every row while carrying no information.
 
-| Glyph | Means | Why this and not the obvious thing |
-|---|---|---|
-| 🔊 | This app has a **live playback stream** | Under this policy nearly every app is muted at any moment, so "is audible" would be true of exactly one row and tell you nothing. "Is producing audio" names *the app making noise you cannot hear* — the confusion that started this whole thread. |
-| 🔇 | The user muted this app **by hand** | Never the policy mute. That one is implied by "not the app on screen" and would light up every row while carrying zero information. |
+There was briefly a second indicator — a speaker, meaning "this app has a live
+playback stream" — and **removing it is worth recording, because the reasoning
+generalises.** It was answering *"what is making noise that I cannot hear?"*, and
+that is a question this policy has already made unaskable: the app on screen is
+the only one you can hear, by construction. An indicator whose answer the system
+guarantees is not information, it is reassurance, and it cost a live PipeWire
+attribution path into the drawer, a ~12s anti-flicker latch, a per-row activity
+flag, and a republish comparison to stop the audio sweep rebuilding the nav list
+under the user's thumb. All of it deleted with the icon.
 
-Both read through `audioOwnership.js`, the same attribution the muting decision
-uses. Two implementations that can disagree is how you get an indicator that
-contradicts what you actually hear.
-
-Note what 🔊 does *not* mean: PipeWire's `running` says the stream is active in
-the graph, not that the samples are non-zero, so an app feeding silence still
-shows it. That is the right trade — a brief false positive is far better than
-failing to show the app that is actually making noise.
-
-**Neither icon blinks on the sweep.** Activity is latched for ~12s (longer than
-two sweeps), so a stream landing on the wrong side of two consecutive samples
-does not toggle the glyph; and the published class list is compared before being
-republished, because the drawer's row model is a binding over it and reassigning
-it would rebuild the very ListView the user is arrowing through. The sweep exists
-to notice change, not to announce its own heartbeat.
+What survived the deletion, because it fixed real bugs independent of any icon:
+the drawer's row focus is keyed on the app's **window address** rather than a row
+index (see below), and `runningWindows` remains signature-gated upstream, so the
+row model now republishes only on genuine membership or ordering changes.
 
 ### Where the rule deliberately stands down
 

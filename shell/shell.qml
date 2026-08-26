@@ -687,11 +687,6 @@ ShellRoot {
                 }
                 shellState: root.state
                 runningWindows: appLifecycle.runningWindows
-                // What is actually making noise, for the drawer's per-row
-                // speaker indicator. Comes from the muter so the indicator and
-                // the muting decision can never disagree about which app owns a
-                // stream (audioOwnership.js is the single attribution path).
-                audioActiveClasses: workspaceAudioMuter.audioActiveClasses
                 pads: inputManager.pads
                 runningAppClass: appLifecycle.runningAppClass
                 overlayDrawerOpen: root.overlayDrawerOpen
