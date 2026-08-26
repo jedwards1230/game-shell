@@ -159,4 +159,65 @@ TestCase {
         compare(AppQuirks.quitCommandForWindow("steam", [], testCase.matcher), null);
         compare(AppQuirks.quitCommandForWindow("steam", [testCase.steam], null), null);
     }
+
+    // --- groupCompanionWindows(): one session, one row ----------------------
+    //
+    // Steam Remote Play maps the live game in a `streaming_client` window while
+    // "Steam Big Picture Mode" stays mapped behind it. Enumerated naively that is
+    // two apps, and the Steam-looking row resumes the WRONG one — the reported
+    // black screen. These pin the collapse and, just as importantly, the cases
+    // that must NOT collapse.
+
+    function _w(windowClass, address, title, icon) {
+        return {
+            windowClass: windowClass,
+            address: address,
+            title: title,
+            icon: icon
+        };
+    }
+
+    function test_companion_supersedes_its_owner() {
+        var out = AppQuirks.groupCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Red Dead Redemption 2", "")]);
+        compare(out.length, 1, "one Remote Play session must produce one row");
+        compare(out[0].windowClass, "streaming_client");
+        compare(out[0].address, "0xgame", "the row must resume the LIVE surface, not Big Picture");
+        compare(out[0].title, "Red Dead Redemption 2");
+        compare(out[0].icon, "steam", "the companion has no desktop entry — it inherits the owner's icon");
+    }
+
+    function test_owner_without_a_companion_is_untouched() {
+        var out = AppQuirks.groupCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam")]);
+        compare(out.length, 1);
+        compare(out[0].address, "0xsteam");
+    }
+
+    // A stream whose Steam window has gone is still a real, resumable window.
+    function test_companion_without_its_owner_survives() {
+        var out = AppQuirks.groupCompanionWindows([_w("streaming_client", "0xgame", "Rocket League", "")]);
+        compare(out.length, 1);
+        compare(out[0].windowClass, "streaming_client");
+    }
+
+    function test_unrelated_windows_pass_through_untouched() {
+        var input = [_w("tv.plex.Plex", "0xplex", "Plex HTPC", "plex"), _w("steam", "0xsteam", "Steam", "steam"), _w("streaming_client", "0xgame", "Factorio", "")];
+        var out = AppQuirks.groupCompanionWindows(input);
+        compare(out.length, 2, "only the superseded owner is dropped");
+        compare(out[0].windowClass, "tv.plex.Plex", "order is preserved");
+        compare(out[1].windowClass, "streaming_client");
+    }
+
+    // The poller publishes runningWindows; a grouping pass that mutated it would
+    // corrupt every other consumer of that model.
+    function test_input_is_not_mutated() {
+        var input = [_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Dune: Awakening", "")];
+        AppQuirks.groupCompanionWindows(input);
+        compare(input.length, 2, "the source model must be left intact");
+        compare(input[1].icon, "", "the source entry must not gain the owner's icon");
+    }
+
+    function test_grouping_null_inputs_are_safe() {
+        compare(AppQuirks.groupCompanionWindows(null).length, 0);
+        compare(AppQuirks.groupCompanionWindows([]).length, 0);
+    }
 }

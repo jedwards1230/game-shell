@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import "lib"
 import "resumeModel.js" as ResumeModel
+import "appQuirks.js" as AppQuirks
 
 // Left navigation drawer (#216, epic #133 Phase 1). Top→bottom:
 //   1. Clock/date header
@@ -51,7 +52,12 @@ Drawer {
     // name/icon (via the WindowMatcher singleton + AppDiscoveryManager). We keep
     // only the running entries here: the drawer's resume rows are for jumping back
     // into a live app, one row each. (Recents live on the Home screen.)
-    readonly property var resumeModel: ResumeModel.build(root.runningWindows, RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher)
+    // Companion windows are collapsed BEFORE the merge, not after: an owner
+    // window that a companion supersedes (Steam Big Picture behind a Remote Play
+    // `streaming_client`) must never reach resumeModel.build, or it both paints a
+    // second row for one session and shadows the recent entry the real row would
+    // have matched. See appQuirks.groupCompanionWindows.
+    readonly property var resumeModel: ResumeModel.build(AppQuirks.groupCompanionWindows(root.runningWindows), RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher)
     readonly property var resumeApps: root.resumeModel.filter(function (e) {
         return e.running === true;
     })

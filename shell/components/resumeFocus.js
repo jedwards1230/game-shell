@@ -189,3 +189,174 @@ function shouldAssertFullscreen(decision, active) {
         reason: ""
     };
 }
+
+// === Workspace consolidation (the resume black-screen fix) =================
+//
+// THE BUG THIS EXISTS TO CLOSE. `KIOSK_WINDOW_MODEL.md` states the kiosk
+// contract holds "by construction ON A SINGLE WORKSPACE" — every guarantee in
+// that document (the fullscreen windowrule, `on_focus_under_fullscreen`,
+// `exit_window_retains_fullscreen`, the daemon's idempotent backstop) assumes
+// every app window and the displayed workspace are the same workspace. Nothing
+// enforced it: there is no `default_workspace`, no workspace windowrule, no
+// workspace keybind, and until this change not one `dispatch workspace` /
+// `movetoworkspace` call anywhere in the shell or the daemon.
+//
+// Observed on htpc-1 (2026-08-25): Plex on workspace 1, Steam Big Picture on
+// workspace 4, and the monitor DISPLAYING workspace 2 — which held no windows at
+// all. The shell is a layer-shell surface and draws regardless of workspace, so
+// Home looked healthy; the instant a resume unmapped it there was genuinely
+// nothing beneath to render and the TV went black. `dispatch focuswindow` could
+// not save it either: it does not reliably follow across workspaces
+// (hyprwm/Hyprland#1611 — the same issue KIOSK_WINDOW_MODEL.md cites when it
+// defers per-app workspace isolation to Phase 2).
+//
+// CONSOLIDATE, DON'T FOLLOW. The fix moves the target window ONTO the workspace
+// already being displayed (`movetoworkspace <active>,address:<addr>`) rather than
+// switching the display to wherever the window drifted (`dispatch workspace N`).
+// Following would resume correctly but leave the box permanently multi-workspace,
+// keeping the active-but-empty workspace reachable forever. Consolidating drains
+// stray workspaces back toward one every time the user resumes anything, which
+// restores the invariant the rest of the model already depends on instead of
+// teaching the shell to live without it.
+//
+// FAIL-SAFE DIRECTION: every branch that cannot establish BOTH the target's
+// workspace and the displayed workspace returns `move: false` — i.e. it degrades
+// to exactly the pre-change behaviour (focus alone). A move we are not sure about
+// is strictly worse than no move: `movetoworkspace` aimed at the wrong workspace
+// would relocate a live window off-screen, which is the failure we are fixing.
+var REASON_NO_MONITORS = "no-monitors";
+var REASON_NO_ACTIVE_WORKSPACE = "no-active-workspace";
+var REASON_UNKNOWN_TARGET_WORKSPACE = "unknown-target-workspace";
+var REASON_ALREADY_ON_ACTIVE = "already-on-active";
+
+// The workspace currently on screen, read from a `hypr-monitors` reply.
+//
+// SINGLE-OUTPUT ASSUMPTION, STATED RATHER THAN ASSUMED: `hypr-monitors` carries
+// no `focused` field (daemon/src/hyprland.rs `monitor_entry`), so on a multi-head
+// setup there is no way to tell which output has focus. tv-shell is a TV kiosk
+// driving one output, so the first monitor IS the display. Rather than guess on a
+// multi-head box, an ambiguous read returns "" and the caller skips the move —
+// the fail-safe direction above. If multi-head ever matters, add `focused` to
+// `monitor_entry` and select on it here; nothing else needs to change.
+function activeWorkspaceOf(monitors) {
+    var list = monitors || [];
+    if (list.length === 0)
+        return "";
+    var first = list[0] || {};
+    return _s(first.activeWorkspace);
+}
+
+// Find the window a resume decision targets, so we can read its workspace.
+// ADDRESS mode matches the exact window; CLASS mode (our snapshot was stale on
+// address, but the class still resolves a live window) takes the first window of
+// that class, case-insensitively, which is the same window `dispatch focuswindow
+// class:<c>` would land on.
+function _targetWindow(decision, runningWindows) {
+    var d = decision || {};
+    var windows = runningWindows || [];
+    var i;
+    if (d.mode === MODE_ADDRESS) {
+        for (i = 0; i < windows.length; i++) {
+            if (windows[i] && _s(windows[i].address) === _s(d.address))
+                return windows[i];
+        }
+        return null;
+    }
+    if (d.mode === MODE_CLASS) {
+        var want = _s(d.windowClass).toLowerCase();
+        if (want === "")
+            return null;
+        for (i = 0; i < windows.length; i++) {
+            if (windows[i] && _s(windows[i].windowClass).toLowerCase() === want)
+                return windows[i];
+        }
+    }
+    return null;
+}
+
+// Should the resume path pull its target window onto the displayed workspace
+// before focusing it?
+//
+//   decision       — the object returned by resolve().
+//   monitors       — the parsed `hypr-monitors` reply (array), or [] on failure.
+//   runningWindows — the window snapshot, whose entries now carry `workspace`
+//                    (the workspace NAME, matching hypr-clients' `workspace`
+//                    field and hypr-monitors' `activeWorkspace`).
+//
+// Returns { move, workspace, address, reason }. `workspace` is the destination
+// (the displayed one) and `address` the window to move — both "" when move is
+// false. `reason` says why we are NOT moving, "" when we are.
+function resolveWorkspaceMove(decision, monitors, runningWindows) {
+    var d = decision || {};
+    if (d.mode !== MODE_ADDRESS && d.mode !== MODE_CLASS)
+        return {
+            move: false,
+            workspace: "",
+            address: "",
+            reason: REASON_NO_TARGET
+        };
+
+    var list = monitors || [];
+    if (list.length === 0)
+        return {
+            move: false,
+            workspace: "",
+            address: "",
+            reason: REASON_NO_MONITORS
+        };
+
+    var activeWs = activeWorkspaceOf(list);
+    if (activeWs === "")
+        return {
+            move: false,
+            workspace: "",
+            address: "",
+            reason: REASON_NO_ACTIVE_WORKSPACE
+        };
+
+    var win = _targetWindow(d, runningWindows);
+    var winWs = win ? _s(win.workspace) : "";
+    if (!win || winWs === "")
+        return {
+            move: false,
+            workspace: "",
+            address: "",
+            reason: REASON_UNKNOWN_TARGET_WORKSPACE
+        };
+
+    if (winWs === activeWs)
+        return {
+            move: false,
+            workspace: "",
+            address: "",
+            reason: REASON_ALREADY_ON_ACTIVE
+        };
+
+    // Always move by ADDRESS, never by class: `movetoworkspace <ws>,class:<c>`
+    // would relocate whichever window of that class Hyprland picks first, and
+    // with Steam that is routinely the Big Picture window rather than the live
+    // Remote Play surface. The snapshot entry we just matched has the exact
+    // address even on the CLASS path, so there is no reason to be imprecise.
+    return {
+        move: true,
+        workspace: activeWs,
+        address: _s(win.address),
+        reason: ""
+    };
+}
+
+// Format a workspace NAME as a Hyprland workspace selector.
+//
+// `hypr-clients`/`hypr-monitors` report the workspace *name*. For the ordinary
+// numbered workspaces this kiosk uses, the name IS the id ("1", "4"), and
+// Hyprland accepts a bare number as an id selector. A named workspace ("games")
+// is not a valid bare selector and must go through `name:` — without this,
+// `movetoworkspace games,address:0x…` is parsed as an id, fails to match, and
+// (per `hyprctl dispatch`'s exit-code behaviour documented above) still exits 0,
+// i.e. it would fail exactly as silently as the bug this file exists to fix.
+function workspaceSelector(workspace) {
+    var ws = _s(workspace);
+    if (ws === "")
+        return "";
+    return /^[0-9]+$/.test(ws) ? ws : ("name:" + ws);
+}

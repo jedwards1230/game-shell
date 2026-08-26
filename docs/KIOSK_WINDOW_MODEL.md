@@ -136,6 +136,56 @@ Reconciling prewarm's `[silent]` mapping with the kiosk invariant — i.e. wheth
 prewarmed windows should map differently in the first place — is **deferred**
 (#347 item 4).
 
+**Amendment — the single-workspace premise is now asserted, not assumed.**
+Everything above holds *"by construction on a single workspace"*, and until now
+nothing enforced that clause. There is no `default_workspace`, no workspace
+windowrule, no workspace keybind, and there was not one `dispatch workspace` or
+`movetoworkspace` call anywhere in the shell or the daemon — so the premise was a
+belief about the box, with no invariant check, no telemetry, and no recovery.
+
+It was already false in the field. Observed on htpc-1 (2026-08-25): Plex HTPC on
+workspace 1, Steam Big Picture on workspace 4, and the monitor **displaying
+workspace 2, which held no windows at all**. Because the shell is a layer-shell
+surface it draws regardless of workspace, so the home screen looked perfectly
+healthy — but the instant a resume unmapped it, there was genuinely nothing
+beneath to render and the TV went black. `dispatch focuswindow` could not rescue
+it: it does not reliably follow across workspaces
+([hyprwm/Hyprland#1611](https://github.com/hyprwm/Hyprland/issues/1611)), the same
+issue cited under Phase 2 below. What put the windows there is **still unknown** —
+which is precisely why the consolidation below logs every move rather than
+self-healing silently.
+
+The resume path therefore reads `hypr-monitors` for the displayed workspace and,
+when its target has drifted elsewhere, dispatches
+`movetoworkspace <displayed>,address:<addr>` *before* focusing
+(`resumeFocus.resolveWorkspaceMove`, pure and headlessly tested in
+`tests/qml/tst_resumefocus.qml`).
+
+**Consolidate, not follow.** Switching the display to the window
+(`dispatch workspace N`) would also resume correctly, but it accepts a
+multi-workspace box permanently and keeps the active-but-empty workspace
+reachable forever. Pulling the window onto the displayed workspace drains stray
+workspaces back toward one every time the user resumes anything, which restores
+the premise the rest of this document depends on. Every branch that cannot
+establish *both* the target's workspace and the displayed one declines to move
+and focuses anyway — degrading to exactly the pre-change behaviour, since a
+`movetoworkspace` aimed at the wrong workspace would relocate a live window
+off-screen, which is the failure being fixed.
+
+**A verified miss now recovers.** `resume-verify` used to log and stop. But by
+that point `appLaunched()` has already unmapped the shell, so a resume that
+provably did not land leaves the TV showing whatever is underneath — in the
+incident above, nothing. The shell now emits `resumeFailed` and returns to the
+home screen (`resume-abandoned`). It is deliberately **not** `appClosed`: the app
+is still running, and only the shell's belief that it came forward was wrong.
+
+**Companion windows (Steam Remote Play).** Launching a game via Remote Play maps
+the live video in a `streaming_client` toplevel while Big Picture stays mapped
+behind it. Enumerated naively that is two apps, and the Steam-looking resume row
+targeted Big Picture rather than the running game — the `active-address-mismatch`
+in the incident journal. `appQuirks.groupCompanionWindows` collapses the pair to
+one row that carries the companion's address and title with the owner's icon.
+
 **Self-healing daemon** (`daemon/src/session_env.rs`, `hyprland.rs`): signature
 resolution scans `$XDG_RUNTIME_DIR/hypr/` for the live socket dir *before*
 trusting an inherited env var, so a reconnect re-attaches to a restarted Hyprland
@@ -188,6 +238,16 @@ across workspaces — [hyprwm/Hyprland#1611](https://github.com/hyprwm/Hyprland/
 change for the current phase.
 
 ## Phase 2 (deferred — the strongest form, needs on-device iteration)
+
+> **Reconciling Phase 2 with the consolidation amendment above.** The two want
+> opposite things and cannot both be live: consolidation drains every app window
+> onto the displayed workspace, while isolation deliberately keeps them apart.
+> Consolidation is the *single-workspace* model finally enforcing its own premise,
+> and it must be **removed**, not merely bypassed, if isolation is ever adopted —
+> at which point resume becomes `dispatch workspace N` as described below. The
+> pure decision already lives behind one function
+> (`resumeFocus.resolveWorkspaceMove`), so the swap is contained to it and its
+> tests.
 
 **Per-app-workspace isolation.** Assign each app window its own workspace
 (class-grouped, so Steam's splash + main share one) so two app windows can never
@@ -251,7 +311,9 @@ used:
 | `stream` | `StreamManager._launchMoonlight` — direct child, not via `hyprctl` | `none` |
 | `prewarm-decision` | the login prewarm pass's one evaluation (what it saw, what it chose) | — |
 | `resume` | `focusByAddress` — the address missed the window snapshot: either a class fallback (`mode=class`) or nothing actionable (`mode=none`) | — |
+| `resume-workspace` | the resume target was on a different workspace than the display and was consolidated onto it — `address=` moved, `workspace=` destination | — |
 | `resume-verify` | a resume focus dispatch that did NOT land — `wanted=` vs `active=` names the miss | — |
+| `resume-abandoned` | that miss was recovered by returning to the shell rather than leaving the TV on whatever was underneath | — |
 
 The two `resume*` origins carry no `rule=`/`comm=` (they focus an existing
 window rather than exec a new one). They are logged **only on a fault** — a

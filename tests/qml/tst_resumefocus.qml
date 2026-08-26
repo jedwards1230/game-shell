@@ -264,4 +264,103 @@ TestCase {
         var r = ResumeFocus.shouldAssertFullscreen(null, null);
         verify(!r.assert);
     }
+
+    // --- resolveWorkspaceMove(): workspace consolidation --------------------
+    //
+    // The device could not show us these branches either: a resume that focused a
+    // window on an off-screen workspace changed nothing visible, and `hyprctl
+    // dispatch` reported success for it. These assertions are the only place the
+    // "did we decide to consolidate, and onto what" question is answerable.
+
+    function _wsWin(address, windowClass, workspace) {
+        return {
+            address: address,
+            windowClass: windowClass,
+            workspace: workspace
+        };
+    }
+
+    function _monitors(activeWorkspace) {
+        return [
+            {
+                name: "HDMI-A-1",
+                activeWorkspace: activeWorkspace
+            }
+        ];
+    }
+
+    // The reported bug, reduced: Steam on workspace 4, TV displaying workspace 2.
+    function test_target_on_another_workspace_is_pulled_onto_the_displayed_one() {
+        var windows = [_wsWin("0xsteam", "steam", "4")];
+        var d = ResumeFocus.resolve("0xsteam", "", windows);
+        var plan = ResumeFocus.resolveWorkspaceMove(d, _monitors("2"), windows);
+        verify(plan.move, "a target off the displayed workspace must be consolidated");
+        compare(plan.workspace, "2", "destination is the DISPLAYED workspace, not the window's");
+        compare(plan.address, "0xsteam");
+    }
+
+    function test_target_already_on_the_displayed_workspace_is_left_alone() {
+        var windows = [_wsWin("0xaaa", "tv.plex.Plex", "1")];
+        var d = ResumeFocus.resolve("0xaaa", "", windows);
+        var plan = ResumeFocus.resolveWorkspaceMove(d, _monitors("1"), windows);
+        verify(!plan.move);
+        compare(plan.reason, ResumeFocus.REASON_ALREADY_ON_ACTIVE);
+    }
+
+    // The CLASS path exists because our snapshot goes stale; consolidation must
+    // still work there, and must still move by ADDRESS (moving by class would
+    // pick whichever window Hyprland matched first).
+    function test_class_fallback_consolidates_by_address() {
+        var windows = [_wsWin("0xbbb", "steam", "4")];
+        var d = ResumeFocus.resolve("0xstale", "steam", windows);
+        compare(d.mode, ResumeFocus.MODE_CLASS);
+        var plan = ResumeFocus.resolveWorkspaceMove(d, _monitors("2"), windows);
+        verify(plan.move);
+        compare(plan.address, "0xbbb", "must resolve the class back to a concrete address");
+    }
+
+    // Every "we could not establish this" branch must degrade to the
+    // pre-change behaviour (focus alone), never to a speculative move.
+    function test_unknown_inputs_never_move() {
+        var windows = [_wsWin("0xaaa", "steam", "4")];
+        var d = ResumeFocus.resolve("0xaaa", "", windows);
+
+        compare(ResumeFocus.resolveWorkspaceMove(d, [], windows).reason, ResumeFocus.REASON_NO_MONITORS);
+        verify(!ResumeFocus.resolveWorkspaceMove(d, [], windows).move);
+
+        compare(ResumeFocus.resolveWorkspaceMove(d, _monitors(""), windows).reason, ResumeFocus.REASON_NO_ACTIVE_WORKSPACE);
+
+        var noWs = [_wsWin("0xaaa", "steam", "")];
+        compare(ResumeFocus.resolveWorkspaceMove(ResumeFocus.resolve("0xaaa", "", noWs), _monitors("2"), noWs).reason, ResumeFocus.REASON_UNKNOWN_TARGET_WORKSPACE);
+
+        var none = ResumeFocus.resolve("", "", []);
+        compare(none.mode, ResumeFocus.MODE_NONE);
+        compare(ResumeFocus.resolveWorkspaceMove(none, _monitors("2"), []).reason, ResumeFocus.REASON_NO_TARGET);
+    }
+
+    function test_resolve_workspace_move_handles_null_inputs() {
+        verify(!ResumeFocus.resolveWorkspaceMove(null, null, null).move);
+    }
+
+    // A multi-head box cannot say which output is focused (hypr-monitors carries
+    // no `focused` field), so the first monitor is taken as the display — the
+    // stated single-output kiosk assumption.
+    function test_active_workspace_reads_the_first_monitor() {
+        compare(ResumeFocus.activeWorkspaceOf(_monitors("7")), "7");
+        compare(ResumeFocus.activeWorkspaceOf([]), "");
+        compare(ResumeFocus.activeWorkspaceOf(null), "");
+    }
+
+    // --- workspaceSelector(): id vs named workspaces ------------------------
+
+    function test_numeric_workspace_is_a_bare_id_selector() {
+        compare(ResumeFocus.workspaceSelector("2"), "2");
+    }
+
+    // A named workspace passed bare would be parsed as an id, match nothing, and
+    // still exit 0 — failing exactly as silently as the bug being fixed.
+    function test_named_workspace_is_qualified() {
+        compare(ResumeFocus.workspaceSelector("games"), "name:games");
+        compare(ResumeFocus.workspaceSelector(""), "");
+    }
 }
