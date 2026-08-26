@@ -43,6 +43,12 @@ Item {
 
     // Window classes with a live playback stream right now, latched against
     // sweep-boundary flicker. Read by the nav drawer's speaker indicator.
+    //
+    // FROZEN while the freshness gate below is shut. Nothing samples the graph
+    // in `streaming`/`reconnecting`, so the latch cannot expire and this holds
+    // its last value — stale, but the drawer is not presented in those states,
+    // and the first sweep after returning to `idle` re-filters by timestamp and
+    // corrects within one interval.
     property var audioActiveClasses: []
     property var _activityLatch: ({})
 

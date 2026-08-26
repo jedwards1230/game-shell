@@ -136,3 +136,40 @@ function build(running, recents, allApps, matcher, audio) {
     }
     return result;
 }
+
+// --- nav-row focus, kept by identity ----------------------------------------
+//
+// The drawer's nav rows are [Home, ...one per running app], sorted by
+// focusHistoryId, and BOTH their order and their membership change while the
+// drawer is open. So "which row is the user on" cannot be a position.
+//
+// Restoring by index is worse than the problem it solves: an app exiting — or
+// any new window mapping, which lands at focusHistoryId 0 and shifts everything
+// down — moves a given index onto a DIFFERENT app. The cursor would sit on a
+// neighbour with nothing on screen saying so, and the next activation would
+// resume the wrong app. Landing on Home is at least visible.
+//
+// Index 0 is Home and carries no entry, so "" doubles as "Home / nothing known".
+
+// The window address of a nav row, or "" for Home / out of range.
+function addressAt(navRows, index) {
+    var rows = navRows || [];
+    if (index <= 0 || index >= rows.length)
+        return "";
+    var entry = (rows[index] || {}).entry;
+    return (entry && entry.address) ? entry.address : "";
+}
+
+// Where a remembered address sits in the CURRENT rows; 0 (Home) when that app is
+// gone, which is the right landing place for a row that no longer exists.
+function indexForAddress(navRows, address) {
+    if (!address || address === "")
+        return 0;
+    var rows = navRows || [];
+    for (var i = 1; i < rows.length; i++) {
+        var entry = (rows[i] || {}).entry;
+        if (entry && entry.address === address)
+            return i;
+    }
+    return 0;
+}

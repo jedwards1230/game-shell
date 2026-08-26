@@ -108,20 +108,41 @@ Drawer {
         return best;
     }
 
-    // The row the user is on, tracked independently of `navList.currentIndex`.
+    // The row the user is on, held as the app's window ADDRESS — an identity, not
+    // a position. "" means Home (or nothing known).
     //
-    // `navModel` is a binding, and it now depends on the audio flags — so muting
-    // an app (or an app starting to play) REBUILDS the model, and a JS-array
-    // model reset drops currentIndex back to 0. Without this, muting an app from
-    // its own row would bounce drawer focus to Home, which reads as the drawer
-    // losing your place. Recorded at the points the user actually moves, never
-    // from currentIndexChanged — that fires during the reset itself and would
-    // record the very 0 this exists to undo.
-    property int focusedRow: 0
+    // `navModel` is a binding that now depends on the audio flags, so muting an
+    // app (or an app starting to play) REBUILDS the model, and a JS-array model
+    // reset drops currentIndex back to 0. Without restoring, muting an app from
+    // its own row would bounce drawer focus to Home.
+    //
+    // Restoring by INDEX would be worse than the bounce it fixes. The resume rows
+    // are sorted by focusHistoryId and their membership changes while the drawer
+    // is open, so an app exiting — or any new window mapping, which lands at
+    // focusHistoryId 0 and shifts everything down — moves a given index onto a
+    // DIFFERENT app. The cursor would sit on a neighbour with nothing on screen
+    // saying so, and the next A press would resume the wrong app. Bouncing to
+    // Home is at least visible; silently retargeting is not.
+    //
+    // Recorded at the points the user actually moves, never from
+    // currentIndexChanged — that fires during the reset itself and would record
+    // the very 0 this exists to undo.
+    property string focusedAddress: ""
+
+    // Both lookups are pure and headlessly tested in resumeModel.js — this is
+    // the logic an index-keyed restore got wrong, so it does not live in a QML
+    // file where nothing can assert on it.
+    function _addressAt(index) {
+        return ResumeModel.addressAt(root.navModel, index);
+    }
+
+    function _indexForAddress(address) {
+        return ResumeModel.indexForAddress(root.navModel, address);
+    }
 
     onOpenedChanged: {
         if (opened) {
-            root.focusedRow = 0;
+            root.focusedAddress = "";
             navList.currentIndex = 0;
             navFocusTimer.restart();
         }
@@ -186,12 +207,20 @@ Drawer {
             Layout.topMargin: Units.spacingSM
             Layout.preferredHeight: contentHeight
             model: root.navModel
-            // Put the user back on the row they were on. The model rebuilds
+            // Put the user back on the SAME APP they were on. The model rebuilds
             // whenever the audio flags change — a mute toggle, or an app
-            // starting to play — and a model reset would otherwise drop them at
-            // the top mid-interaction.
-            onModelChanged: if (root.focusedRow > 0 && root.focusedRow < count)
-                currentIndex = root.focusedRow
+            // starting to play — and a reset would otherwise drop them at the
+            // top mid-interaction. Resolving the address against the fresh model
+            // means a row that moved is followed and a row that vanished lands
+            // on Home, rather than the index landing on whoever took its place.
+            onModelChanged: {
+                let idx = root._indexForAddress(root.focusedAddress);
+                currentIndex = (idx > 0 && idx < count) ? idx : 0;
+                // The app is gone — forget it, so a later rebuild cannot revive
+                // a stale target and jump the cursor with no user input.
+                if (idx === 0)
+                    root.focusedAddress = "";
+            }
             // Hold default focus the instant the drawer opens so there is never a
             // handler-less window before navFocusTimer runs.
             focus: true
@@ -310,7 +339,7 @@ Drawer {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        root.focusedRow = index;
+                        root.focusedAddress = root._addressAt(index);
                         root._activateNav(index);
                     }
                 }
@@ -321,12 +350,12 @@ Drawer {
                     currentIndex++;
                 else
                     drawerActions.forceActiveFocus();
-                root.focusedRow = currentIndex;
+                root.focusedAddress = root._addressAt(currentIndex);
             }
             Keys.onUpPressed: {
                 if (currentIndex > 0)
                     currentIndex--;
-                root.focusedRow = currentIndex;
+                root.focusedAddress = root._addressAt(currentIndex);
             }
             Keys.onReturnPressed: root._activateNav(currentIndex)
 
@@ -350,7 +379,7 @@ Drawer {
             visible: root.resumeApps.length > 0
             muted: true
             Layout.topMargin: Units.spacingXS
-            text: "A: Resume   X: Actions (Quit / Mute)"
+            text: "A: Resume   X: Actions (quit, mute)"
         }
 
         // Absorbs the slack so the QuickActions row (and the Now-Playing strip +

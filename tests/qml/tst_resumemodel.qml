@@ -122,6 +122,79 @@ TestCase {
         compare(r[0].userMuted, false);
     }
 
+    // --- nav-row focus kept by identity (#445) ------------------------------
+
+    // The drawer's nav rows: Home first, then one per running app.
+    function _navRows(addresses) {
+        var rows = [
+            {
+                label: "Home",
+                kind: "home"
+            }
+        ];
+        for (var i = 0; i < addresses.length; i++) {
+            rows.push({
+                label: "App " + addresses[i],
+                kind: "resume",
+                entry: {
+                    address: addresses[i]
+                }
+            });
+        }
+        return rows;
+    }
+
+    function test_addressAt_reads_a_rows_identity() {
+        var rows = _navRows(["0xa", "0xb"]);
+        compare(ResumeModel.addressAt(rows, 1), "0xa");
+        compare(ResumeModel.addressAt(rows, 2), "0xb");
+    }
+
+    // Index 0 is Home and carries no entry, so "" doubles as "Home / unknown".
+    function test_addressAt_is_blank_for_home_and_out_of_range() {
+        var rows = _navRows(["0xa"]);
+        compare(ResumeModel.addressAt(rows, 0), "");
+        compare(ResumeModel.addressAt(rows, 5), "");
+        compare(ResumeModel.addressAt(rows, -1), "");
+        compare(ResumeModel.addressAt(null, 1), "");
+    }
+
+    // THE regression this replaced. Rows are sorted by focusHistoryId and their
+    // membership changes while the drawer is open, so restoring a bare INDEX can
+    // land the cursor on a different app — and the next activation would resume
+    // the wrong one. Identity follows the app instead.
+    function test_focus_follows_the_app_when_a_row_above_it_disappears() {
+        var before = _navRows(["0xa", "0xb", "0xc"]);
+        var focused = ResumeModel.addressAt(before, 2);      // the user is on 0xb
+        compare(focused, "0xb");
+        var after = _navRows(["0xb", "0xc"]);                // 0xa exited
+        // An index-keyed restore would have replayed 2 and landed on 0xc.
+        compare(ResumeModel.indexForAddress(after, focused), 1);
+    }
+
+    // The same hazard in the other direction: a newly mapped window lands first
+    // and pushes every existing row down one.
+    function test_focus_follows_the_app_when_a_new_window_appears_above_it() {
+        var before = _navRows(["0xa", "0xb"]);
+        var focused = ResumeModel.addressAt(before, 1);      // the user is on 0xa
+        var after = _navRows(["0xnew", "0xa", "0xb"]);
+        compare(ResumeModel.indexForAddress(after, focused), 2);
+    }
+
+    // A row that vanished lands on Home — visible, and the caller then clears the
+    // remembered address so a later rebuild cannot revive a stale target.
+    function test_a_vanished_app_falls_back_to_home() {
+        var after = _navRows(["0xb"]);
+        compare(ResumeModel.indexForAddress(after, "0xa"), 0);
+    }
+
+    function test_indexForAddress_treats_blank_as_home() {
+        var rows = _navRows(["0xa"]);
+        compare(ResumeModel.indexForAddress(rows, ""), 0);
+        compare(ResumeModel.indexForAddress(rows, null), 0);
+        compare(ResumeModel.indexForAddress(null, "0xa"), 0);
+    }
+
     // --- (e) empty inputs → empty array -----------------------------------
     function test_empty_inputs() {
         compare(ResumeModel.build([], [], [], testCase.matcher).length, 0);
