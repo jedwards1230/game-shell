@@ -52,12 +52,13 @@ Drawer {
     // name/icon (via the WindowMatcher singleton + AppDiscoveryManager). We keep
     // only the running entries here: the drawer's resume rows are for jumping back
     // into a live app, one row each. (Recents live on the Home screen.)
-    // Companion windows are collapsed BEFORE the merge, not after: an owner
-    // window that a companion supersedes (Steam Big Picture behind a Remote Play
-    // `streaming_client`) must never reach resumeModel.build, or it both paints a
-    // second row for one session and shadows the recent entry the real row would
-    // have matched. See appQuirks.groupCompanionWindows.
-    readonly property var resumeModel: ResumeModel.build(AppQuirks.groupCompanionWindows(root.runningWindows), RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher)
+    // Companion windows are re-iconed BEFORE the merge so the icon the merge
+    // resolves against is the corrected one. This changes appearance only —
+    // every running window still gets its own row (a Remote Play
+    // `streaming_client` and the Steam Big Picture window behind it are two
+    // different destinations, and collapsing them removed the only route to the
+    // live stream). See appQuirks.identifyCompanionWindows.
+    readonly property var resumeModel: ResumeModel.build(AppQuirks.identifyCompanionWindows(root.runningWindows), RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher)
     readonly property var resumeApps: root.resumeModel.filter(function (e) {
         return e.running === true;
     })

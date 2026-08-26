@@ -160,13 +160,17 @@ TestCase {
         compare(AppQuirks.quitCommandForWindow("steam", [testCase.steam], null), null);
     }
 
-    // --- groupCompanionWindows(): one session, one row ----------------------
+    // --- identifyCompanionWindows(): appearance only ------------------------
     //
     // Steam Remote Play maps the live game in a `streaming_client` window while
-    // "Steam Big Picture Mode" stays mapped behind it. Enumerated naively that is
-    // two apps, and the Steam-looking row resumes the WRONG one — the reported
-    // black screen. These pin the collapse and, just as importantly, the cases
-    // that must NOT collapse.
+    // "Steam Big Picture Mode" stays mapped behind it. Both are real, separately
+    // resumable destinations, so BOTH keep their row — an earlier revision
+    // collapsed them and removed the only route to the live stream. What was
+    // actually broken is the companion's icon: no desktop entry means the class
+    // name resolves to nothing and the row renders a blank letter-tile.
+    //
+    // The first two tests are the regression guard on that mistake: they assert
+    // the window set is preserved. Do not weaken them into a collapse.
 
     function _w(windowClass, address, title, icon) {
         return {
@@ -177,47 +181,55 @@ TestCase {
         };
     }
 
-    function test_companion_supersedes_its_owner() {
-        var out = AppQuirks.groupCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Red Dead Redemption 2", "")]);
-        compare(out.length, 1, "one Remote Play session must produce one row");
-        compare(out[0].windowClass, "streaming_client");
-        compare(out[0].address, "0xgame", "the row must resume the LIVE surface, not Big Picture");
-        compare(out[0].title, "Red Dead Redemption 2");
-        compare(out[0].icon, "steam", "the companion has no desktop entry — it inherits the owner's icon");
+    function test_both_windows_keep_their_row() {
+        var out = AppQuirks.identifyCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Red Dead Redemption 2 [Streaming]", "")]);
+        compare(out.length, 2, "Big Picture and the live stream are separate destinations — both must stay reachable");
+        compare(out[0].address, "0xsteam", "Big Picture keeps its row");
+        compare(out[1].address, "0xgame", "the live stream keeps its row");
+    }
+
+    function test_the_companion_inherits_the_owners_icon() {
+        var out = AppQuirks.identifyCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Red Dead Redemption 2 [Streaming]", "")]);
+        compare(out[1].icon, "steam", "the blank letter-tile is the actual defect — take the owner's icon");
+        compare(out[1].title, "Red Dead Redemption 2 [Streaming]", "the title was already good; leave it");
+        compare(out[1].windowClass, "streaming_client", "identity is unchanged — appearance only");
+    }
+
+    // A stream whose Big Picture window has gone still needs an icon, which is
+    // why the fallback is the owner's class name rather than a live donor.
+    function test_companion_without_its_owner_still_gets_an_icon() {
+        var out = AppQuirks.identifyCompanionWindows([_w("streaming_client", "0xgame", "Rocket League [Streaming]", "")]);
+        compare(out.length, 1);
+        compare(out[0].icon, "steam", "falls back to the owner class as an icon name");
     }
 
     function test_owner_without_a_companion_is_untouched() {
-        var out = AppQuirks.groupCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam")]);
+        var out = AppQuirks.identifyCompanionWindows([_w("steam", "0xsteam", "Steam Big Picture Mode", "steam")]);
         compare(out.length, 1);
         compare(out[0].address, "0xsteam");
-    }
-
-    // A stream whose Steam window has gone is still a real, resumable window.
-    function test_companion_without_its_owner_survives() {
-        var out = AppQuirks.groupCompanionWindows([_w("streaming_client", "0xgame", "Rocket League", "")]);
-        compare(out.length, 1);
-        compare(out[0].windowClass, "streaming_client");
+        compare(out[0].icon, "steam");
     }
 
     function test_unrelated_windows_pass_through_untouched() {
-        var input = [_w("tv.plex.Plex", "0xplex", "Plex HTPC", "plex"), _w("steam", "0xsteam", "Steam", "steam"), _w("streaming_client", "0xgame", "Factorio", "")];
-        var out = AppQuirks.groupCompanionWindows(input);
-        compare(out.length, 2, "only the superseded owner is dropped");
+        var input = [_w("tv.plex.Plex", "0xplex", "Plex HTPC", "plex"), _w("steam", "0xsteam", "Steam", "steam"), _w("streaming_client", "0xgame", "Factorio [Streaming]", "")];
+        var out = AppQuirks.identifyCompanionWindows(input);
+        compare(out.length, 3, "nothing is ever dropped");
         compare(out[0].windowClass, "tv.plex.Plex", "order is preserved");
-        compare(out[1].windowClass, "streaming_client");
+        compare(out[0].icon, "plex", "an unrelated row is returned byte-for-byte");
+        compare(out[2].icon, "steam");
     }
 
-    // The poller publishes runningWindows; a grouping pass that mutated it would
-    // corrupt every other consumer of that model.
+    // The poller publishes runningWindows; a pass that mutated it would corrupt
+    // every other consumer of that model.
     function test_input_is_not_mutated() {
-        var input = [_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Dune: Awakening", "")];
-        AppQuirks.groupCompanionWindows(input);
+        var input = [_w("steam", "0xsteam", "Steam Big Picture Mode", "steam"), _w("streaming_client", "0xgame", "Dune: Awakening [Streaming]", "")];
+        AppQuirks.identifyCompanionWindows(input);
         compare(input.length, 2, "the source model must be left intact");
         compare(input[1].icon, "", "the source entry must not gain the owner's icon");
     }
 
-    function test_grouping_null_inputs_are_safe() {
-        compare(AppQuirks.groupCompanionWindows(null).length, 0);
-        compare(AppQuirks.groupCompanionWindows([]).length, 0);
+    function test_identify_null_inputs_are_safe() {
+        compare(AppQuirks.identifyCompanionWindows(null).length, 0);
+        compare(AppQuirks.identifyCompanionWindows([]).length, 0);
     }
 }

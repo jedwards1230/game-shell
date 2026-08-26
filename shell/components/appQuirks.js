@@ -36,13 +36,23 @@ var APP_QUIRKS = {
 // Mode" (class `steam`) remains mapped behind it.
 //
 // The window enumerator treats each as an independent app — correctly, since
-// `windowFilter.js` has no reason to know better — so the drawer grew TWO resume
-// rows for one session, and the Steam-looking one resumed BIG PICTURE rather
-// than the running game. Observed in the field (2026-08-25), where selecting it
-// produced this journal line and a TV showing nothing:
+// `windowFilter.js` has no reason to know better — so the drawer shows a row per
+// window. That is RIGHT: Big Picture and the live game surface are two genuinely
+// different destinations, and the user may want either.
 //
-//   origin=resume-verify mode=address wanted=0x5642a5027310
-//     active=streaming_client reason=active-address-mismatch
+// WHAT IS ACTUALLY WRONG IS THE COMPANION'S IDENTITY. `streaming_client` has no
+// desktop entry, so the enumerator's icon fallback (lowercased window class)
+// resolves to nothing and the row renders the blank letter-tile — the "weird
+// icon" that made the stream row unrecognisable as the game the user was looking
+// for. Its title is fine ("Red Dead Redemption 2 [Streaming]"); only the icon is.
+//
+// THIS DELIBERATELY DOES NOT COLLAPSE THE PAIR — an earlier revision did, and it
+// was wrong twice over. It removed the user's only route to the live stream
+// window, and it was justified by a `resume-verify ... active-address-mismatch`
+// line that is ALSO the signature of the crossed-verification race fixed by
+// `_resumeGeneration` (see resumeFocus.js). That is, the evidence for "the row
+// targets the wrong window" was more likely the race than a mistargeted row.
+// Don't reintroduce the collapse without evidence that survives that alternative.
 //
 // Keyed by WINDOW CLASS, not by app identity: this resolves live compositor
 // windows, which is a different question from `APP_QUIRKS`'s "what did the user
@@ -58,63 +68,54 @@ function _cls(w) {
     return ((w && w.windowClass) || "").toLowerCase();
 }
 
-// Collapse companion/owner window PAIRS into the companion alone.
+// Give companion windows a recognisable icon, leaving the window set untouched.
 //
-// Returns a new array; the input is not mutated. A companion with no owner
-// present is left exactly as it is (it is still a real window the user may want
-// to resume), and an owner with no companion is untouched — the collapse only
-// happens when keeping both would misrepresent ONE session as two.
+// EVERY window in, every window out, same order — this changes how one row LOOKS,
+// never which rows exist or where they go. Address and title are left alone, so
+// the stream row still resumes the stream and Big Picture still resumes Big
+// Picture.
 //
-// The surviving row keeps the companion's address (the live surface — the whole
-// point) and title (Remote Play titles its window with the game, which is a
-// better label than "Steam"), but inherits the owner's icon: the companion class
-// has no desktop entry, so its icon name resolves to nothing and the row would
-// render an empty tile.
-function groupCompanionWindows(windows) {
+// The icon comes from the owner's live window when one is mapped; when it is not,
+// it falls back to the owner's CLASS NAME as an icon name (`steam`), which the
+// icon theme resolves the same way every other app row does. That fallback is the
+// point of not requiring the owner to be present: a stream whose Big Picture
+// window has gone is still a real, resumable window and should still look like
+// one.
+//
+// Returns a new array and never mutates the input — callers hold the poller's
+// published `runningWindows` model, which other consumers read concurrently.
+function identifyCompanionWindows(windows) {
     var list = windows || [];
     var i;
-    var present = {};
-    for (i = 0; i < list.length; i++)
-        present[_cls(list[i])] = true;
 
-    // Owner classes that are represented by a companion currently on screen.
-    var supersededOwners = {};
-    for (i = 0; i < list.length; i++) {
-        var rule = COMPANION_WINDOWS[_cls(list[i])];
-        if (rule && present[rule.owner])
-            supersededOwners[rule.owner] = true;
-    }
-    if (Object.keys(supersededOwners).length === 0)
-        return list.slice();
-
-    // Icon donor per superseded owner, resolved before anything is dropped.
+    // Icon donor per owner class, taken from its live window if present.
     var ownerIcons = {};
     for (i = 0; i < list.length; i++) {
         var c = _cls(list[i]);
-        if (supersededOwners[c] && ownerIcons[c] === undefined)
+        if (ownerIcons[c] === undefined)
             ownerIcons[c] = (list[i] && list[i].icon) || "";
     }
 
     var out = [];
     for (i = 0; i < list.length; i++) {
         var w = list[i];
-        var cls = _cls(w);
-        if (supersededOwners[cls])
-            continue;
-        var companion = COMPANION_WINDOWS[cls];
-        if (companion && supersededOwners[companion.owner]) {
-            var donor = ownerIcons[companion.owner] || "";
-            // Shallow copy: callers hold the poller's published model and must
-            // not see it mutated underneath them.
-            var merged = {};
-            for (var k in w)
-                merged[k] = w[k];
-            if (donor !== "")
-                merged.icon = donor;
-            out.push(merged);
+        var rule = COMPANION_WINDOWS[_cls(w)];
+        if (!rule) {
+            out.push(w);
             continue;
         }
-        out.push(w);
+        var donor = ownerIcons[rule.owner] || rule.owner;
+        if (!donor || donor === (w && w.icon)) {
+            out.push(w);
+            continue;
+        }
+        // Shallow copy so the source model is not mutated underneath its other
+        // readers.
+        var merged = {};
+        for (var k in w)
+            merged[k] = w[k];
+        merged.icon = donor;
+        out.push(merged);
     }
     return out;
 }

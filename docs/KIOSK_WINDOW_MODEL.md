@@ -213,10 +213,25 @@ that never opted into generations still works.
 
 **Companion windows (Steam Remote Play).** Launching a game via Remote Play maps
 the live video in a `streaming_client` toplevel while Big Picture stays mapped
-behind it. Enumerated naively that is two apps, and the Steam-looking resume row
-targeted Big Picture rather than the running game — the `active-address-mismatch`
-in the incident journal. `appQuirks.groupCompanionWindows` collapses the pair to
-one row that carries the companion's address and title with the owner's icon.
+behind it. Both get a drawer row, and that is correct — they are two different
+destinations. What was wrong is the companion's **icon**: `streaming_client` has
+no desktop entry, so the enumerator's class-name icon fallback resolves to nothing
+and the row renders a blank letter-tile, unrecognisable as the game the user is
+looking for. `appQuirks.identifyCompanionWindows` gives it the owner's icon
+(falling back to the owner's class name when Big Picture is not mapped) and
+changes nothing else — same rows, same order, same addresses and titles.
+
+> **A collapse was tried first and reverted; do not reintroduce it casually.** An
+> earlier revision merged the pair into a single row. It was wrong twice over.
+> First, it removed the user's only route to the live stream window — confirmed by
+> the reporter, who went looking for the stream in the drawer and found only a row
+> that led to Big Picture. Second, its justification was a
+> `resume-verify … active-address-mismatch` line read as "this row targets the
+> wrong window" — but that is **also** the signature of the crossed-verification
+> race that `_resumeGeneration` fixes above. The evidence was ambiguous between
+> "mistargeted row" and "raced verification", and the race is the better-supported
+> explanation. `tests/qml/tst_appquirks.qml` pins the window set as a regression
+> guard against re-collapsing.
 
 **Self-healing daemon** (`daemon/src/session_env.rs`, `hyprland.rs`): signature
 resolution scans `$XDG_RUNTIME_DIR/hypr/` for the live socket dir *before*
