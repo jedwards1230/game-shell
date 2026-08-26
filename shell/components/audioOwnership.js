@@ -147,6 +147,19 @@ function _bestMatch(token, classes) {
 
 // --- node records ------------------------------------------------------------
 
+// A node's live mute flag, which `pw-dump` reports under `info.params.Props[0]`
+// rather than in `info.props`. Absent or malformed reads as "not muted", so a
+// shape change degrades into doing nothing rather than into a false adoption.
+function _mutedOf(info) {
+    var params = (info || {}).params;
+    if (!params)
+        return false;
+    var list = params.Props;
+    if (!list || !list.length)
+        return false;
+    return (list[0] || {}).mute === true;
+}
+
 // Reduce a parsed `pw-dump` array to the playback streams, as compact records.
 //
 // Scoped to `media.class == "Stream/Output/Audio"` — an app's sink-inputs. Sinks,
@@ -171,7 +184,8 @@ function nodesFrom(dump) {
             binary: _s(props["application.process.binary"]),
             appName: _s(props["application.name"]),
             nodeName: _s(props["node.name"]),
-            mediaName: _s(props["media.name"])
+            mediaName: _s(props["media.name"]),
+            muted: _mutedOf(info)
         });
     }
     return out;
@@ -274,6 +288,32 @@ function reconcile(desiredIds, appliedIds) {
         mute: mute,
         unmute: unmute
     };
+}
+
+// Playback streams already muted when the shell starts up.
+//
+// WHY THIS EXISTS. Mutes live in the PipeWire graph and outlive the shell;
+// `_appliedIds` does not. "Only unmute what we muted" holds a session together,
+// but across a restart it strands: a node the PREVIOUS shell instance muted is
+// one the new instance will never release, so the app stays silent forever. And
+// restarting the shell is not exotic — it IS the deploy loop
+// (`systemctl --user restart tv-shell-quickshell.service`). Observed exactly
+// that way: a live stream on the displayed workspace, playing to a muted node,
+// with the new instance holding an empty applied set.
+//
+// So the first cycle adopts whatever it finds muted. The previous instance is
+// the only plausible author (the shell's own volume control mutes the SINK, not
+// individual streams), and reconciliation then releases it the moment its
+// workspace is displayed. Adopting a mute we did not set is recoverable;
+// stranding one is not.
+function adoptableMutedIds(nodes) {
+    var list = nodes || [];
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].muted === true && !isShellOwned(list[i]))
+            out.push(_s(list[i].id));
+    }
+    return out;
 }
 
 // Every id must be a bare integer before it reaches a command line. The ids come

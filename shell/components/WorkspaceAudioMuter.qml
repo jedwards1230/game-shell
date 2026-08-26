@@ -58,6 +58,8 @@ Item {
     // more pass instead of interleaving two.
     property bool _cycleRunning: false
     property bool _restartQueued: false
+    // Whether the first graph has been read and its existing mutes adopted.
+    property bool _adoptedExisting: false
 
     // Re-read the graph and reconcile. Every input change lands here.
     function _evaluate() {
@@ -190,6 +192,18 @@ Item {
         }
 
         let nodes = AudioOwnership.nodesFrom(dump);
+
+        // First graph we have ever seen: adopt whatever is already muted as ours
+        // (see adoptableMutedIds). Mutes outlive the shell but `_appliedIds` does
+        // not, so without this a node muted by the PREVIOUS instance is one this
+        // instance will never release — and restarting the shell is the deploy
+        // loop. Observed in the field as a live stream on the displayed
+        // workspace playing to a muted node.
+        if (!muter._adoptedExisting) {
+            muter._adoptedExisting = true;
+            muter._appliedIds = AudioOwnership.adoptableMutedIds(nodes);
+        }
+
         let desired = AudioOwnership.desiredMutedIds(nodes, muter.runningWindows, muter.activeWorkspace);
         let diff = AudioOwnership.reconcile(desired, muter._appliedIds);
 

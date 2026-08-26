@@ -309,6 +309,95 @@ TestCase {
         ]), []);
     }
 
+    // --- startup adoption of pre-existing mutes ------------------------------
+
+    // The field failure this exists for: mutes live in the PipeWire graph and
+    // outlive the shell, but `_appliedIds` does not. Without adoption, a node the
+    // PREVIOUS shell instance muted is never released — and restarting the shell
+    // is the deploy loop. Observed as a live stream on the DISPLAYED workspace
+    // playing to a muted node.
+    function test_startup_adopts_existing_mutes() {
+        let muted = _streamNode("107");
+        muted.muted = true;
+        compare(AudioOwnership.adoptableMutedIds([muted, _plexNode("70")]), ["107"]);
+    }
+
+    // Having adopted it, the very next reconcile must RELEASE it, because its
+    // workspace is the one on screen. This is the assertion that would have
+    // caught the live failure.
+    function test_adopted_mute_is_released_when_its_workspace_is_displayed() {
+        let stranded = _streamNode("107");
+        stranded.muted = true;
+        let applied = AudioOwnership.adoptableMutedIds([stranded]);
+        let desired = AudioOwnership.desiredMutedIds([stranded], fleet, "3");
+        let diff = AudioOwnership.reconcile(desired, applied);
+        compare(diff.unmute, ["107"]);
+        compare(diff.mute, []);
+    }
+
+    // An adopted mute that SHOULD stay muted produces no churn.
+    function test_adopted_mute_that_is_still_correct_is_left_alone() {
+        let stranded = _streamNode("107");
+        stranded.muted = true;
+        let applied = AudioOwnership.adoptableMutedIds([stranded]);
+        let desired = AudioOwnership.desiredMutedIds([stranded], fleet, "1");
+        let diff = AudioOwnership.reconcile(desired, applied);
+        compare(diff.mute, []);
+        compare(diff.unmute, []);
+    }
+
+    // Never adopt the shell's own test tone — adopting it would mean unmuting it
+    // later, i.e. touching audio this policy has no business touching.
+    function test_adoption_skips_shell_owned_audio() {
+        let tone = _tone();
+        tone.muted = true;
+        compare(AudioOwnership.adoptableMutedIds([tone]), []);
+    }
+
+    function test_adoption_ignores_unmuted_and_junk() {
+        compare(AudioOwnership.adoptableMutedIds([_plexNode("70")]), []);
+        compare(AudioOwnership.adoptableMutedIds([]), []);
+        compare(AudioOwnership.adoptableMutedIds(null), []);
+    }
+
+    // The mute flag lives under `info.params.Props[0]`, not in `info.props`.
+    function test_nodesFrom_reads_the_mute_flag() {
+        let dump = [
+            {
+                id: 107,
+                info: {
+                    props: {
+                        "media.class": "Stream/Output/Audio",
+                        "application.process.binary": "streaming_client"
+                    },
+                    params: {
+                        Props: [
+                            {
+                                mute: true,
+                                volume: 1.0
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                id: 70,
+                info: {
+                    props: {
+                        "media.class": "Stream/Output/Audio",
+                        "application.process.binary": "Plex"
+                    }
+                }
+            }
+        ];
+        let nodes = AudioOwnership.nodesFrom(dump);
+        compare(nodes.length, 2);
+        compare(nodes[0].muted, true);
+        // Absent params must read as "not muted", so a pw-dump shape change
+        // degrades into doing nothing rather than a false adoption.
+        compare(nodes[1].muted, false);
+    }
+
     // --- reconciliation ------------------------------------------------------
 
     function test_reconcile_computes_both_directions() {
