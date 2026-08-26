@@ -80,9 +80,9 @@
 // A node that attributes to nothing is MUTED. That is deliberate — an orphaned
 // stream must go quiet on the home screen, and "unattributable" is exactly what
 // an orphan looks like. The cost is that if attribution ever failed for the app
-// you are LOOKING AT, you would get video with no sound. It is 3-for-3 on the
-// apps this shell actually runs, and the loose pass widens the net further, but
-// that is the direction a miss falls.
+// you are LOOKING AT, you would get video with no sound. It resolved correctly
+// for every app this shell actually runs, and the loose pass widens the net
+// further, but that is the direction a miss falls.
 
 // Two tokens this short can only match by accident, and an accidental match here
 // silences the wrong app. Both sides must clear it.
