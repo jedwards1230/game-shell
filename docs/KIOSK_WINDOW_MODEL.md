@@ -152,6 +152,33 @@ Two exemptions, both narrow and both load-bearing:
   window list happened to mean no cycle ever fired — so widening the poll gate
   would have silently silenced streams. It is now enforced rather than lucky.
 
+### Surviving a shell restart
+
+Mutes live in the PipeWire graph and **outlive the shell process**; the set of
+ids the shell holds muted does not. "Only unmute what we muted" is what keeps
+this component from touching audio it has no business touching, and within a
+session it is exactly right — but across a restart it strands. A node the
+previous instance muted is one the new instance will never release, because it
+starts with an empty applied set and no memory of setting it.
+
+That is not an exotic path. **Restarting Quickshell is the deploy loop**, so
+every deploy that happened while an app was backgrounded left that app
+permanently silent, and going home and back could not clear it. Observed in the
+field on 2026-08-26: a live stream on the *displayed* workspace, playing to a
+muted node.
+
+So the first cycle **adopts** whatever it finds already muted
+(`adoptableMutedIds`). The previous instance is the only plausible author — the
+shell's own volume control mutes the *sink*, not individual streams — and
+reconciliation then releases it the moment its workspace is displayed. Adopting a
+mute we did not set is recoverable; stranding one is not. The shell's own test
+tone is excluded, since adopting it would mean unmuting it later: the same
+overreach in the other direction.
+
+No headless test could have caught this. It exists only across a process
+boundary — which is the argument for verifying on the device rather than
+declaring victory on a green suite.
+
 `displayedWorkspace` starts **unknown (`""`)**, not `"1"`, and is seeded once
 from `hypr-monitors` at startup. Restarting Quickshell is the normal deploy loop
 and can happen while an app owns the screen; a `"1"` default would assert "home
