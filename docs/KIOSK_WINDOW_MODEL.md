@@ -214,6 +214,82 @@ silence the box. Only `media.class == "Stream/Output/Audio"` — an app's own
 sink-inputs — is ever a candidate, and only ids the shell itself muted are ever
 unmuted.
 
+## When the model meets real conditions
+
+Two failures found while verifying the audio work, both about the window model
+rather than the sound. Neither has a proven root cause; what follows is
+deliberately defensive, and says so.
+
+### An output loss destroys windows while their processes survive
+
+An HDMI link drop — `drm: Connector … disconnected`, with Quickshell falling
+back to `There are no outputs - creating placeholder screen` — **destroys the app
+windows on that output while their processes keep running.** Observed ~10 times
+in one session on a TV behind an AV receiver. The window is gone for good, so the
+app is permanently unreachable: resume correctly has nothing to switch to, and it
+keeps producing audio from a window nobody can find. It ignored `SIGTERM`.
+
+**This is where orphaned audio comes from.** The orphan case the audio policy
+handles is not an edge case; it is the steady-state result of a TV link drop.
+
+The daemon now reconciles on `monitoradded`, so the layout self-repairs instead
+of waiting for a daemon restart, and it **names the windows that did not come
+back** by diffing a snapshot taken when the output went away — turning a silent
+ghost into one journal line.
+
+Deliberately **not** done, and why:
+
+- **No auto-killing of orphaned processes.** That is somebody's live game
+  session, and a wrong guess costs them their progress. The audio policy already
+  removes the audible symptom.
+- **No UI surfacing yet.** Doing it properly needs pid tracking the daemon does
+  not have, plus an affordance for acting on it. A detector with nothing to do is
+  worse than none.
+
+The bookkeeping lives in `MonitorWatch` (`daemon/src/hyprland.rs`) because the
+sequencing, not the diff, is where the bugs are: an **unreadable** client list
+must never diff (empty looks identical to "everything was destroyed", and a
+monitor add lands mid-DRM-handshake — exactly when a request is likeliest to time
+out); the **first** removal wins (both outputs run into one receiver, so a drop
+arrives as remove, remove, add, add); snapshots **expire** (a TV off for the
+evening must not blame an output change for every app closed since); and
+reconciles are **debounced** (Hyprland emits the v1 and v2 add together, and each
+reconcile is awaited on the event reader, which is deaf while it runs).
+
+### The park path could not explain itself
+
+A genuine split view appeared — two classes sharing a workspace, which this model
+is supposed to make unrepresentable — with **no park line in the journal**, while
+the event socket was connected and the daemon had neither restarted nor panicked.
+That leaves "the park task was never spawned" or "it was spawned and hung", and
+**the evidence cannot separate them.** No root cause is claimed here.
+
+It could not be separated because `park_window` had more silent exits than logged
+ones. All of these are now closed:
+
+| Silent exit | Now |
+|---|---|
+| `request()` had **no timeout at all** — `read_to_end` on a connection Hyprland accepts but never writes to waits forever | Bounded, and expiry is logged |
+| `tokio::spawn` dropped the `JoinHandle` | A hang and a panic are both logged, with the address |
+| `openwindow_address → None` spawned nothing and logged nothing | Logged |
+| Park/reconcile lines named only the **class**, never the address | Address included |
+
+That last one is why the evidence is inconclusive: a line naming only a class
+cannot be attributed to a window, so "there is no park line for that window" was
+never establishable from the journal.
+
+The biggest exposure was not the park path but the **actor**: client, monitor,
+active-window and set-mode reads are all awaited inline in its request loop, so a
+single hung read wedged the entire Hyprland actor and left every pending IPC
+reply unanswered — silently.
+
+`/keyword` is deliberately **exempt** from the IPC budget. It triggers a real
+modeset, so seconds are legitimate; sharing the short cap would have been
+actively dangerous, because `apply_change` returns early on an error and never
+arms the auto-revert, leaving a *slow but successful* mode change live with
+nothing scheduled to undo it. That is the black-TV-no-keyboard outcome the revert
+timer exists to prevent.
+
 **The contract.** Exactly one app window is visible and fills the screen; the
 shell (Quickshell) sits deterministically above/below it; backgrounded apps
 (Plex HTPC, Steam) keep running but never share the screen. Two app windows must
