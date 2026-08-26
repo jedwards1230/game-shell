@@ -123,6 +123,7 @@ Item {
             return;
         }
         client._running = true;
+        staleTimer.restart();
         if (!sock.connected)
             sock.connected = true;
     }
@@ -130,6 +131,7 @@ Item {
     function stop() {
         client._running = false;
         reconnectTimer.stop();
+        staleTimer.stop();
         sock.connected = false;
     }
 
@@ -144,6 +146,8 @@ Item {
                 // attempt gives no reliable signal, so the timer must keep firing
                 // until a real transition to `connected` proves the daemon is back.
                 reconnectTimer.stop();
+                if (client.subscribe)
+                    staleTimer.restart();
                 // On connect, send the opening command:
                 //  • subscribe stream → the subscribe verb
                 //  • request/response → the queued command
@@ -178,6 +182,14 @@ Item {
         parser: SplitParser {
             onRead: line => {
                 if (client.subscribe) {
+                    // Any inbound line is proof the peer is alive.
+                    staleTimer.restart();
+                    // The keepalive is liveness only — never surface it as an
+                    // event. Consumers match on `intent:*`, `hypr:*`, etc., so a
+                    // stray "ping" would be ignored anyway; dropping it here
+                    // keeps that an invariant rather than a coincidence.
+                    if (line === "ping")
+                        return;
                     client.lineReceived(line);
                     return;
                 }
@@ -188,6 +200,46 @@ Item {
                 client.responseReceived(line);
                 sock.connected = false;
             }
+        }
+    }
+
+    // Staleness watchdog for subscribe streams — the ONLY thing that notices a
+    // daemon restart.
+    //
+    // WHY A TIMER AND NOT A SIGNAL: when the daemon exits, Quickshell's Socket
+    // keeps reporting `connected == true` and emits NO state change — just a
+    // logged QLocalSocket::PeerClosedError. So the disconnected branch of
+    // onConnectionStateChanged never runs, the reconnect loop is never armed,
+    // and the stream sits "connected" to a peer that is gone. (The same trap is
+    // documented for request mode in request() above, re #402; subscribe mode
+    // had it too, and nothing detected it.)
+    //
+    // Observed on-device 2026-08-26: after a daemon restart the shell kept
+    // running and rendering but could neither send commands nor receive the
+    // `intent:*` broadcast, so Home and the nav drawer did nothing and the only
+    // recovery was restarting Quickshell over SSH — from the couch there was
+    // none.
+    //
+    // The daemon therefore pings an idle stream every 10s (ipc.rs
+    // KEEPALIVE_INTERVAL) and this treats silence as death. The window is a
+    // generous multiple of that interval so a missed tick or a busy frame can
+    // never cause a spurious reconnect; a real death is still caught in well
+    // under a minute, and reconnecting is cheap and idempotent.
+    property int staleMs: 35000
+
+    Timer {
+        id: staleTimer
+        interval: client.staleMs
+        repeat: false
+        onTriggered: {
+            if (!client.subscribe || !client._running)
+                return;
+            console.warn("SocketClient: no daemon traffic for " + client.staleMs + "ms; assuming the peer is gone and reconnecting");
+            // Force the transition the socket will not report on its own. The
+            // close is what finally makes onConnectionStateChanged fire, which
+            // arms the reconnect loop below.
+            sock.connected = false;
+            reconnectTimer.restart();
         }
     }
 

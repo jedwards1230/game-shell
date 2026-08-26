@@ -162,6 +162,25 @@ Register as an event subscriber. The daemon sends `subscribed\n`, then streams e
 
 **Response:** `subscribed\n` followed by a stream of events (see [Daemon-to-Subscriber Events](#daemon-to-subscriber-events)).
 
+**Keepalive.** An idle stream receives a bare `ping` line every 10s
+(`ipc.rs KEEPALIVE_INTERVAL`). It carries no information and clients that don't
+recognise it may ignore it like any unknown event, so adding it cannot break an
+existing subscriber.
+
+It exists because **silence is the only way a client can detect that the daemon
+went away.** The daemon broadcasts only on change, so a healthy quiet stream and
+a dead peer look identical on the wire — and on the QML side they are
+indistinguishable locally too: after the daemon exits, Quickshell's `Socket`
+keeps reporting `connected == true` and emits no state change, only a logged
+`PeerClosedError`. Without the ping, a daemon restart left the shell
+permanently deaf (running and rendering, but unable to send commands or receive
+`intent:*`), which stranded the user in a fullscreen app with no way back.
+
+`SocketClient.qml` treats ~35s of silence as a dead peer and reconnects. Any
+client of this protocol should do something equivalent; the window should be a
+comfortable multiple of the interval so a missed tick never forces a spurious
+reconnect.
+
 ### `get-bindings`
 
 Return current button-to-action mappings as compact JSON.
