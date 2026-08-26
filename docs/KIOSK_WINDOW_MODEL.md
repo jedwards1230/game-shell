@@ -131,6 +131,56 @@ it (the window is gone), loose credits it to `steam` via `"Steam"`, and it is
 muted everywhere except the Steam workspace. Running strict first is what stops
 the loose pass from stealing a live stream away from its own workspace.
 
+### The user can override it, and their override wins
+
+The automatic policy owns every app the user has not spoken about. The nav
+drawer's X popover lets them mute an app by hand, and that mute is **sticky and
+beats the policy**: a user-muted app stays muted even when its workspace is
+displayed, until they clear it. A manual mute the policy stomped on the next
+workspace switch would be worse than having no manual mute at all.
+
+`desiredMutedIds` is the union of the policy set and the user set. Because a
+user-muted class is always in the desired set, `reconcile` can never place it in
+the unmute list — the release path cannot revoke a user's choice as a side
+effect. That is structural, not a check somewhere. The user's mutes also apply
+when the active workspace is **unknown**: policy needs to know what is on screen,
+a manual mute does not, and a shell restart must not silently unmute what the
+user muted. Persisted in `settings.json` as `mutedApps`, keyed by window class so
+the mute survives the app closing and reopening.
+
+**A user mute and an adopted mute must never be confused.** An adopted mute
+(above) is one whose *author is unknown*; a user mute is a recorded choice.
+Adoption populates the applied set of node ids and never writes back into the
+user's list — only the drawer does. Were adoption to manufacture a user mute, the
+user would end up with an app they never muted and no obvious way out.
+
+### The two drawer indicators, and why they are not the obvious pair
+
+Each running-app row in the drawer can show two glyphs, both conditionally
+rendered so a row with no audio story looks exactly as it did before they
+existed.
+
+| Glyph | Means | Why this and not the obvious thing |
+|---|---|---|
+| 🔊 | This app has a **live playback stream** | Under this policy nearly every app is muted at any moment, so "is audible" would be true of exactly one row and tell you nothing. "Is producing audio" names *the app making noise you cannot hear* — the confusion that started this whole thread. |
+| 🔇 | The user muted this app **by hand** | Never the policy mute. That one is implied by "not the app on screen" and would light up every row while carrying zero information. |
+
+Both read through `audioOwnership.js`, the same attribution the muting decision
+uses. Two implementations that can disagree is how you get an indicator that
+contradicts what you actually hear.
+
+Note what 🔊 does *not* mean: PipeWire's `running` says the stream is active in
+the graph, not that the samples are non-zero, so an app feeding silence still
+shows it. That is the right trade — a brief false positive is far better than
+failing to show the app that is actually making noise.
+
+**Neither icon blinks on the sweep.** Activity is latched for ~12s (longer than
+two sweeps), so a stream landing on the wrong side of two consecutive samples
+does not toggle the glyph; and the published class list is compared before being
+republished, because the drawer's row model is a binding over it and reassigning
+it would rebuild the very ListView the user is arrowing through. The sweep exists
+to notice change, not to announce its own heartbeat.
+
 ### Where the rule deliberately stands down
 
 Two exemptions, both narrow and both load-bearing:

@@ -271,6 +271,13 @@ pub const SCHEMA: &[SettingField] = &[
         kind: FieldKind::StrList,
         default: "",
     },
+    SettingField {
+        key: "mutedApps",
+        label: "Manually muted apps (window class, one per line)",
+        group: "Apps",
+        kind: FieldKind::StrList,
+        default: "",
+    },
 ];
 
 /// Daemon-owned keys: `keyBindings` is written solely by the daemon;

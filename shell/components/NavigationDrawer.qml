@@ -47,6 +47,11 @@ Drawer {
     signal appFocusRequested(string address, string windowClass)
     signal appCloseRequested(string address)
 
+    // Window classes with a live playback stream, from WorkspaceAudioMuter (the
+    // same attribution the muting decision uses — see audioOwnership.js). Wired
+    // in by ShellLayout; an empty list simply means no row shows the speaker.
+    property var audioActiveClasses: []
+
     // === Resume list — RUNNING windows only ===
     // resumeModel.build merges running windows + recents and resolves each entry's
     // name/icon (via the WindowMatcher singleton + AppDiscoveryManager). We keep
@@ -58,7 +63,13 @@ Drawer {
     // `streaming_client` and the Steam Big Picture window behind it are two
     // different destinations, and collapsing them removed the only route to the
     // live stream). See appQuirks.identifyCompanionWindows.
-    readonly property var resumeModel: ResumeModel.build(AppQuirks.identifyCompanionWindows(root.runningWindows), RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher)
+    readonly property var resumeModel: ResumeModel.build(AppQuirks.identifyCompanionWindows(root.runningWindows), RecentsTracker.recentApps, AppDiscoveryManager.applications, WindowMatcher, {
+        activeClasses: root.audioActiveClasses,
+        // The user's OWN mutes only. The workspace policy mutes nearly
+        // everything at any moment, so showing that would light up every row and
+        // say nothing.
+        mutedClasses: SettingsStore.mutedApps
+    })
     readonly property var resumeApps: root.resumeModel.filter(function (e) {
         return e.running === true;
     })
@@ -97,8 +108,20 @@ Drawer {
         return best;
     }
 
+    // The row the user is on, tracked independently of `navList.currentIndex`.
+    //
+    // `navModel` is a binding, and it now depends on the audio flags — so muting
+    // an app (or an app starting to play) REBUILDS the model, and a JS-array
+    // model reset drops currentIndex back to 0. Without this, muting an app from
+    // its own row would bounce drawer focus to Home, which reads as the drawer
+    // losing your place. Recorded at the points the user actually moves, never
+    // from currentIndexChanged — that fires during the reset itself and would
+    // record the very 0 this exists to undo.
+    property int focusedRow: 0
+
     onOpenedChanged: {
         if (opened) {
+            root.focusedRow = 0;
             navList.currentIndex = 0;
             navFocusTimer.restart();
         }
@@ -163,6 +186,12 @@ Drawer {
             Layout.topMargin: Units.spacingSM
             Layout.preferredHeight: contentHeight
             model: root.navModel
+            // Put the user back on the row they were on. The model rebuilds
+            // whenever the audio flags change — a mute toggle, or an app
+            // starting to play — and a model reset would otherwise drop them at
+            // the top mid-interaction.
+            onModelChanged: if (root.focusedRow > 0 && root.focusedRow < count)
+                currentIndex = root.focusedRow
             // Hold default focus the instant the drawer opens so there is never a
             // handler-less window before navFocusTimer runs.
             focus: true
@@ -230,6 +259,40 @@ Drawer {
                         Layout.fillWidth: true
                     }
 
+                    // Audio indicators. BOTH are conditionally rendered, so a row
+                    // with no audio story looks exactly as it did before this
+                    // existed — the common row gains no clutter.
+                    //
+                    // Glyph-only on purpose: the box has no system icon theme
+                    // (see AppIcon's letter-initial fallback for the same
+                    // reason), so an `image://icon/` name would render nothing.
+
+                    // "This app has a live playback stream." The informative one:
+                    // under the workspace policy it names the app making noise
+                    // you cannot hear.
+                    Text {
+                        visible: modelData.kind === "resume" && modelData.entry && modelData.entry.audioActive === true
+                        Layout.alignment: Qt.AlignVCenter
+                        text: "\u{1F50A}"
+                        font.pixelSize: Theme.fontBody
+                        color: Theme.textPrimary
+                        Accessible.role: Accessible.Indicator
+                        Accessible.name: "Playing audio"
+                    }
+
+                    // "You muted this app by hand." NEVER the policy mute, which
+                    // is true of nearly every app at any moment and would light
+                    // up every row while telling the user nothing.
+                    Text {
+                        visible: modelData.kind === "resume" && modelData.entry && modelData.entry.userMuted === true
+                        Layout.alignment: Qt.AlignVCenter
+                        text: "\u{1F507}"
+                        font.pixelSize: Theme.fontBody
+                        color: Theme.crimson
+                        Accessible.role: Accessible.Indicator
+                        Accessible.name: "Muted by you"
+                    }
+
                     // Running-app cue: a small ember dot on resume rows (every row
                     // below Home is a live app you can jump back into).
                     Rectangle {
@@ -246,7 +309,10 @@ Drawer {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root._activateNav(index)
+                    onClicked: {
+                        root.focusedRow = index;
+                        root._activateNav(index);
+                    }
                 }
             }
 
@@ -255,10 +321,12 @@ Drawer {
                     currentIndex++;
                 else
                     drawerActions.forceActiveFocus();
+                root.focusedRow = currentIndex;
             }
             Keys.onUpPressed: {
                 if (currentIndex > 0)
                     currentIndex--;
+                root.focusedRow = currentIndex;
             }
             Keys.onReturnPressed: root._activateNav(currentIndex)
 
@@ -282,7 +350,7 @@ Drawer {
             visible: root.resumeApps.length > 0
             muted: true
             Layout.topMargin: Units.spacingXS
-            text: "A: Resume   X: Actions"
+            text: "A: Resume   X: Actions (Quit / Mute)"
         }
 
         // Absorbs the slack so the QuickActions row (and the Now-Playing strip +
@@ -457,6 +525,7 @@ Drawer {
         let addr = row.entry.address;
         if (!addr || addr === "")
             return false;
+        let cls = row.entry.windowClass || "";
         // Anchor over the focused row. PopoverMenu draws ABOVE targetY and clamps
         // to its own bounds, so the row TOP is the right anchor (same as the card
         // popovers). Map to rowContextMenu, NOT to root: this popover lives inside
@@ -484,6 +553,27 @@ Drawer {
                 hint: "A: Quit App",
                 action: function () {
                     root.appCloseRequested(addr);
+                }
+            },
+            {
+                // Label reflects CURRENT state, so the row says what pressing it
+                // will do rather than what the app is. Keyed on the window class,
+                // not the address: the mute must survive the app closing and
+                // reopening, and a per-window mute would silently lapse.
+                //
+                // Guarded on a non-empty class — a window with no class has
+                // nothing to key a mute on, and an empty key would match every
+                // unattributed stream.
+                label: SettingsStore.isAppMuted(cls) ? "Unmute App" : "Mute App",
+                // A disabled item stays visible and selectable precisely so its
+                // hint can explain itself (see PopoverMenu), so say why rather
+                // than leaving it blank.
+                hint: cls === "" ? "Unavailable: this window reports no app class" : (SettingsStore.isAppMuted(cls) ? "A: Unmute App" : "A: Mute App"),
+                enabled: cls !== "",
+                action: function () {
+                    if (cls === "")
+                        return;
+                    SettingsStore.setAppMuted(cls, !SettingsStore.isAppMuted(cls));
                 }
             }
         ];

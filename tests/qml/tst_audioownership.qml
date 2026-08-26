@@ -309,6 +309,203 @@ TestCase {
         ]), []);
     }
 
+    // --- the user's own manual mutes -----------------------------------------
+
+    // The precedence that makes the feature worth having. A manual mute the
+    // policy stomps on the next workspace switch is worse than no manual mute at
+    // all, so a user-muted app stays muted even while its workspace is DISPLAYED.
+    function test_user_mute_wins_over_the_policy_on_the_displayed_workspace() {
+        let nodes = [_streamNode("65"), _plexNode("70")];
+        let muted = AudioOwnership.desiredMutedIds(nodes, fleet, "3", ["streaming_client"]);
+        verify(muted.indexOf("65") >= 0, "the displayed app stays muted because the user said so");
+        verify(muted.indexOf("70") >= 0, "and the policy still owns everything else");
+    }
+
+    // Structural, not a check somewhere: because a user-muted class is always in
+    // the desired set, reconcile can never place it in the unmute list. The
+    // release path cannot revoke the user's choice as a side effect.
+    function test_the_release_path_can_never_unmute_a_user_muted_app() {
+        let nodes = [_streamNode("65")];
+        // Applied holds it muted, and its workspace comes on screen — the exact
+        // moment the policy would otherwise release it.
+        let desired = AudioOwnership.desiredMutedIds(nodes, fleet, "3", ["streaming_client"]);
+        let diff = AudioOwnership.reconcile(desired, ["65"]);
+        compare(diff.unmute, [], "no user mute may be released by policy");
+        compare(diff.mute, []);
+    }
+
+    // Clearing the manual mute hands the app straight back to the policy.
+    function test_clearing_a_user_mute_returns_the_app_to_the_policy() {
+        let nodes = [_streamNode("65")];
+        let desired = AudioOwnership.desiredMutedIds(nodes, fleet, "3", []);
+        compare(AudioOwnership.reconcile(desired, ["65"]).unmute, ["65"]);
+        // ...and on a workspace that is NOT displayed, policy mutes it again.
+        compare(AudioOwnership.desiredMutedIds(nodes, fleet, "2", []), ["65"]);
+    }
+
+    // A user mute does not depend on knowing what is on screen, and a shell
+    // restart must not silently unmute what the user muted. Policy alone is
+    // gated on a known workspace.
+    function test_user_mutes_apply_even_when_the_workspace_is_unknown() {
+        let nodes = [_streamNode("65"), _plexNode("70")];
+        compare(AudioOwnership.desiredMutedIds(nodes, fleet, "", ["streaming_client"]), ["65"]);
+    }
+
+    // The user set is keyed by CLASS, so it survives the app closing and
+    // reopening with a new node id — which a per-node mute would not.
+    function test_user_mute_follows_the_class_not_the_node_id() {
+        let reopened = _streamNode("999");
+        compare(AudioOwnership.desiredMutedIds([reopened], fleet, "3", ["streaming_client"]), ["999"]);
+    }
+
+    // THE trap the design has to avoid: an adopted mute is one whose AUTHOR IS
+    // UNKNOWN. It must never be mistaken for a user mute, or the user ends up
+    // with an app they never muted and cannot unmute. Adoption populates the
+    // applied set (node ids); the user set is classes and is written only by the
+    // drawer. They are different data, and adoption reads nothing back into it.
+    function test_adoption_never_manufactures_a_user_mute() {
+        let stranded = _streamNode("107");
+        stranded.muted = true;
+        // Adoption sees it muted...
+        compare(AudioOwnership.adoptableMutedIds([stranded]), ["107"]);
+        // ...but with no user mute recorded, the policy still releases it on its
+        // own workspace. An adopted mute is recoverable; a fabricated user mute
+        // would not be.
+        let desired = AudioOwnership.desiredMutedIds([stranded], fleet, "3", []);
+        compare(AudioOwnership.reconcile(desired, ["107"]).unmute, ["107"]);
+    }
+
+    // The other half of that interaction: a real user mute that survived a
+    // restart must stay put once adopted, not be released by the policy.
+    function test_an_adopted_mute_that_is_also_a_user_mute_stays() {
+        let stranded = _streamNode("107");
+        stranded.muted = true;
+        let applied = AudioOwnership.adoptableMutedIds([stranded]);
+        let desired = AudioOwnership.desiredMutedIds([stranded], fleet, "3", ["streaming_client"]);
+        compare(AudioOwnership.reconcile(desired, applied).unmute, []);
+    }
+
+    // --- what is actually making noise ---------------------------------------
+
+    // The informative indicator: which app is making noise you cannot hear.
+    function test_activity_names_only_classes_with_a_live_stream() {
+        let live = _streamNode("65");
+        live.running = true;
+        let idle = _plexNode("70");
+        idle.running = false;
+        compare(AudioOwnership.activityByClass([live, idle], fleet), ["streaming_client"]);
+    }
+
+    function test_activity_ignores_the_shell_s_own_tone() {
+        let tone = _tone();
+        tone.running = true;
+        compare(AudioOwnership.activityByClass([tone], fleet), []);
+    }
+
+    function test_activity_deduplicates_multiple_streams_of_one_app() {
+        let a = _streamNode("65");
+        a.running = true;
+        let b = _streamNode("66");
+        b.running = true;
+        compare(AudioOwnership.activityByClass([a, b], fleet), ["streaming_client"]);
+    }
+
+    function test_activity_is_empty_without_windows_to_attribute_to() {
+        let live = _streamNode("65");
+        live.running = true;
+        compare(AudioOwnership.activityByClass([live], []), []);
+        compare(AudioOwnership.activityByClass(null, fleet), []);
+    }
+
+    // `nodesFrom` must read the graph state, since that is what the indicator
+    // ultimately rests on.
+    function test_nodesFrom_reads_the_running_state() {
+        let dump = [
+            {
+                id: 65,
+                info: {
+                    state: "running",
+                    props: {
+                        "media.class": "Stream/Output/Audio",
+                        "application.process.binary": "streaming_client"
+                    }
+                }
+            },
+            {
+                id: 70,
+                info: {
+                    state: "idle",
+                    props: {
+                        "media.class": "Stream/Output/Audio",
+                        "application.process.binary": "Plex"
+                    }
+                }
+            }
+        ];
+        let nodes = AudioOwnership.nodesFrom(dump);
+        compare(nodes[0].running, true);
+        compare(nodes[1].running, false);
+    }
+
+    // --- anti-flicker latch --------------------------------------------------
+
+    // The graph is sampled on a sweep, so without a latch a stream landing on
+    // the wrong side of two consecutive samples toggles the icon. At the couch
+    // that reads as a broken indicator even though every sample was correct.
+    function test_activity_survives_a_single_missed_sample() {
+        let t0 = 1000000;
+        let latch = AudioOwnership.latchActivity({}, ["steam"], t0);
+        compare(AudioOwnership.latchedClasses(latch, t0), ["steam"]);
+        // Next sweep misses it; the icon must NOT drop out.
+        latch = AudioOwnership.latchActivity(latch, [], t0 + 5000);
+        compare(AudioOwnership.latchedClasses(latch, t0 + 5000), ["steam"]);
+    }
+
+    // It is a latch, not a memory: audio that really stopped stops showing.
+    function test_activity_expires_once_it_is_really_gone() {
+        let t0 = 1000000;
+        let latch = AudioOwnership.latchActivity({}, ["steam"], t0);
+        let later = t0 + AudioOwnership.ACTIVITY_LATCH_MS + 1;
+        latch = AudioOwnership.latchActivity(latch, [], later);
+        compare(AudioOwnership.latchedClasses(latch, later), []);
+    }
+
+    // Continued activity keeps refreshing the timestamp rather than aging out.
+    function test_continuous_activity_never_expires() {
+        let t = 1000000;
+        let latch = {};
+        for (let i = 0; i < 10; i++) {
+            t += AudioOwnership.ACTIVITY_LATCH_MS - 1;
+            latch = AudioOwnership.latchActivity(latch, ["steam"], t);
+        }
+        compare(AudioOwnership.latchedClasses(latch, t), ["steam"]);
+    }
+
+    // The drawer's row model is a binding over the published list, so an
+    // unconditional republish would rebuild the nav list — the ListView the user
+    // is arrowing through — every sweep. A stable set must compare equal even
+    // though pw-dump promises no node order.
+    function test_an_unchanged_set_compares_equal_regardless_of_order() {
+        verify(AudioOwnership.sameClasses(["steam", "tv.plex.Plex"], ["tv.plex.Plex", "steam"]));
+        verify(AudioOwnership.sameClasses([], []));
+        verify(AudioOwnership.sameClasses(null, []));
+    }
+
+    function test_a_real_change_compares_unequal() {
+        verify(!AudioOwnership.sameClasses(["steam"], ["steam", "tv.plex.Plex"]));
+        verify(!AudioOwnership.sameClasses(["steam"], ["tv.plex.Plex"]));
+        verify(!AudioOwnership.sameClasses(["steam"], []));
+    }
+
+    // latchedClasses sorts, so consecutive readings of the same set are
+    // byte-identical and the guard above actually fires.
+    function test_latched_classes_come_back_sorted() {
+        let t0 = 1000000;
+        let a = AudioOwnership.latchActivity({}, ["steam", "tv.plex.Plex"], t0);
+        let b = AudioOwnership.latchActivity({}, ["tv.plex.Plex", "steam"], t0);
+        compare(AudioOwnership.latchedClasses(a, t0), AudioOwnership.latchedClasses(b, t0));
+    }
+
     // --- startup adoption of pre-existing mutes ------------------------------
 
     // The field failure this exists for: mutes live in the PipeWire graph and

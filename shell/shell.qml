@@ -197,6 +197,9 @@ ShellRoot {
         id: workspaceAudioMuter
         activeWorkspace: appLifecycle.displayedWorkspace
         runningWindows: appLifecycle.runningWindows
+        // The user's own sticky mutes, which BEAT the workspace policy. The
+        // drawer writes them; nothing else does.
+        userMutedClasses: Components.SettingsStore.mutedApps
         // A freshness gate, not the predicate — see the component. The window
         // list it reasons over is only refreshed in these states.
         shellState: root.state
@@ -684,6 +687,11 @@ ShellRoot {
                 }
                 shellState: root.state
                 runningWindows: appLifecycle.runningWindows
+                // What is actually making noise, for the drawer's per-row
+                // speaker indicator. Comes from the muter so the indicator and
+                // the muting decision can never disagree about which app owns a
+                // stream (audioOwnership.js is the single attribution path).
+                audioActiveClasses: workspaceAudioMuter.audioActiveClasses
                 pads: inputManager.pads
                 runningAppClass: appLifecycle.runningAppClass
                 overlayDrawerOpen: root.overlayDrawerOpen

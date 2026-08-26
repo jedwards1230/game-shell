@@ -69,6 +69,12 @@ Item {
     property var cecDeviceNames: ({})           // local label overrides keyed by logical address, e.g. {"0":"Living Room TV"}
     property var prewarmApps: []                 // wmClass list of apps to silently prewarm at login (#238)
 
+    // Window classes the user has muted BY HAND from the nav drawer. Distinct
+    // from the automatic workspace policy (WorkspaceAudioMuter), which mutes
+    // whatever is not on screen and needs no persistence — this list is the
+    // user's own choice, so it survives restarts and beats the policy.
+    property var mutedApps: []
+
     // Web-app registry (#187) — DAEMON-OWNED, read-only mirror here. Each entry:
     // { id, name, url, wmClass }. The daemon writes .desktop launchers +
     // this registry key (P1 webapp-* IPC); QML only reads/lists it (P0). Hence
@@ -198,6 +204,11 @@ Item {
         },
         {
             key: "prewarmApps",
+            t: "object",
+            validate: v => Array.isArray(v)
+        },
+        {
+            key: "mutedApps",
             t: "object",
             validate: v => Array.isArray(v)
         },
@@ -504,6 +515,37 @@ Item {
         }
         store.prewarmApps = next;
         store._saveKeys(["prewarmApps"]);
+    }
+
+    // Has the user muted this window class by hand? Exact string membership,
+    // matching the window class the drawer row carries.
+    function isAppMuted(wmClass) {
+        if (!wmClass || !store.mutedApps)
+            return false;
+        return store.mutedApps.indexOf(wmClass) >= 0;
+    }
+
+    // Add or remove a window class from the user's manual-mute list, then
+    // persist. Copy-then-assign (as setPrewarm does) so the reassignment fires
+    // mutedAppsChanged — an in-place push notifies nothing, and here that would
+    // mean the muter never hears about the toggle. A blank class is a no-op:
+    // there is nothing to key the mute on, and an empty entry would match every
+    // unattributed node.
+    function setAppMuted(wmClass, muted) {
+        if (!wmClass || wmClass === "")
+            return;
+        var next = (store.mutedApps || []).slice();
+        var idx = next.indexOf(wmClass);
+        if (muted) {
+            if (idx < 0)
+                next.push(wmClass);
+        } else {
+            next = next.filter(function (c) {
+                return c !== wmClass;
+            });
+        }
+        store.mutedApps = next;
+        store._saveKeys(["mutedApps"]);
     }
 
     // === Binding IPC (respects TV_SHELL_SOCK; no hardcoded socket path) ===

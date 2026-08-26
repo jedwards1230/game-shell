@@ -10,6 +10,10 @@ FocusScope {
     property string shellState: ""
     property var targets: StreamProviders.active.targets
     property var runningWindows: []
+    // Window classes with a live playback stream, from WorkspaceAudioMuter.
+    // Passed straight through to both drawer instances, which render the
+    // per-row speaker indicator from it.
+    property var audioActiveClasses: []
     property string runningAppClass: ""
     property bool overlayDrawerOpen: false
     property bool avSystemOn: false
@@ -371,6 +375,7 @@ FocusScope {
         z: 50
         visible: root.shellState === "idle"
         runningWindows: root.runningWindows
+        audioActiveClasses: root.audioActiveClasses
         pads: root.pads
         onAppLaunchRequested: app => root.appLaunchRequested(app)
         onAppResumeRequested: (app, address) => root.appResumeRequested(app, address)
@@ -508,6 +513,7 @@ FocusScope {
             overlayMode: true
             opened: root.overlayDrawerOpen
             runningWindows: root.runningWindows
+            audioActiveClasses: root.audioActiveClasses
             pads: root.pads
             onAppLaunchRequested: app => root.appLaunchRequested(app)
             onAppResumeRequested: (app, address) => root.appResumeRequested(app, address)

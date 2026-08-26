@@ -185,7 +185,14 @@ function nodesFrom(dump) {
             appName: _s(props["application.name"]),
             nodeName: _s(props["node.name"]),
             mediaName: _s(props["media.name"]),
-            muted: _mutedOf(info)
+            muted: _mutedOf(info),
+            // PipeWire's `running` means the stream is ACTIVE IN THE GRAPH, not
+            // that the samples are non-zero. An app feeding silence still reads
+            // running. That is the right meaning for the drawer's speaker
+            // indicator — the question it answers is "which app has live audio
+            // output I cannot hear", and a brief false positive is far better
+            // than failing to show the app that is actually making noise.
+            running: _s(info.state) === "running"
         });
     }
     return out;
@@ -217,19 +224,9 @@ function ownerClassOf(node, windowClasses) {
 
 // --- policy ------------------------------------------------------------------
 
-// The node ids that SHOULD be muted while `activeWorkspace` is on screen.
-//
-// An unknown active workspace yields an empty set rather than a guess: with no
-// idea what is on screen there is no policy to apply, and muting on a guess is
-// how you silence the game the user is watching. The caller unmutes whatever it
-// holds and waits for a real reading.
-function desiredMutedIds(nodes, runningWindows, activeWorkspace) {
-    var ws = _s(activeWorkspace);
-    if (ws === "")
-        return [];
-
-    // class -> workspace, first window of a class wins (windows of one class
-    // share a workspace by construction — see daemon/src/workspaces.rs).
+// class -> workspace for the live window set. First window of a class wins;
+// windows of one class share a workspace by construction (daemon/src/workspaces.rs).
+function _workspaceIndex(runningWindows) {
     var workspaceOf = Object.create(null);
     var classes = [];
     var wins = runningWindows || [];
@@ -240,18 +237,164 @@ function desiredMutedIds(nodes, runningWindows, activeWorkspace) {
         workspaceOf[cls] = _s(wins[i].workspace);
         classes.push(cls);
     }
+    return {
+        workspaceOf: workspaceOf,
+        classes: classes
+    };
+}
+
+// Membership set from a list of window classes.
+function _classSet(list) {
+    var set = Object.create(null);
+    var items = list || [];
+    for (var i = 0; i < items.length; i++) {
+        var c = _s(items[i]);
+        if (c !== "")
+            set[c] = true;
+    }
+    return set;
+}
+
+// The node ids that SHOULD be muted right now.
+//
+// The set is the UNION of two independent sources, and keeping them independent
+// is the whole design:
+//
+//   * THE POLICY — everything not on the displayed workspace. Automatic, and it
+//     owns every app the user has not spoken about.
+//   * THE USER'S OWN MUTES, by window class. Sticky, and they WIN: a
+//     user-muted app stays muted even when its workspace is displayed, until the
+//     user clears it. A manual mute the policy stomps on the next workspace
+//     switch would be worse than having no manual mute at all.
+//
+// Because a user-muted class is always in the desired set, `reconcile` can never
+// place it in the unmute list — the release path cannot revoke a user's choice
+// as a side effect. That property is structural, not a check somewhere.
+//
+// The user's mutes apply even when the active workspace is UNKNOWN. Policy needs
+// to know what is on screen; a manual mute does not depend on it, and a shell
+// restart must not silently unmute what the user muted. The policy half alone is
+// gated: with no idea what is on screen, muting on a guess is how you silence
+// the game the user is watching.
+function desiredMutedIds(nodes, runningWindows, activeWorkspace, userMutedClasses) {
+    var ws = _s(activeWorkspace);
+    var index = _workspaceIndex(runningWindows);
+    var userMuted = _classSet(userMutedClasses);
+    var policyApplies = ws !== "";
 
     var muted = [];
     var list = nodes || [];
     for (var j = 0; j < list.length; j++) {
         if (isShellOwned(list[j]))
             continue;
-        var owner = ownerClassOf(list[j], classes);
-        var onScreen = owner !== "" && workspaceOf[owner] === ws;
+        var owner = ownerClassOf(list[j], index.classes);
+        if (owner !== "" && userMuted[owner]) {
+            muted.push(_s(list[j].id));
+            continue;
+        }
+        if (!policyApplies)
+            continue;
+        var onScreen = owner !== "" && index.workspaceOf[owner] === ws;
         if (!onScreen)
             muted.push(_s(list[j].id));
     }
     return muted;
+}
+
+// --- what is actually making noise -------------------------------------------
+
+// Window classes with at least one playback stream live in the graph.
+//
+// This is the drawer's speaker indicator, and it deliberately answers a
+// different question from the mute indicator. Under this policy nearly every app
+// is muted at any moment, so "is muted" on a row would light up everywhere and
+// carry no information. "Is producing audio" is the useful one: it names the app
+// making noise you cannot hear.
+//
+// Attribution runs through `ownerClassOf`, the same path the muting decision
+// uses. Two implementations that can disagree is how you get an indicator that
+// contradicts what you actually hear.
+function activityByClass(nodes, runningWindows) {
+    var index = _workspaceIndex(runningWindows);
+    var active = [];
+    var seen = Object.create(null);
+    var list = nodes || [];
+    for (var i = 0; i < list.length; i++) {
+        var node = list[i];
+        if (!node || node.running !== true || isShellOwned(node))
+            continue;
+        var owner = ownerClassOf(node, index.classes);
+        if (owner === "" || seen[owner])
+            continue;
+        seen[owner] = true;
+        active.push(owner);
+    }
+    return active;
+}
+
+// How long a class keeps its "producing audio" indicator after its stream stops
+// being seen live.
+//
+// The graph is sampled on a sweep, so without a latch a stream that lands on the
+// wrong side of two consecutive samples toggles the icon on and off. At the
+// couch that reads as a broken indicator even when every individual sample was
+// correct. Longer than two sweeps, short enough that the icon is not obviously
+// stale.
+var ACTIVITY_LATCH_MS = 12000;
+
+// Fold a fresh activity reading into the latch. `latch` maps class -> the last
+// time it was seen live; entries older than the window are dropped.
+function latchActivity(previous, activeClasses, now) {
+    var next = Object.create(null);
+    var prev = previous || {};
+    for (var key in prev) {
+        if (now - prev[key] <= ACTIVITY_LATCH_MS)
+            next[key] = prev[key];
+    }
+    var active = activeClasses || [];
+    for (var i = 0; i < active.length; i++) {
+        var cls = _s(active[i]);
+        if (cls !== "")
+            next[cls] = now;
+    }
+    return next;
+}
+
+// The classes a latch currently reports as producing audio.
+//
+// Sorted, so a stable set produces a stable array. `pw-dump` does not promise a
+// node order, and the caller compares consecutive readings to decide whether to
+// republish — an order that wobbles would look like a change every time.
+function latchedClasses(latch, now) {
+    var out = [];
+    var map = latch || {};
+    for (var key in map) {
+        if (now - map[key] <= ACTIVITY_LATCH_MS)
+            out.push(key);
+    }
+    return out.sort();
+}
+
+// Do two class lists hold the same set?
+//
+// Guards a republish, and that matters more than it looks. The drawer's row
+// model is a binding over this list, so reassigning it rebuilds the nav model —
+// and the ListView underneath is what the user is currently arrowing through.
+// Republishing an unchanged list every sweep would rebuild the rows under their
+// cursor every few seconds. The sweep exists to notice change, not to announce
+// its own heartbeat.
+function sameClasses(a, b) {
+    var x = a || [];
+    var y = b || [];
+    if (x.length !== y.length)
+        return false;
+    var xs = x.slice().sort();
+    var ys = y.slice().sort();
+    for (var i = 0; i < xs.length; i++) {
+        if (_s(xs[i]) !== _s(ys[i]))
+            return false;
+    }
+    return true;
 }
 
 // --- reconciliation ----------------------------------------------------------

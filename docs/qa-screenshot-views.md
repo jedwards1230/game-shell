@@ -54,11 +54,13 @@ quiet no-op. B does **not** open Settings — use QuickActions idx 1 (→ Return
 |---|------|--------------|
 | B10 | App card context menu (`PopoverMenu`) | focus an app card → context key (Focus / Close) |
 | B11 | Stream card context menu | focus a stream card → context key (Resume / Quit) |
+| B12 | Nav-drawer row context menu | open the drawer (C12) → arrow to a running-app row → **X** | Resume / Quit App / **Mute App** (the third item's label reads "Unmute App" when that app is already user-muted). On a window that reports no class the mute item renders disabled with a hint saying why, rather than vanishing. |
 
 ## C. Overlays & dialogs
 | # | View | How to reach | Capturability |
 |---|------|--------------|---------------|
 | C12 | Left nav drawer (`NavigationDrawer`) | `intent menu` (socket) — or gamepad Home / bare Super at the TV — or `Tab` when the shell window holds Wayland keyboard focus | socket-reachable; `wtype -k Tab` works only when shell window has focus (unreliable in automation) |
+| C12a | Nav drawer — per-row audio indicators | as C12, with an app producing sound (e.g. a live stream) and/or an app the user has muted via B12 | Two **conditionally rendered** glyphs per running-app row, so a row with no audio story looks exactly as it did before they existed. 🔊 = **this app has a live playback stream** — the informative one, since it names what is making noise you cannot hear; it is NOT "is audible". 🔇 (crimson) = **the user muted this app by hand** — never the automatic workspace mute, which is true of nearly every app at any moment and would light up every row. Both survive a brief gap in the stream (a ~12s latch) so they do not blink on the 5s audio sweep. |
 | C13 | Notification center | QuickActions idx 0 → Return | wtype |
 | C14 | Notification center — empty | as above, no notifications | wtype |
 | C15 | Notification toast (`NotificationToast`) | trigger a notification | transient; timing-sensitive |

@@ -5278,6 +5278,15 @@ fn settings_consumer_table() -> Vec<(&'static str, ReadBy)> {
             ),
         ),
         (
+            "mutedApps",
+            qml(
+                "shell/shell.qml",
+                "Components.SettingsStore.mutedApps",
+                "handed to WorkspaceAudioMuter as the user's sticky manual mutes, which \
+                 beat the workspace policy; the nav drawer's X popover is the writer",
+            ),
+        ),
+        (
             "webApps",
             qml(
                 "shell/settings/WebAppsSettings.qml",
