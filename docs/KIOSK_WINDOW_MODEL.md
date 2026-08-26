@@ -4,6 +4,66 @@ How tv-shell guarantees the kiosk contract on Hyprland, why the previous
 reactive approach kept failing, and how the current implementation makes it
 structural.
 
+> ## ⚠️ 2026-08-26 — the model changed: one workspace per app
+>
+> **Everything below that describes stacking every app on one workspace and
+> maintaining a per-window fullscreen bit is HISTORY.** It is kept because the
+> incidents it records are still the reason the current design looks the way it
+> does, but it no longer describes the code.
+>
+> **What changed.** Each app class now owns its own Hyprland workspace, assigned
+> by the daemon (`daemon/src/workspaces.rs`) on `openwindow` via
+> `movetoworkspacesilent`. Workspace 1 is reserved and left empty for the home
+> screen. Switching apps — on launch, on resume, and on returning home — is one
+> dispatch: `hyprctl dispatch workspace N`.
+>
+> **Why.** The old model's switching primitive was **focus**, and focus is a
+> request a window can decline. Observed in the field: a Steam Remote Play
+> `streaming_client` window sat tiled at half width behind a fullscreen `steam`,
+> reporting `acceptsInput: false`. `dispatch focuswindow address:0x…` returned
+> `ok` and did nothing, so the live game could not be brought back at all — the
+> user saw either a black screen or a bounce to the home screen. The config even
+> documented the gap it could not close: `on_focus_under_fullscreen` "cannot
+> recover a state where BOTH windows are already tiled", which is exactly the
+> state that box was in.
+>
+> `dispatch workspace N` is a compositor-level operation. No window can refuse
+> it, and it cannot half-succeed.
+>
+> **What that deleted.** Four cooperating mechanisms plus their coordination:
+>
+> | Removed | Was for |
+> |---|---|
+> | `misc:on_focus_under_fullscreen` (config) | atomic fullscreen swap on resume |
+> | `misc:exit_window_retains_fullscreen` (config) | promote the survivor on close |
+> | `force_fullscreen` / `enforce_active_fullscreen` (daemon) | reactive backstop on 4 events |
+> | `kiosk_may_enforce` + the `shell-focus` watch channel (daemon) | stop the backstop acting on a stale active window |
+> | `assertFullscreen` + `hypr-active` verification (QML) | resume-path fullscreen guarantee |
+> | workspace consolidation onto the displayed workspace (QML) | pull drifted windows back together |
+>
+> With `gaps_in/gaps_out = 0`, a lone tiled window on its own workspace already
+> fills the screen, so fullscreen stopped being load-bearing at all.
+>
+> **Verification got cheaper and stronger.** "Did the switch land?" is now one
+> integer — read `hypr-monitors`, compare `activeWorkspace`. It used to mean
+> reading `activewindow`, which names a stale backgrounded toplevel the whole
+> time the shell's layer surface is up (the reason `shellOwnsScreen` exists), and
+> an address match could not distinguish "the switch missed" from "the window
+> declined focus".
+>
+> **Split view is now unrepresentable** rather than prevented. Two apps on
+> different workspaces cannot share a screen.
+>
+> **Retained:** `windowrule = fullscreen on` (cosmetic — avoids a brief tiled
+> flash in the window between map and the daemon's silent move) and
+> `windowrule = suppress_event fullscreen maximize` (stops an app floating or
+> shrinking itself). Neither is load-bearing any more.
+>
+> **Self-healing:** the daemon reconciles on every event-socket (re)connect,
+> reading `j/clients` and parking each already-mapped window on its class's
+> workspace — so a daemon restart mid-session repairs the layout instead of
+> waiting for a reboot.
+
 **The contract.** Exactly one app window is visible and fills the screen; the
 shell (Quickshell) sits deterministically above/below it; backgrounded apps
 (Plex HTPC, Steam) keep running but never share the screen. Two app windows must
@@ -136,6 +196,103 @@ Reconciling prewarm's `[silent]` mapping with the kiosk invariant — i.e. wheth
 prewarmed windows should map differently in the first place — is **deferred**
 (#347 item 4).
 
+**Amendment — the single-workspace premise is now asserted, not assumed.**
+Everything above holds *"by construction on a single workspace"*, and until now
+nothing enforced that clause. There is no `default_workspace`, no workspace
+windowrule, no workspace keybind, and there was not one `dispatch workspace` or
+`movetoworkspace` call anywhere in the shell or the daemon — so the premise was a
+belief about the box, with no invariant check, no telemetry, and no recovery.
+
+It was already false in the field. Observed on htpc-1 (2026-08-25): Plex HTPC on
+workspace 1, Steam Big Picture on workspace 4, and the monitor **displaying
+workspace 2, which held no windows at all**. Because the shell is a layer-shell
+surface it draws regardless of workspace, so the home screen looked perfectly
+healthy — but the instant a resume unmapped it, there was genuinely nothing
+beneath to render and the TV went black. `dispatch focuswindow` could not rescue
+it: it does not reliably follow across workspaces
+([hyprwm/Hyprland#1611](https://github.com/hyprwm/Hyprland/issues/1611)), the same
+issue cited under Phase 2 below. What put the windows there is **still unknown** —
+which is precisely why the consolidation below logs every move rather than
+self-healing silently.
+
+The resume path therefore reads `hypr-monitors` for the displayed workspace and,
+when its target has drifted elsewhere, dispatches
+`movetoworkspace <displayed>,address:<addr>` *before* focusing
+(`resumeFocus.resolveWorkspaceMove`, pure and headlessly tested in
+`tests/qml/tst_resumefocus.qml`).
+
+**Consolidate, not follow.** Switching the display to the window
+(`dispatch workspace N`) would also resume correctly, but it accepts a
+multi-workspace box permanently and keeps the active-but-empty workspace
+reachable forever. Pulling the window onto the displayed workspace drains stray
+workspaces back toward one every time the user resumes anything, which restores
+the premise the rest of this document depends on. Every branch that cannot
+establish *both* the target's workspace and the displayed one declines to move
+and focuses anyway — degrading to exactly the pre-change behaviour, since a
+`movetoworkspace` aimed at the wrong workspace would relocate a live window
+off-screen, which is the failure being fixed.
+
+**A verified miss now recovers.** `resume-verify` used to log and stop. But by
+that point `appLaunched()` has already unmapped the shell, so a resume that
+provably did not land leaves the TV showing whatever is underneath — in the
+incident above, nothing. The shell now emits `resumeFailed` and returns to the
+home screen (`resume-abandoned`). It is deliberately **not** `appClosed`: the app
+is still running, and only the shell's belief that it came forward was wrong.
+
+**Resumes are generationed, because a verified miss now ACTS.** A resume is a
+chain of async hops — decide → read `hypr-monitors` → maybe `movetoworkspace` →
+focus → settle → read `hypr-active` → judge — and every hop is a place a second
+resume can start. All the state carrying one (`_pendingResumeDecision`,
+`_pendingFocusDecision`, the move's `pending`, the shared verify timer) is
+single-slot, and nothing recorded which resume owned which reply. Resuming two
+apps in quick succession therefore let the first resume's verification judge
+itself against compositor state the second had produced:
+
+```
+origin=resume-workspace address=0x…027310 workspace=2      (Steam)
+origin=resume-workspace address=0x…bdc010 workspace=2      (Plex)
+origin=resume-verify mode=address wanted=0x…027310 active=tv.plex.Plex
+  reason=active-address-mismatch
+origin=resume-abandoned mode=address wanted=0x…027310
+```
+
+Both consolidations were correct; only the bookkeeping crossed. This was latent
+for as long as a miss merely logged — a crossed verification was a spurious
+journal line nobody chased. Giving that branch a *consequence* is what promoted it
+to a bug, which is why the fix ships in the same change.
+
+`AppLifecycleManager._resumeGeneration` is bumped by every `focusByAddress` and
+stamped onto the decision (`resumeFocus.stamp`); each hop drops its work once the
+stamp is no longer current (`resumeFocus.isStale`). Suppression, not cancellation:
+a superseded chain's dispatches were already issued and are harmless — the newer
+resume's own dispatches land after them and win. What must not happen is a stale
+chain reaching a *conclusion*. The drop is silent by design; a resume the user
+replaced is not a fault, and logging it would train us to ignore real
+`resume-verify` lines. An unstamped decision is treated as current, so a caller
+that never opted into generations still works.
+
+**Companion windows (Steam Remote Play).** Launching a game via Remote Play maps
+the live video in a `streaming_client` toplevel while Big Picture stays mapped
+behind it. Both get a drawer row, and that is correct — they are two different
+destinations. What was wrong is the companion's **icon**: `streaming_client` has
+no desktop entry, so the enumerator's class-name icon fallback resolves to nothing
+and the row renders a blank letter-tile, unrecognisable as the game the user is
+looking for. `appQuirks.identifyCompanionWindows` gives it the owner's icon
+(falling back to the owner's class name when Big Picture is not mapped) and
+changes nothing else — same rows, same order, same addresses and titles.
+
+> **A collapse was tried first and reverted; do not reintroduce it casually.** An
+> earlier revision merged the pair into a single row. It was wrong twice over.
+> First, it removed the user's only route to the live stream window — confirmed by
+> the reporter, who went looking for the stream in the drawer and found only a row
+> that led to Big Picture. Second, its justification was a
+> `resume-verify … active-address-mismatch` line read as "this row targets the
+> wrong window" — but that is **also** the signature of the crossed-verification
+> race that `_resumeGeneration` fixes above. The evidence was ambiguous between
+> "mistargeted row" and "raced verification", and the race is the better-supported
+> explanation. `tests/qml/tst_appquirks.qml` pins the window set as a regression
+> guard against re-collapsing.
+
 **Self-healing daemon** (`daemon/src/session_env.rs`, `hyprland.rs`): signature
 resolution scans `$XDG_RUNTIME_DIR/hypr/` for the live socket dir *before*
 trusting an inherited env var, so a reconnect re-attaches to a restarted Hyprland
@@ -188,6 +345,16 @@ across workspaces — [hyprwm/Hyprland#1611](https://github.com/hyprwm/Hyprland/
 change for the current phase.
 
 ## Phase 2 (deferred — the strongest form, needs on-device iteration)
+
+> **Reconciling Phase 2 with the consolidation amendment above.** The two want
+> opposite things and cannot both be live: consolidation drains every app window
+> onto the displayed workspace, while isolation deliberately keeps them apart.
+> Consolidation is the *single-workspace* model finally enforcing its own premise,
+> and it must be **removed**, not merely bypassed, if isolation is ever adopted —
+> at which point resume becomes `dispatch workspace N` as described below. The
+> pure decision already lives behind one function
+> (`resumeFocus.resolveWorkspaceMove`), so the swap is contained to it and its
+> tests.
 
 **Per-app-workspace isolation.** Assign each app window its own workspace
 (class-grouped, so Steam's splash + main share one) so two app windows can never
@@ -251,7 +418,9 @@ used:
 | `stream` | `StreamManager._launchMoonlight` — direct child, not via `hyprctl` | `none` |
 | `prewarm-decision` | the login prewarm pass's one evaluation (what it saw, what it chose) | — |
 | `resume` | `focusByAddress` — the address missed the window snapshot: either a class fallback (`mode=class`) or nothing actionable (`mode=none`) | — |
+| `resume-workspace` | the resume target was on a different workspace than the display and was consolidated onto it — `address=` moved, `workspace=` destination | — |
 | `resume-verify` | a resume focus dispatch that did NOT land — `wanted=` vs `active=` names the miss | — |
+| `resume-abandoned` | that miss was recovered by returning to the shell rather than leaving the TV on whatever was underneath | — |
 
 The two `resume*` origins carry no `rule=`/`comm=` (they focus an existing
 window rather than exec a new one). They are logged **only on a fault** — a

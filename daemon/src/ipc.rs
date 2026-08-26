@@ -1101,6 +1101,11 @@ pub(crate) async fn dispatch_dbus(_dbus: &DbusSenders, cmd: &Command) -> Option<
     Some(resp)
 }
 
+/// How often a subscribed client is sent a keepalive line. Paired with the
+/// staleness window in SocketClient.qml, which must be a comfortable multiple of
+/// this so a missed tick or a busy frame never triggers a spurious reconnect.
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Stream broadcast events to a subscribed client until it disconnects.
 async fn stream_events(
     framed: Framed<UnixStream, LinesCodec>,
@@ -1108,8 +1113,28 @@ async fn stream_events(
 ) -> Result<()> {
     let mut rx = events_tx.subscribe();
     let (mut sink, mut input) = framed.split();
+    // Keepalive. The daemon only broadcasts on change, so a healthy but quiet
+    // stream is indistinguishable on the wire from one whose peer has died —
+    // and the QML client CANNOT tell the difference locally: after the daemon
+    // exits, Quickshell's Socket keeps reporting `connected == true` and emits
+    // no state change, only a logged PeerClosedError. That left the shell
+    // permanently deaf across a daemon restart: still rendering, but unable to
+    // send commands or receive `intent:*`, so Home and the nav drawer did
+    // nothing and the user was stranded in a fullscreen app.
+    //
+    // A periodic tick gives the client positive evidence of liveness, so it can
+    // treat silence as death and reconnect. See SocketClient.qml's staleness
+    // watchdog, which is sized off this interval.
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    // The first tick of a tokio interval fires immediately; that is fine (a
+    // ping right after `subscribed` is harmless) but skip it so the stream's
+    // opening bytes stay exactly as before.
+    keepalive.tick().await;
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                sink.send(protocol::EVENT_PING.to_string()).await?;
+            }
             // Detect client disconnect (EOF / further input). Python reads
             // until EOF then drops the subscriber.
             next = input.next() => {

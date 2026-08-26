@@ -385,6 +385,15 @@ ShellRoot {
             appLifecycle.runningAppClass = "";
             root.returnToShell();
         }
+        // A resume that provably did not land. Same recovery as a close — put the
+        // shell back on screen — because by this point the shell has already
+        // unmapped and the TV is showing whatever was underneath, which in the
+        // reported failure was nothing at all. The app itself is untouched and
+        // still running; only the shell's belief that it came forward was wrong.
+        onResumeFailed: {
+            appLifecycle.runningAppClass = "";
+            root.returnToShell();
+        }
         // App failed to launch (non-zero exit from the launcher process).
         // Stronger double-ish pulse so the failure is felt, not just logged.
         onAppLaunchFailed: {
@@ -525,6 +534,18 @@ ShellRoot {
 
     function returnToShell() {
         root.state = "idle";
+        // Put the EMPTY home workspace on screen. The shell's layer surface is
+        // opaque and would cover a running app anyway, but "covered" and "not
+        // there" are not the same guarantee: a fullscreen app left rendering
+        // behind the shell is the failure mode where the TV shows the app while
+        // the shell believes it owns the screen. Switching makes the home screen
+        // structurally alone, the same way every app is alone on its own
+        // workspace (daemon/src/workspaces.rs).
+        //
+        // Deliberately here and NOT on `shellOwnsScreen`: that predicate is also
+        // true for an overlay drawn OVER a running app (the nav drawer, the
+        // Session QAM), where the app is meant to stay visible behind it.
+        appLifecycle.showHome();
         inputManager.grab();
         root._resetIdleTimer();
         root._launchOverlayActive = false;

@@ -22,9 +22,9 @@ import QtQuick
 //
 //   • Subscribe stream (subscribe: true) — connect, send `subscribe`, and emit
 //     lineReceived(line) for every event line for the lifetime of the
-//     connection. Auto-reconnects after `reconnectMs` if the connection drops
-//     (mirroring the old per-listener reconnect timers). Start with start();
-//     stop with stop().
+//     connection. Retries every `reconnectMs` — in a LOOP, until it actually
+//     reconnects — if the connection drops, so a daemon restart is survivable.
+//     Start with start(); stop with stop().
 //
 // Socket path: TV_SHELL_SOCK (legacy GAME_SHELL_SOCK fallback via Brand.env) if
 // set, else $XDG_RUNTIME_DIR/tv-shell-input.sock (== /run/user/$UID/…), matching
@@ -42,7 +42,9 @@ Item {
     // practice; exposed so a future stream command could reuse this).
     property string subscribeCommand: "subscribe"
 
-    // Reconnect delay (ms) for subscribe streams after a dropped connection.
+    // Retry interval (ms) for subscribe streams after a dropped connection. The
+    // retry REPEATS at this interval until the socket is back, so this is a
+    // cadence, not a one-shot delay.
     property int reconnectMs: 2000
 
     // --- Signals ---
@@ -121,6 +123,7 @@ Item {
             return;
         }
         client._running = true;
+        staleTimer.restart();
         if (!sock.connected)
             sock.connected = true;
     }
@@ -128,6 +131,7 @@ Item {
     function stop() {
         client._running = false;
         reconnectTimer.stop();
+        staleTimer.stop();
         sock.connected = false;
     }
 
@@ -137,6 +141,13 @@ Item {
 
         onConnectionStateChanged: {
             if (connected) {
+                // Actually connected — stop retrying. This is the ONLY place the
+                // reconnect loop is cancelled, deliberately: a failed connect
+                // attempt gives no reliable signal, so the timer must keep firing
+                // until a real transition to `connected` proves the daemon is back.
+                reconnectTimer.stop();
+                if (client.subscribe)
+                    staleTimer.restart();
                 // On connect, send the opening command:
                 //  • subscribe stream → the subscribe verb
                 //  • request/response → the queued command
@@ -171,6 +182,14 @@ Item {
         parser: SplitParser {
             onRead: line => {
                 if (client.subscribe) {
+                    // Any inbound line is proof the peer is alive.
+                    staleTimer.restart();
+                    // The keepalive is liveness only — never surface it as an
+                    // event. Consumers match on `intent:*`, `hypr:*`, etc., so a
+                    // stray "ping" would be ignored anyway; dropping it here
+                    // keeps that an invariant rather than a coincidence.
+                    if (line === "ping")
+                        return;
                     client.lineReceived(line);
                     return;
                 }
@@ -184,12 +203,80 @@ Item {
         }
     }
 
+    // Staleness watchdog for subscribe streams — the ONLY thing that notices a
+    // daemon restart.
+    //
+    // DEFENCE IN DEPTH, not the primary recovery path. Be clear about which is
+    // which, because it was mis-attributed once already.
+    //
+    // A daemon restart IS caught by the reconnect loop below: the socket does
+    // report the close, onConnectionStateChanged fires, and the loop retries
+    // until the daemon is back. Verified on-device 2026-08-26 — the daemon was
+    // restarted under a live shell, this watchdog never fired, and the shell
+    // recovered anyway.
+    //
+    // What this covers is the case the loop CANNOT see: a peer that stops
+    // answering without a clean close, where the socket keeps reporting itself
+    // connected and no state change ever arrives. (request() above documents the
+    // same hazard for request-mode clients, re #402.) There is no local signal
+    // for that, so the only evidence available is silence — which is meaningless
+    // unless the stream is expected to say something. Hence the daemon pings an
+    // idle stream every 10s (ipc.rs KEEPALIVE_INTERVAL) and this treats a long
+    // gap as death.
+    //
+    // The window is a generous multiple of that interval so a missed tick or a
+    // busy frame can never cause a spurious reconnect; reconnecting is cheap and
+    // idempotent, so erring long costs nothing.
+    property int staleMs: 35000
+
+    Timer {
+        id: staleTimer
+        interval: client.staleMs
+        repeat: false
+        onTriggered: {
+            if (!client.subscribe || !client._running)
+                return;
+            console.warn("SocketClient: no daemon traffic for " + client.staleMs + "ms; assuming the peer is gone and reconnecting");
+            // Force the transition the socket will not report on its own. The
+            // close is what finally makes onConnectionStateChanged fire, which
+            // arms the reconnect loop below.
+            sock.connected = false;
+            reconnectTimer.restart();
+        }
+    }
+
+    // Reconnect loop for subscribe streams. REPEATING, and that is the whole
+    // point.
+    //
+    // It used to be one-shot, re-armed from onConnectionStateChanged's
+    // disconnected branch. That works only if a FAILED connect produces a state
+    // transition — and it does not: `connected` is already false, writing true
+    // and having the connect refused leaves it false, so the handler never fires
+    // and the timer is never re-armed. The shell therefore got exactly ONE
+    // reconnect attempt per client.
+    //
+    // Observed on-device (2026-08-26), timestamps from the journal: the daemon
+    // was restarted at 16:36:23, clients retried at 16:36:23.6, :24.0 and :25.1,
+    // and then stopped forever — while the daemon's socket had come back within
+    // those same two seconds. The shell stayed running and rendering but could
+    // no longer send commands OR receive the `intent:*` broadcast, so Home and
+    // the nav drawer did nothing and the user was stranded in a fullscreen app
+    // with no way back. A daemon restart is a routine deploy step, so this had
+    // to become a loop rather than a longer single delay.
     Timer {
         id: reconnectTimer
         interval: client.reconnectMs
+        repeat: true
         onTriggered: {
-            if (client.subscribe && client._running)
-                sock.connected = true;
+            if (!client.subscribe || !client._running) {
+                reconnectTimer.stop();
+                return;
+            }
+            // Do NOT stop on `sock.connected` here — only the confirmed
+            // transition in onConnectionStateChanged may cancel the loop. If a
+            // refused connect ever left the property reading true, stopping on it
+            // would re-create exactly the permanent deafness this fixes.
+            sock.connected = true;
         }
     }
 

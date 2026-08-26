@@ -122,7 +122,7 @@ function logResume(mode, address, windowClass, reason) {
     console.warn(formatResume(mode, address, windowClass, reason));
 }
 
-// Format the post-dispatch focus verification (resumeFocus.js verifyFocus()).
+// Format the post-dispatch landing verification (resumeFocus.js verifyLanding()).
 // `hyprctl dispatch` exits 0 even when its selector matched no window, so this
 // line — not an exit code — is the evidence that a resume actually landed.
 //   wanted — the selector we dispatched (address or class).
@@ -136,4 +136,37 @@ function formatFocusVerify(mode, wanted, active, reason) {
 // exactly the invisible failure this whole facility exists to surface.
 function logFocusMiss(mode, wanted, active, reason) {
     console.warn(formatFocusVerify(mode, wanted, active, reason));
+}
+
+// Format a workspace switch — the one primitive that puts an app on screen
+// (resumeFocus.js resolveTarget() -> AppLifecycleManager.showWorkspace()).
+//   windowClass — the app being shown.
+//   workspace   — the workspace it owns, which is now the displayed one.
+function formatWorkspaceSwitch(windowClass, workspace) {
+    return PREFIX + " " + [_field("origin", "resume-workspace"), _field("class", windowClass), _field("workspace", workspace)].join(" ");
+}
+
+// Logged on EVERY switch, not only on a fault. A switch is the normal, correct
+// path — the line exists so the sequence of what was put on screen is
+// reconstructable from the journal, which is what turned the Steam-stream bug
+// from four hypotheses into one grep. `console.log` rather than `warn`
+// accordingly.
+function logWorkspaceSwitch(windowClass, workspace) {
+    console.log(formatWorkspaceSwitch(windowClass, workspace));
+}
+
+// Format a resume that was verified NOT to have landed and was therefore
+// abandoned back to the shell (AppLifecycleManager's `resumeFailed` signal).
+//   mode   — the selector mode that was dispatched.
+//   wanted — the selector we aimed at.
+//   reason — the verifyLanding() reason the resume was judged a miss.
+function formatResumeAbandoned(mode, wanted, reason) {
+    return PREFIX + " " + [_field("origin", "resume-abandoned"), _field("mode", mode), _field("wanted", wanted), _field("reason", reason)].join(" ");
+}
+
+// A verified miss used to be logged and then LEFT: the shell stayed unmapped over
+// a window that never came forward, so the TV showed black with no way back but
+// the Home button. This line records the recovery that now follows it.
+function logResumeAbandoned(mode, wanted, reason) {
+    console.warn(formatResumeAbandoned(mode, wanted, reason));
 }

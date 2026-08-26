@@ -1168,6 +1168,15 @@ pub fn resp_unknown() -> String {
     "unknown".to_string()
 }
 
+/// Keepalive line sent on an idle `subscribe` stream (see `ipc::stream_events`).
+///
+/// It is a plain event line like any other, so an existing client that does not
+/// know about it simply ignores an unrecognised event — adding it cannot break
+/// one. Its purpose is entirely client-side: it lets a subscriber treat SILENCE
+/// as a dead peer, which is the only way to notice a daemon restart, because the
+/// QML socket keeps reporting itself connected afterwards.
+pub const EVENT_PING: &str = "ping";
+
 pub fn resp_subscribed() -> String {
     "subscribed".to_string()
 }

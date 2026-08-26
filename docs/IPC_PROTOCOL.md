@@ -162,6 +162,28 @@ Register as an event subscriber. The daemon sends `subscribed\n`, then streams e
 
 **Response:** `subscribed\n` followed by a stream of events (see [Daemon-to-Subscriber Events](#daemon-to-subscriber-events)).
 
+**Keepalive.** An idle stream receives a bare `ping` line every 10s
+(`ipc.rs KEEPALIVE_INTERVAL`). It carries no information and clients that don't
+recognise it may ignore it like any unknown event, so adding it cannot break an
+existing subscriber.
+
+It exists for the case a client **cannot** detect locally: a peer that stops
+answering without a clean close, where the socket keeps reporting itself
+connected and no state change ever arrives. The daemon broadcasts only on change,
+so a healthy quiet stream and a dead peer are otherwise identical on the wire.
+The ping makes silence meaningful.
+
+A normal daemon restart does NOT need it — the socket reports that close, and a
+client that retries until it reconnects recovers on its own. (Verified
+on-device: with a retry loop in place, a daemon restart under a live shell
+recovered without the keepalive watchdog firing.) The failure this guards
+against is the one where that signal never comes.
+
+`SocketClient.qml` treats ~35s of silence as a dead peer and reconnects. Any
+client of this protocol should do something equivalent; the window should be a
+comfortable multiple of the interval so a missed tick never forces a spurious
+reconnect.
+
 ### `get-bindings`
 
 Return current button-to-action mappings as compact JSON.
@@ -1183,7 +1205,7 @@ reply `error:unsupported on this platform\n`. User-triggered, one-shot
 compositor *actions* (`hyprctl dispatch exec/closewindow`) stay shell-outs in
 the QML. The one exception: on every `openwindow` event the actor itself
 dispatches `focuswindow address:<addr>` + `fullscreen 0 set` to force the new
-window to take over the screen, class-agnostic — see `force_fullscreen` in
+window to take over the screen, class-agnostic — see the workspace assignment in
 `hyprland.rs`. That's a blanket kiosk policy, not a per-app QML decision, so it
 lives in the actor that already owns the event.
 
@@ -2679,7 +2701,7 @@ longer raise the shell overlay over the stream. The gamepad force-quit combo
 `grab`/`release`/`handoff` are the *explicit* presenter switches the shell
 requests. On top of those, the Hyprland actor's `activewindow` event watcher
 drives the presenter *continuously*, mirroring the kiosk fullscreen enforcement
-pattern (`hyprland.rs`'s `enforce_active_fullscreen`). The focused window's
+pattern (`hyprland.rs`'s workspace reconcile). The focused window's
 **input contract** *is* the presenter it selects:
 
 - **empty class** (no toplevel focused — the shell's own layer-shell surface

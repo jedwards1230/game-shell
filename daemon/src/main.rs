@@ -89,15 +89,6 @@ fn main() -> anyhow::Result<()> {
     // `.changed()` (watch only signals values sent AFTER construction).
     let (active_window_tx, active_window_rx) = tokio::sync::watch::channel::<String>(String::new());
 
-    // Shell screen-ownership, published by the input runtime (`shell-focus
-    // on|off`) and consumed by the Hyprland actor's kiosk fullscreen backstop.
-    // A `watch` for the same reason as above: ownership is STATE, and only the
-    // newest value matters. Starts `true` — the shell boots owning the screen,
-    // matching the input runtime's initial `Presenter::Shell`; that also makes a
-    // daemon restart mid-session safe, since the shell's heartbeat re-asserts
-    // the truth within one tick.
-    let (shell_focus_tx, shell_focus_rx) = tokio::sync::watch::channel::<bool>(true);
-
     // Observability counters, shared between the input runtime (which records
     // intents/transitions/pad-join-leave/input-events) and the metrics exporter
     // (textfile writer + `/metrics` HTTP route). Count this start as a restart:
@@ -133,7 +124,6 @@ fn main() -> anyhow::Result<()> {
                 input_config_changed,
                 input_metrics,
                 active_window_rx,
-                shell_focus_tx,
             ));
         })?;
 
@@ -169,13 +159,7 @@ fn main() -> anyhow::Result<()> {
         // `--features cec` still has something honest to publish.
         let display_owner: SharedDisplayOwner = display_owner::shared();
 
-        let dbus = spawn_dbus_actors(
-            &events_tx,
-            &control_tx,
-            &active_window_tx,
-            &shell_focus_rx,
-            &display_owner,
-        );
+        let dbus = spawn_dbus_actors(&events_tx, &control_tx, &active_window_tx, &display_owner);
 
         // Spawn the file-watch actor. It inotify-watches settings.json for
         // external edits and signals the input runtime via config_changed.
@@ -465,12 +449,6 @@ fn main() -> anyhow::Result<()> {
 /// channel, handed to the Hyprland actor so `activewindow` changes drive the
 /// input runtime's follow-focus presenter (latest-wins, never dropped).
 ///
-/// `shell_focus_rx` is the receiver half of the shell screen-ownership watch
-/// channel (published by the input runtime on `shell-focus`), handed to the same
-/// actor so its kiosk fullscreen backstop stands down while the shell owns the
-/// screen — otherwise it force-focuses whatever stale toplevel `activewindow`
-/// still names.
-///
 /// `display_owner` is the shared CEC display-ownership cell, written by the CEC
 /// actor (under `--features cec`) and read by the HTTP bridge's `GET /status`.
 #[cfg(target_os = "linux")]
@@ -481,7 +459,6 @@ fn spawn_dbus_actors(
     #[cfg_attr(not(feature = "cec"), allow(unused_variables))]
     control_tx: &tokio::sync::mpsc::Sender<state::Control>,
     active_window_tx: &tokio::sync::watch::Sender<String>,
-    shell_focus_rx: &tokio::sync::watch::Receiver<bool>,
     // Same story as `control_tx`: only the CEC actor writes it, so a default
     // build never touches it (the HTTP bridge still publishes the empty cell).
     #[cfg_attr(not(feature = "cec"), allow(unused_variables))] display_owner: &SharedDisplayOwner,
@@ -537,16 +514,8 @@ fn spawn_dbus_actors(
         // actor can publish `activewindow` focus changes (latest-wins) for the
         // input runtime's follow-focus presenter (see hyprland.rs::run doc comment).
         let hypr_active_window_tx = active_window_tx.clone();
-        let hypr_shell_focus_rx = shell_focus_rx.clone();
         tokio::spawn(async move {
-            if let Err(e) = hyprland::run(
-                hypr_rx,
-                events_tx,
-                hypr_active_window_tx,
-                hypr_shell_focus_rx,
-            )
-            .await
-            {
+            if let Err(e) = hyprland::run(hypr_rx, events_tx, hypr_active_window_tx).await {
                 tracing::warn!("hyprland actor exited: {e}");
             }
         });
