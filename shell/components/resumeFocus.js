@@ -201,7 +201,7 @@ function shouldAssertFullscreen(decision, active) {
 // workspace keybind, and until this change not one `dispatch workspace` /
 // `movetoworkspace` call anywhere in the shell or the daemon.
 //
-// Observed on htpc-1 (2026-08-25): Plex on workspace 1, Steam Big Picture on
+// Observed in the field (2026-08-25): Plex on workspace 1, Steam Big Picture on
 // workspace 4, and the monitor DISPLAYING workspace 2 — which held no windows at
 // all. The shell is a layer-shell surface and draws regardless of workspace, so
 // Home looked healthy; the instant a resume unmapped it there was genuinely

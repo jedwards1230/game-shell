@@ -38,7 +38,7 @@ var APP_QUIRKS = {
 // The window enumerator treats each as an independent app — correctly, since
 // `windowFilter.js` has no reason to know better — so the drawer grew TWO resume
 // rows for one session, and the Steam-looking one resumed BIG PICTURE rather
-// than the running game. Observed on htpc-1 (2026-08-25), where selecting it
+// than the running game. Observed in the field (2026-08-25), where selecting it
 // produced this journal line and a TV showing nothing:
 //
 //   origin=resume-verify mode=address wanted=0x5642a5027310
