@@ -64,6 +64,93 @@ structural.
 > workspace — so a daemon restart mid-session repairs the layout instead of
 > waiting for a reboot.
 
+## Audio ownership follows workspace ownership
+
+The screen is not the only thing an app can hold while backgrounded. Once each
+app owned a workspace, the sound contract could be stated in the same terms as
+the picture contract:
+
+> **You hear the workspace that is on screen, and nothing else.**
+
+`shell/components/WorkspaceAudioMuter.qml` mutes the PipeWire playback streams
+of every app that is not on the displayed workspace, and unmutes them when its
+workspace comes back. The decision is pure and headlessly tested in
+`shell/components/audioOwnership.js` / `tests/qml/tst_audioownership.qml`; the
+rule has no special case for the home screen, because home owns the reserved,
+deliberately empty workspace 1 and no window's workspace can ever equal it — so
+everything falls on the "not on screen" side and goes quiet.
+
+There is no per-app allowlist, and adding an app requires no change here.
+
+### Why the previous version looked random
+
+It muted one hard-coded window class, `"steam"`, whenever `shellState ===
+"idle"`. Three things were wrong with that, and the second is why the symptom
+came and went:
+
+1. **It matched the wrong window.** Steam Remote Play's live game window has
+   class `streaming_client`, and `"streaming_client"` does not contain
+   `"steam"` — `str-e-am` versus `st-e-am`. So it engaged for Big Picture and
+   never for the window the game audio belongs to.
+2. **It reasoned over a single `runningAppClass`** — the last-resumed app. Under
+   one-workspace-per-app several apps run at once, each on its own workspace.
+   Nothing ever muted Plex.
+3. **`shellState === "idle"` is not "the shell is on screen."** It predates the
+   workspace model and misses overlay states. What the user is looking at is now
+   exactly the active workspace id.
+
+It also emitted a "Stream muted" / "Stream unmuted" toast. That reported a
+routine internal consequence of switching workspaces; it is gone.
+
+### Attributing a PipeWire node to a window
+
+A playback stream does not say which window owns it, and the obvious mappings do
+not survive contact with Steam. Measured on a live box running Plex, Big Picture
+and a Remote Play stream at once:
+
+| Approach | Result |
+|---|---|
+| PipeWire client pid == Hyprland window pid | Exact for Plex. **Fails for both Steam windows** — Big Picture's window pid is a `steamwebhelper` that owns no PipeWire client. |
+| Walk the audio pid's process ancestry | **Fails.** The stream's audio sits under `streaming_client → reaper → IPC:CSteamEngine → steam`, a branch that never passes through the window's pid. They are siblings, not ancestors. |
+| `application.name` / `node.name` | **Misleads.** On the Remote Play stream node both are literally `"Steam"` — the same token as the Big Picture window class, collapsing two workspaces into one. |
+| `application.process.binary` | **Works.** The real executable name lined up with the window class for all three apps, with no cross-attribution. |
+
+Hence a strict pass on the binary, and — only when that names nothing — a loose
+pass on the display names:
+
+| binary | class | related? |
+|---|---|---|
+| `Plex` | `tv.plex.Plex` | yes (class contains binary) |
+| `steam` / `steamwebhelper` | `steam` | yes |
+| `streaming_client` | `streaming_client` | yes (exact) |
+| `streaming_client` | `steam` | **no** — the discrimination the whole design rests on |
+
+The loose pass exists for one real state, observed live: **a stream process
+outliving its window, still holding a playing node.** Strict finds no class for
+it (the window is gone), loose credits it to `steam` via `"Steam"`, and it is
+muted everywhere except the Steam workspace. Running strict first is what stops
+the loose pass from stealing a live stream away from its own workspace.
+
+### Two consequences, stated rather than buried
+
+- **A node that attributes to nothing is muted.** That is deliberate — an
+  orphaned stream must go quiet on the home screen, and "unattributable" is
+  exactly what an orphan looks like. The cost is that if attribution ever failed
+  for the app you are *looking at*, you would get video with no sound. That is
+  the direction a miss falls.
+- **Music in a backgrounded app is muted while the home screen is up**, so the
+  Now Playing widget can show a track you cannot hear. That follows directly
+  from the rule; if it ever needs an exception, the exception belongs in
+  `audioOwnership.js`, not in a per-app list.
+
+The graph is read with `pw-dump` and parsed as real JSON in QML — not scraped
+from `wpctl status`, and not filtered through `jq` (which is not a declared
+dependency). That is a safety decision: this policy enumerates the whole graph,
+and a mis-parsed id from a text scrape could land on the output **sink** and
+silence the box. Only `media.class == "Stream/Output/Audio"` — an app's own
+sink-inputs — is ever a candidate, and only ids the shell itself muted are ever
+unmuted.
+
 **The contract.** Exactly one app window is visible and fills the screen; the
 shell (Quickshell) sits deterministically above/below it; backgrounded apps
 (Plex HTPC, Steam) keep running but never share the screen. Two app windows must

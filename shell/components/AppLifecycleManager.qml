@@ -11,6 +11,19 @@ Item {
 
     property string runningAppClass: ""
     property var runningWindows: []
+    // The workspace currently on screen, by NAME (matching hypr-clients'
+    // `workspace` field). "1" is home — reserved and deliberately empty, see
+    // `workspaces::HOME_WORKSPACE` in the daemon.
+    //
+    // Authoritative because this component is the ONLY switcher: every workspace
+    // change in the kiosk goes through showWorkspace()/showHome() below, so
+    // setting it there is not a guess about the compositor, it is the record of
+    // what we just told the compositor to do. The resume verification probe
+    // corrects it from `hypr-monitors` as a self-heal.
+    //
+    // Consumed by WorkspaceAudioMuter, which mutes every playback stream that
+    // does not belong here.
+    property string displayedWorkspace: "1"
     // Signature of the last published runningWindows; gate reassignment on it
     // so an unchanged poll doesn't rebuild the home row and drop controller focus.
     property string _runningWindowsSig: ""
@@ -335,6 +348,11 @@ Item {
         if (!ResumeFocus.canDispatch(target))
             return;
         LaunchTrace.logWorkspaceSwitch(target.windowClass, target.workspace);
+        // Publish BEFORE the dispatch, not after it exits: audio policy should
+        // follow the screen, and the switch is what the user perceives as
+        // instantaneous. `hyprctl dispatch` exits 0 regardless, so waiting on it
+        // would buy no extra certainty — only latency.
+        root.displayedWorkspace = "" + target.workspace;
         switchWorkspace.command = ["hyprctl", "dispatch", "workspace", ResumeFocus.workspaceSelector(target.workspace)];
         switchWorkspace.running = true;
     }
@@ -356,6 +374,7 @@ Item {
         // arming a verification for a switch that has no window to land on.
         root._resumeGeneration = root._resumeGeneration + 1;
         root._pendingFocusDecision = null;
+        root.displayedWorkspace = "1";
         switchWorkspace.command = ["hyprctl", "dispatch", "workspace", "1"];
         switchWorkspace.running = true;
     }
@@ -686,6 +705,16 @@ Item {
                 // empty list so it reports "cannot verify" rather than throwing.
                 monitors = [];
             }
+            // Self-heal `displayedWorkspace` from what the compositor actually
+            // shows. It is set optimistically at dispatch time, and this is the
+            // one place the shell reads the truth back — so a switch that landed
+            // somewhere else corrects the audio policy instead of leaving it
+            // muting against a workspace nobody is on. An unreadable probe
+            // ("") changes nothing.
+            let observed = ResumeFocus.activeWorkspaceOf(monitors);
+            if (observed !== "")
+                root.displayedWorkspace = observed;
+
             let res = ResumeFocus.verifyLanding(decision, monitors);
             if (res.landed)
                 return;
