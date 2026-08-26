@@ -1046,26 +1046,11 @@ async fn watch_events(
                 // so it could yank the screen to the wrong app. This resolves its
                 // target from the event's own address and moves it SILENTLY, so it
                 // can neither pick the wrong window nor change what is displayed.
-                if let (Some(address), Some(class)) =
-                    (openwindow_address(data), openwindow_class(data))
-                {
-                    let assigned = registry
-                        .lock()
-                        .expect("workspace registry mutex poisoned")
-                        .assign(class);
-                    if let Some(ws) = assigned {
-                        let cmd = workspaces::move_command(ws, address);
-                        let class = class.to_string();
-                        tokio::spawn(async move {
-                            if let Err(e) = request(&cmd).await {
-                                tracing::warn!(
-                                    "hyprland: failed to park {class} on workspace {ws}: {e}"
-                                );
-                            } else {
-                                tracing::debug!("hyprland: parked {class} on workspace {ws}");
-                            }
-                        });
-                    }
+                if let Some(address) = openwindow_address(data) {
+                    let address = address.to_string();
+                    let hint = openwindow_class(data).unwrap_or("").to_string();
+                    let registry = Arc::clone(&registry);
+                    tokio::spawn(park_window(registry, address, hint));
                 }
                 let json = parse_openwindow(data);
                 let _ = events_tx.send(Event::HyprOpenWindow(json));
@@ -1081,6 +1066,124 @@ async fn watch_events(
         }
     }
     Ok(())
+}
+
+/// Park one freshly-mapped window on its app's workspace.
+///
+/// Spawned per `openwindow`. Everything here is best-effort, but it is
+/// deliberately NOT fire-and-forget: this path has produced two invisible
+/// failures already, so each step that can silently do nothing is checked.
+///
+/// **The class cannot be taken from the event.** Hyprland's `openwindow` carries
+/// the class it knows at map time, and for XWayland windows that is frequently
+/// EMPTY — X11 sets `WM_CLASS` on its own schedule, often just after the surface
+/// maps. Observed in the field (2026-08-26): a Steam Remote Play window opened,
+/// the event carried no class, this returned early, and the window stayed on
+/// whatever workspace it happened to map onto — sharing a screen with Steam Big
+/// Picture and making both switcher rows lead to the same place. The window's
+/// `initialClass` read `streaming_client` moments later, which is why the race is
+/// so easy to miss after the fact.
+///
+/// So the class is resolved from `j/clients` by address, retrying briefly, and
+/// the event's value is only a fast path.
+async fn park_window(registry: Arc<Mutex<workspaces::Registry>>, address: String, hint: String) {
+    let class = match resolve_window_class(&address, &hint).await {
+        Some(c) => c,
+        None => {
+            tracing::warn!(
+                "hyprland: {address} never reported a window class; left unparked \
+                 (it may share a workspace with another app)"
+            );
+            return;
+        }
+    };
+
+    let assigned = registry
+        .lock()
+        .expect("workspace registry mutex poisoned")
+        .assign(&class);
+    let Some(ws) = assigned else {
+        return;
+    };
+
+    if !dispatch_ok(&workspaces::move_command(ws, &address)).await {
+        tracing::warn!("hyprland: failed to park {class} ({address}) on workspace {ws}");
+        return;
+    }
+    // Deliberately `info`, not `debug`. A default deploy runs at info level, and
+    // when this silently did nothing the journal held no record either way —
+    // which turned a one-line bug into a live-debugging session.
+    tracing::info!("hyprland: parked {class} on workspace {ws}");
+}
+
+/// The authoritative window class for `address`, or `None` if it never appears.
+///
+/// `hint` (the `openwindow` event's class field) short-circuits when non-empty.
+/// Otherwise poll the client list — an XWayland window's `WM_CLASS` typically
+/// lands within a frame or two of the map.
+async fn resolve_window_class(address: &str, hint: &str) -> Option<String> {
+    if !hint.is_empty() {
+        return Some(hint.to_string());
+    }
+    const ATTEMPTS: u32 = 10;
+    const INTERVAL: Duration = Duration::from_millis(100);
+    for _ in 0..ATTEMPTS {
+        tokio::time::sleep(INTERVAL).await;
+        if let Some(class) = client_class(address).await {
+            return Some(class);
+        }
+    }
+    None
+}
+
+/// Look one window up in `j/clients` by address and return its non-empty class.
+async fn client_class(address: &str) -> Option<String> {
+    let body = request("j/clients").await.ok()?;
+    let Value::Array(clients) = serde_json::from_str::<Value>(body.trim()).ok()? else {
+        return None;
+    };
+    for c in clients {
+        if c.get("address").and_then(Value::as_str) != Some(address) {
+            continue;
+        }
+        let class = c.get("class").and_then(Value::as_str).unwrap_or("").trim();
+        return (!class.is_empty()).then(|| class.to_string());
+    }
+    None
+}
+
+/// Whether a dispatch reply body means "accepted".
+///
+/// Hyprland answers a good dispatch with `ok`; a rejected one comes back as prose
+/// ("Invalid workspace...", "Window not found..."). An empty body is treated as
+/// success because some dispatchers reply with nothing at all — the goal is to
+/// catch the REJECTION text, not to demand a specific acknowledgement.
+fn dispatch_accepted(body: &str) -> bool {
+    let reply = body.trim();
+    reply.is_empty() || reply.eq_ignore_ascii_case("ok")
+}
+
+/// Send a dispatch and report whether Hyprland ACCEPTED it.
+///
+/// `request` only fails on a socket-level error; Hyprland reports a rejected
+/// dispatch in the reply BODY and the transport still succeeds. Treating `Ok(_)`
+/// as success is therefore the same class of mistake as trusting `hyprctl
+/// dispatch`'s exit code, which is what made the original resume bug invisible.
+async fn dispatch_ok(cmd: &str) -> bool {
+    match request(cmd).await {
+        Ok(body) => {
+            if dispatch_accepted(&body) {
+                true
+            } else {
+                tracing::warn!("hyprland: dispatch {cmd:?} rejected: {}", body.trim());
+                false
+            }
+        }
+        Err(e) => {
+            tracing::warn!("hyprland: dispatch {cmd:?} failed: {e}");
+            false
+        }
+    }
 }
 
 /// Park every already-mapped window on its class's workspace.
@@ -1117,10 +1220,10 @@ async fn reconcile_workspaces(registry: &Arc<Mutex<workspaces::Registry>>) {
         let Some(ws) = assigned else {
             continue;
         };
-        if let Err(e) = request(&workspaces::move_command(ws, address)).await {
-            tracing::warn!("hyprland: reconcile failed to park {class} on workspace {ws}: {e}");
-        } else {
+        if dispatch_ok(&workspaces::move_command(ws, address)).await {
             tracing::info!("hyprland: reconciled {class} onto workspace {ws}");
+        } else {
+            tracing::warn!("hyprland: reconcile failed to park {class} on workspace {ws}");
         }
     }
 }
@@ -1406,6 +1509,22 @@ mod tests {
         // Missing `0x` prefix must also be rejected (defense-in-depth).
         assert_eq!(openwindow_address("12345678,1,steam,Title"), None);
         assert_eq!(openwindow_address("abc,1,steam,Title"), None);
+    }
+
+    #[test]
+    fn dispatch_accepted_recognises_success_and_rejection() {
+        assert!(dispatch_accepted("ok"));
+        assert!(dispatch_accepted("ok\n"));
+        assert!(dispatch_accepted("OK"));
+        // Some dispatchers answer with nothing; that is not a rejection.
+        assert!(dispatch_accepted(""));
+        assert!(dispatch_accepted("   "));
+
+        // The cases that used to slip through as `Ok(_)`: the transport
+        // succeeded, but Hyprland refused the dispatch in the body.
+        assert!(!dispatch_accepted("Invalid workspace"));
+        assert!(!dispatch_accepted("Window not found"));
+        assert!(!dispatch_accepted("okay, but not really"));
     }
 
     #[test]
