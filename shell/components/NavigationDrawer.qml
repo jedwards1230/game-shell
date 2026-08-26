@@ -368,6 +368,14 @@ Drawer {
         // list sizes to its content (Layout.preferredHeight: contentHeight), so
         // without this every child stacks at the top and QuickActions rides up
         // under the last resume row — the taller the list, the lower it floats.
+        //
+        // THIS MUST BE THE ONLY fillHeight ITEM IN THIS COLUMN. A ColumnLayout
+        // divides slack EVENLY among every fillHeight child, so a second one
+        // does not "also pin" anything — it halves this one's pull and leaves
+        // the actions row floating in the middle of the empty space instead of
+        // at the bottom. A redundant second spacer sat above the status line
+        // and did exactly that; the status line needs no spacer of its own,
+        // because it is already last and this item pushes the whole block down.
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -443,12 +451,6 @@ Drawer {
             // and MprisPlayerBase sets wantVisible = hasPlayer) — no override here.
             previousRow: drawerActions
             onEscaped: root.closed()
-        }
-
-        // === Spacer — absorbs slack so the status line pins to the bottom ===
-        Item {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
         }
 
         // === Status glyph line (non-focusable readout, bottom-pinned) ===

@@ -238,10 +238,10 @@ FocusScope {
             // square split into four tiles, the "grid-view / app-tiles" reading
             // for Widgets. It's a Mathematical Operators glyph (same family the
             // sibling symbol glyphs ⚙/♫/⏻ come from), so it renders at a
-            // consistent weight and sits centered in its slot — unlike the old
-            // ▦ (U+25A6), a Geometric-Shapes box that the font draws undersized
-            // and off-baseline next to the others. No glyphOffsetY needed: like
-            // the other siblings (only the low-sitting ☾/☀/◐ theme glyph nudges).
+            // consistent weight — unlike the old ▦ (U+25A6), a Geometric-Shapes
+            // box that the font draws undersized next to the others. Vertical
+            // centering is computed from font metrics in QuickActionButton, so
+            // this needs no per-glyph nudge.
             QuickActionButton {
                 id: widgetsGlyph
                 index: 2
@@ -252,8 +252,6 @@ FocusScope {
                 iconPath: ""
                 fallbackGlyph: "\u{229E}"
                 fallbackColor: widgetsGlyph.hovered && InputMode.mouseMode ? Theme.textPrimary : Theme.textMuted
-                // ⊞ sits a touch low in the font box like ☾/☀/◐ — nudge up.
-                glyphOffsetY: -Math.round(root.imgSize * 0.06)
                 a11yName: root._labels[2]
                 onActivated: root.widgetsRequested()
             }
@@ -272,8 +270,6 @@ FocusScope {
                 iconPath: ""
                 fallbackGlyph: Theme.themeMode === "dark" ? "☾" : Theme.themeMode === "light" ? "☀" : "◐"
                 fallbackColor: Theme.textPrimary
-                // These glyphs sit low in the font box vs the others — nudge up.
-                glyphOffsetY: -Math.round(root.imgSize * 0.12)
                 a11yName: root._labels[3]
                 onActivated: {
                     if (Theme.themeMode === "auto")

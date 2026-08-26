@@ -1,4 +1,5 @@
 import QtQuick
+import "lib/glyphMetrics.js" as GlyphMetrics
 
 // One circular quick-action glyph in the QuickActions row. Renders an SVG icon
 // (from IconTheme) with a Unicode fallback glyph, a hover/focus background, an
@@ -24,9 +25,6 @@ Rectangle {
     property string iconPath: ""        // full file:// path or "" → fallback
     property string fallbackGlyph: ""
     property color fallbackColor: Theme.textMuted
-    // Optical vertical nudge for fallback glyphs whose font metrics don't sit on
-    // the same baseline as the others (e.g. the theme-toggle ◐/☾/☀).
-    property real glyphOffsetY: 0
 
     // Accessibility label.
     property string a11yName: ""
@@ -69,15 +67,33 @@ Rectangle {
         visible: glyph.iconPath !== "" && status === Image.Ready
     }
 
+    // Fallback glyph, centered on its INK rather than on its font line box. The
+    // row mixes glyphs from several Unicode blocks, whose ink sits at different
+    // heights inside the one line box they all share, so line-box centering
+    // leaves them visibly unaligned with each other and with the SVG icons
+    // beside them. See lib/glyphMetrics.js for the rule, and for why the
+    // per-glyph hand-tuned nudges this replaced kept drifting.
     Text {
+        id: fallbackText
         anchors.centerIn: parent
-        anchors.verticalCenterOffset: glyph.glyphOffsetY
+        anchors.verticalCenterOffset: GlyphMetrics.centerOffset(glyphFont.ascent, glyphFont.descent, glyphInk.tightBoundingRect.y, glyphInk.tightBoundingRect.height)
         text: glyph.fallbackGlyph
         font.pixelSize: glyph.imgSize
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         color: glyph.fallbackColor
         visible: !(glyph.iconPath !== "" && iconImg.status === Image.Ready)
+    }
+
+    FontMetrics {
+        id: glyphFont
+        font: fallbackText.font
+    }
+
+    TextMetrics {
+        id: glyphInk
+        font: fallbackText.font
+        text: glyph.fallbackGlyph
     }
 
     Item {
