@@ -170,6 +170,15 @@ unknown workspace means no policy, so nothing is touched until the truth arrives
   from the rule; if it ever needs an exception, the exception belongs in
   `audioOwnership.js`, not in a per-app list.
 
+Reconciliation is **event-driven plus a 5-second sweep**, and the sweep is not
+belt-and-braces. The component's inputs are the displayed workspace and the
+window set, and neither moves when a backgrounded app simply *begins* playing —
+Plex rolling into the next episode, or a Steam stream reconnecting with a fresh
+node while the user sits on the home screen. Reacting only to the screen changing
+cannot deliver "you never hear what you cannot see"; the graph has to be looked
+at too. The cadence matches `windowPollTimer`, and when nothing changed the diff
+is empty and no `wpctl` runs at all.
+
 The graph is read with `pw-dump` and parsed as real JSON in QML — not scraped
 from `wpctl status`, and not filtered through `jq` (which is not a declared
 dependency). That is a safety decision: this policy enumerates the whole graph,

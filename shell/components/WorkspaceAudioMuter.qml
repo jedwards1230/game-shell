@@ -91,6 +91,26 @@ Item {
     // stepping in — `_evaluate` re-checks the gate itself anyway.
     onShellStateChanged: _evaluate()
 
+    // Audio can start without anything this component is bound to changing.
+    //
+    // The inputs are the displayed workspace and the window set, and neither
+    // moves when a backgrounded app simply BEGINS playing — Plex rolling into
+    // the next episode, or a Steam stream reconnecting and opening a fresh node
+    // while the user sits on the home screen. Event-driven reconciliation alone
+    // cannot deliver "you never hear what you cannot see"; it only reacts to the
+    // screen changing, not to the graph changing.
+    //
+    // Cadence matches AppLifecycleManager's own window poll, so this adds no new
+    // rhythm to the shell. Steady-state cost is one `pw-dump` and one parse: when
+    // nothing changed the reconcile diff is empty and no `wpctl` runs at all.
+    Timer {
+        id: sweepTimer
+        interval: 5000
+        repeat: true
+        running: muter._modelDescribesScreen
+        onTriggered: muter._evaluate()
+    }
+
     // `_cycleRunning` is cleared by a process EXITING. A `pw-dump` or `wpctl`
     // that hangs — or a Process that fails to start without emitting `exited` —
     // would otherwise leave it stuck true and the muter would never reconcile
