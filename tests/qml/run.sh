@@ -34,6 +34,10 @@ cp "$here/stubs/lib/qmldir" "$build/components/lib/qmldir"
 #    Qt resolving relative imports through the symlink back into shell/).
 cp "$shellc/QuickActions.qml" "$build/components/"
 cp "$shellc/QuickActionButton.qml" "$build/components/"
+# glyphMetrics.js — the optical-centering helper QuickActionButton imports by
+# relative path. Without it the button fails to LOAD (not just mis-render), which
+# takes QuickActions down with it, so this copy is load-bearing for tst_quickactions.
+cp "$shellc/lib/glyphMetrics.js" "$build/components/lib/"
 # NavigableGrid is pure QtQuick (references Theme/InputMode only) — runs headless
 # against the stub singletons; tst_navigablegrid exercises its key-nav + handoff.
 cp "$shellc/NavigableGrid.qml" "$build/components/"
