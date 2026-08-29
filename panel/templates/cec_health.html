@@ -12,10 +12,10 @@
     <h3>Recovery ladder</h3>
     <p class="muted">Escalating steps, in order — try the recommended one first before jumping ahead.</p>
     <div class="button-row">
-      <form hx-post="/devices/cec/test" hx-disabled-elt="find button" hx-target="#cec-health" hx-swap="outerHTML" class="inline-form">
+      <form hx-post="/devices/cec/test" hx-disable="find button" hx-target="#cec-health" hx-swap="outerHTML" class="inline-form">
         <button type="submit">1. Test CEC{% if view.recommend_test %} (recommended){% endif %}</button>
       </form>
-      <form hx-post="/devices/cec/recover/restart-daemon" hx-disabled-elt="find button" hx-target="#cec-health" hx-swap="outerHTML" class="inline-form"
+      <form hx-post="/devices/cec/recover/restart-daemon" hx-disable="find button" hx-target="#cec-health" hx-swap="outerHTML" class="inline-form"
             hx-confirm="Restart the tv-shell input daemon? CEC re-initializes on daemon start.">
         <button class="warn-action" type="submit">2. Restart daemon{% if view.recommend_restart %} (recommended){% endif %}</button>
       </form>

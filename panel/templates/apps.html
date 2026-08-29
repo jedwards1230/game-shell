@@ -18,7 +18,7 @@
   <h2>Prewarm at login</h2>
   <p class="muted">One <code>StartupWMClass</code> per line; an emptied box clears the list.</p>
   {% if daemon_up %}
-  <form hx-post="/shell/apps/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
+  <form hx-post="/shell/apps/save" hx-disable="find button" hx-target="#settings-result" hx-swap="innerHTML">
     {# Scopes the save to this page's schema groups — see
        pages::settings::build_patch. #}
     {% for group in scope %}<input type="hidden" name="__group" value="{{ group }}">{% endfor %}
@@ -55,7 +55,7 @@
   <div id="webapp-result"></div>
 
   {% if webapps_enabled %}
-  <form hx-post="/shell/apps/webapp/add" hx-disabled-elt="find button"
+  <form hx-post="/shell/apps/webapp/add" hx-disable="find button"
         hx-target="#webapp-result" hx-swap="innerHTML" class="inline-form">
     <input type="text" name="name" placeholder="Name (e.g. YouTube)" maxlength="64" required
            style="width:14rem;">
@@ -88,7 +88,7 @@
           <td><code>{{ a.wm_class }}</code></td>
           <td>
             {% if webapps_enabled %}
-            <form hx-post="/shell/apps/webapp/remove" hx-disabled-elt="find button"
+            <form hx-post="/shell/apps/webapp/remove" hx-disable="find button"
                   hx-target="#webapp-result" hx-swap="innerHTML" class="inline-form"
                   hx-confirm="Remove {{ a.name }}? This deletes its launcher (the browser profile is kept).">
               <input type="hidden" name="id" value="{{ a.id }}">

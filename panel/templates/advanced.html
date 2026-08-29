@@ -44,7 +44,7 @@
   write any key, including ones no typed form models
   ({{ complex_notes_html|safe }}) and the daemon-owned binding keys above.
 </p>
-<form id="raw-form" hx-post="/shell/advanced/raw" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML"
+<form id="raw-form" hx-post="/shell/advanced/raw" hx-disable="find button" hx-target="#settings-result" hx-swap="innerHTML"
       onsubmit="return tvShellValidateRawSettings(event)">
   <textarea id="raw_json" name="raw_json" rows="15" style="width:100%;">{{ raw_json }}</textarea>
   <p class="muted">Formatted for editing; sent compact.</p>

@@ -190,7 +190,7 @@ async fn render_bt_list(state: &AppState) -> String {
                 ));
                 for action in BT_ACTIONS {
                     html.push_str(&format!(
-                        r##"<form hx-post="/devices/network/bt/action" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form">
+                        r##"<form hx-post="/devices/network/bt/action" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form">
                              <input type="hidden" name="mac" value="{mac}">
                              <input type="hidden" name="action" value="{action}">
                              <button class="btn-mutate" type="submit">{action}</button>

@@ -15,11 +15,11 @@
 <section class="controllers-section">
   <h2>Topology</h2>
   <div class="button-row">
-    <form hx-post="/devices/cec/scan" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form">
+    <form hx-post="/devices/cec/scan" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form">
       <button type="submit">Scan bus</button>
     </form>
   </div>
-  <form hx-post="/devices/cec/device" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form">
+  <form hx-post="/devices/cec/device" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form">
     <input type="number" name="addr" placeholder="logical address (0-15)" min="0" max="15" required style="width:8rem;">
     <button type="submit">Device detail</button>
   </form>
@@ -34,18 +34,18 @@
     Topology scan above).
   </p>
   <div class="button-row">
-    <form hx-post="/devices/cec/active-source" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form"
+    <form hx-post="/devices/cec/active-source" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Make this shell host the active CEC source? This switches every display on the bus to this input.">
       <button class="danger" type="submit">Make shell host the active source</button>
     </form>
   </div>
   <div class="button-row">
-    <form hx-post="/devices/cec/power-on" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form"
+    <form hx-post="/devices/cec/power-on" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Send a CEC power-on to this address?">
       <input type="number" name="addr" placeholder="addr" min="0" max="15" required style="width:6rem;">
       <button type="submit">Power on</button>
     </form>
-    <form hx-post="/devices/cec/power-off" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form"
+    <form hx-post="/devices/cec/power-off" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form"
           hx-confirm="Send a CEC standby to this address?">
       <input type="number" name="addr" placeholder="addr" min="0" max="15" required style="width:6rem;">
       <button type="submit">Standby</button>
@@ -63,7 +63,7 @@
     nested object and have no typed field — edit them from Shell ▸ Advanced's raw JSON hatch.
   </p>
   {% if settings_up %}
-  <form hx-post="/devices/cec/config" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML">
+  <form hx-post="/devices/cec/config" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML">
     {# Scopes the save to the CEC group. Without these the patch would carry
        every Bool in the schema and clear the other settings pages' toggles —
        see pages::settings::build_patch. #}
@@ -97,7 +97,7 @@
     (e.g. Plex HTPC with CEC enabled) announce their own name — keep CEC disabled in apps so
     the daemon stays the single CEC owner.
   </p>
-  <form hx-post="/devices/cec/osd-name" hx-disabled-elt="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form">
+  <form hx-post="/devices/cec/osd-name" hx-disable="find button" hx-target="#cec-result" hx-swap="innerHTML" class="inline-form">
     <input type="text" name="osd_name" value="{{ osd_configured }}" maxlength="13"
            placeholder="hostname default" style="width:12rem;">
     <button type="submit">Save input name</button>

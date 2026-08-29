@@ -12,18 +12,18 @@
       <td data-label="Action">{{ b.action }}</td>
       <td data-label="Current"><code>{{ b.current }}</code></td>
       <td data-label="Set">
-        <form hx-post="/devices/controllers/bindings/set" hx-disabled-elt="find button" hx-target="#controllers-bindings" hx-swap="outerHTML" class="inline-form">
+        <form hx-post="/devices/controllers/bindings/set" hx-disable="find button" hx-target="#controllers-bindings" hx-swap="outerHTML" class="inline-form">
           <input type="hidden" name="action" value="{{ b.action }}">
           <select name="button">{{ b.select_html|safe }}</select>
           <button type="submit">Set</button>
         </form>
       </td>
       <td data-label="Capture">
-        <form hx-post="/devices/controllers/bindings/capture" hx-disabled-elt="find button" hx-target="#controllers-bindings" hx-swap="outerHTML" class="inline-form">
+        <form hx-post="/devices/controllers/bindings/capture" hx-disable="find button" hx-target="#controllers-bindings" hx-swap="outerHTML" class="inline-form">
           <input type="hidden" name="action" value="{{ b.action }}">
           <button type="submit">Capture next press (10s)</button>
         </form>
-        <form hx-post="/devices/controllers/bindings/capture-cancel" hx-disabled-elt="find button" hx-target="#controllers-bindings" hx-swap="outerHTML" class="inline-form">
+        <form hx-post="/devices/controllers/bindings/capture-cancel" hx-disable="find button" hx-target="#controllers-bindings" hx-swap="outerHTML" class="inline-form">
           <button type="submit">Cancel capture</button>
         </form>
       </td>

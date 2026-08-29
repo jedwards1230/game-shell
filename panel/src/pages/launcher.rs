@@ -66,7 +66,7 @@ async fn render_list_apps(state: &AppState) -> String {
             for a in &apps {
                 html.push_str(&format!(
                     r##"<tr><td>{name}</td><td class="muted">{comment}</td><td>
-                       <form hx-post="/remote/launcher/launch" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+                       <form hx-post="/remote/launcher/launch" hx-disable="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
                          <input type="hidden" name="wm_class" value="{wm}">
                          <button class="btn-mutate" type="submit">Launch</button>
                        </form></td></tr>"##,

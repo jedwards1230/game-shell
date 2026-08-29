@@ -23,10 +23,14 @@
   {% if pending %}
   {# The countdown re-requests the section every second, so a daemon-side
      auto-revert appears here without anyone clicking anything. #}
+  {# hx-target/hx-swap are marked :inherited for any descendant that adds its own
+     hx-get/hx-post without declaring them -- as of this migration, both the
+     confirm and revert forms below set their own hx-target/hx-swap explicitly,
+     so this is a safety net rather than something they currently rely on. #}
   <div class="banner banner-warn"
        hx-get="/devices/display-audio/mode"
-       hx-target="#display-mode"
-       hx-swap="innerHTML"
+       hx-target:inherited="#display-mode"
+       hx-swap:inherited="innerHTML"
        hx-trigger="every 1s">
     <p>
       <strong>Awaiting confirmation — {{ pending_seconds }}s left.</strong>
@@ -34,11 +38,11 @@
       If you do nothing it goes back to <code>{{ pending_previous }}</code>.
     </p>
     <div class="button-row">
-      <form hx-post="/devices/display-audio/mode/confirm" hx-disabled-elt="find button"
+      <form hx-post="/devices/display-audio/mode/confirm" hx-disable="find button"
             hx-target="#display-mode" hx-swap="innerHTML" class="inline-form">
         <button type="submit">Keep these settings</button>
       </form>
-      <form hx-post="/devices/display-audio/mode/revert" hx-disabled-elt="find button"
+      <form hx-post="/devices/display-audio/mode/revert" hx-disable="find button"
             hx-target="#display-mode" hx-swap="innerHTML" class="inline-form">
         <button type="submit">Revert now</button>
       </form>
@@ -69,7 +73,7 @@
     {% if d.no_modes %}
     <p class="degraded-msg">This output reports no usable modes, so there is nothing to pick from.</p>
     {% else %}
-    <form hx-post="/devices/display-audio/mode/apply" hx-disabled-elt="find button"
+    <form hx-post="/devices/display-audio/mode/apply" hx-disable="find button"
           hx-target="#display-mode" hx-swap="innerHTML" class="inline-form"
           {% if pending %}hx-confirm="Another change is still awaiting confirmation. Confirm or revert that one first."{% endif %}>
       <input type="hidden" name="monitor" value="{{ d.name }}">
@@ -83,7 +87,7 @@
     </form>
     {% endif %}
 
-    <form hx-post="/devices/display-audio/mode/vrr" hx-disabled-elt="find button"
+    <form hx-post="/devices/display-audio/mode/vrr" hx-disable="find button"
           hx-target="#display-mode" hx-swap="innerHTML" class="inline-form">
       <input type="hidden" name="monitor" value="{{ d.name }}">
       <label for="vrr-{{ d.name }}">Variable refresh rate</label>

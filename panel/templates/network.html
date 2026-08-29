@@ -12,15 +12,15 @@
 <section class="tools-section">
   <h2>Network</h2>
   <div class="button-row">
-    <form hx-post="/devices/network/status" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Status</button></form>
-    <form hx-post="/devices/network/wifi-list" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Wi-Fi list</button></form>
-    <form hx-post="/devices/network/wifi-rescan" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Wi-Fi rescan</button></form>
+    <form hx-post="/devices/network/status" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Status</button></form>
+    <form hx-post="/devices/network/wifi-list" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Wi-Fi list</button></form>
+    <form hx-post="/devices/network/wifi-rescan" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Wi-Fi rescan</button></form>
   </div>
-  <form hx-post="/devices/network/throughput" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form">
+  <form hx-post="/devices/network/throughput" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form">
     <input type="text" name="iface" class="field-wide" placeholder="interface (e.g. eth0)" required>
     <button class="btn-probe" type="submit">Throughput</button>
   </form>
-  <form hx-post="/devices/network/ping" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form">
+  <form hx-post="/devices/network/ping" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form">
     <input type="text" name="host" class="field-wide" placeholder="host (e.g. 1.1.1.1)" required>
     <input type="number" name="count" class="field-count" placeholder="count (1-10)" min="1" max="10">
     <button class="btn-probe" type="submit">Ping</button>
@@ -34,12 +34,12 @@
     Settings ▸ Bluetooth page. List devices first — each row carries its own actions.
   </p>
   <div class="button-row">
-    <form hx-post="/devices/network/bt/power-status" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Power status</button></form>
-    <form hx-post="/devices/network/bt/power-on" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Power on</button></form>
-    <form hx-post="/devices/network/bt/power-off" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Power off</button></form>
-    <form hx-post="/devices/network/bt/scan-on" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Scan on</button></form>
-    <form hx-post="/devices/network/bt/scan-off" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Scan off</button></form>
-    <form hx-post="/devices/network/bt/list" hx-disabled-elt="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">List devices</button></form>
+    <form hx-post="/devices/network/bt/power-status" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">Power status</button></form>
+    <form hx-post="/devices/network/bt/power-on" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Power on</button></form>
+    <form hx-post="/devices/network/bt/power-off" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Power off</button></form>
+    <form hx-post="/devices/network/bt/scan-on" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Scan on</button></form>
+    <form hx-post="/devices/network/bt/scan-off" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-mutate" type="submit">Scan off</button></form>
+    <form hx-post="/devices/network/bt/list" hx-disable="find button" hx-target="#network-result" hx-swap="innerHTML" class="inline-form"><button class="btn-probe" type="submit">List devices</button></form>
   </div>
 </section>
 {% endblock %}

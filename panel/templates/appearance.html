@@ -15,7 +15,7 @@
 <div id="settings-result"></div>
 
 {% if daemon_up %}
-<form hx-post="/shell/appearance/save" hx-disabled-elt="find button" hx-target="#settings-result" hx-swap="innerHTML">
+<form hx-post="/shell/appearance/save" hx-disable="find button" hx-target="#settings-result" hx-swap="innerHTML">
   {# Scopes the save to this page's schema groups. Without these the patch
      would carry every Bool in the schema and clear the other pages' toggles —
      see pages::settings::build_patch. #}
@@ -48,7 +48,7 @@
   <div id="wallpaper-result"></div>
 
   <form hx-post="/shell/appearance/wallpaper/upload" hx-encoding="multipart/form-data"
-        hx-disabled-elt="find button" hx-target="#wallpaper-result" hx-swap="innerHTML"
+        hx-disable="find button" hx-target="#wallpaper-result" hx-swap="innerHTML"
         class="inline-form">
     <input type="file" name="files" accept=".jpg,.jpeg,.png,.webp,.bmp" multiple required>
     <button type="submit">Upload</button>
@@ -70,7 +70,7 @@
       <div class="wallpaper-tile {% if !any_selected %}wallpaper-selected{% endif %}">
         <div class="wallpaper-none">None<br><span class="muted">(solid colour)</span></div>
         <div class="wallpaper-actions">
-          <form hx-post="/shell/appearance/wallpaper/select" hx-disabled-elt="find button"
+          <form hx-post="/shell/appearance/wallpaper/select" hx-disable="find button"
                 hx-target="#wallpaper-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="name" value="">
             <button type="submit">{% if !any_selected %}Active{% else %}Use{% endif %}</button>
@@ -82,12 +82,12 @@
         <img src="/shell/appearance/wallpaper/file?name={{ w.name|urlencode }}" alt="{{ w.name }}" loading="lazy">
         <div class="wallpaper-name" title="{{ w.name }}">{{ w.name }}</div>
         <div class="wallpaper-actions">
-          <form hx-post="/shell/appearance/wallpaper/select" hx-disabled-elt="find button"
+          <form hx-post="/shell/appearance/wallpaper/select" hx-disable="find button"
                 hx-target="#wallpaper-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="name" value="{{ w.name }}">
             <button type="submit">{% if w.selected %}Active{% else %}Use{% endif %}</button>
           </form>
-          <form hx-post="/shell/appearance/wallpaper/delete" hx-disabled-elt="find button"
+          <form hx-post="/shell/appearance/wallpaper/delete" hx-disable="find button"
                 hx-target="#wallpaper-result" hx-swap="innerHTML" class="inline-form"
                 hx-confirm="Delete {{ w.name }} from the box? This removes the file.">
             <input type="hidden" name="name" value="{{ w.name }}">

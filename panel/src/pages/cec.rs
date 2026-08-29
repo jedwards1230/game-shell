@@ -592,10 +592,10 @@ async fn render_scan_result(state: &AppState) -> String {
                 let name = friendly_name(&names, d.logical_address);
                 html.push_str(&format!(
                     "<tr><td>{addr}</td><td>{name}</td><td>{power}</td><td>\
-                     <form hx-post=\"/cec/power-on\" hx-disabled-elt=\"find button\" hx-target=\"#cec-result\" hx-swap=\"innerHTML\" class=\"inline-form\" \
+                     <form hx-post=\"/cec/power-on\" hx-disable=\"find button\" hx-target=\"#cec-result\" hx-swap=\"innerHTML\" class=\"inline-form\" \
                      hx-confirm=\"Power on {name_attr} (addr {addr})?\">\
                      <input type=\"hidden\" name=\"addr\" value=\"{addr}\"><button class=\"btn-mutate\" type=\"submit\">Power on</button></form>\
-                     <form hx-post=\"/cec/power-off\" hx-disabled-elt=\"find button\" hx-target=\"#cec-result\" hx-swap=\"innerHTML\" class=\"inline-form\" \
+                     <form hx-post=\"/cec/power-off\" hx-disable=\"find button\" hx-target=\"#cec-result\" hx-swap=\"innerHTML\" class=\"inline-form\" \
                      hx-confirm=\"Send standby to {name_attr} (addr {addr})?\">\
                      <input type=\"hidden\" name=\"addr\" value=\"{addr}\"><button class=\"btn-mutate\" type=\"submit\">Standby</button></form>\
                      </td></tr>",
