@@ -14,7 +14,7 @@
       <td class="muted">{% if u.active_since != "" %}{{ u.active_since }}{% else %}—{% endif %}</td>
       <td class="muted">{{ u.scope }}</td>
       <td>
-        <form hx-post="/system/services/restart/{{ u.key }}" hx-disabled-elt="find button" hx-target="#services-result" hx-swap="innerHTML"
+        <form hx-post="/system/services/restart/{{ u.key }}" hx-disable="find button" hx-target="#services-result" hx-swap="innerHTML"
               hx-confirm="{{ u.confirm }}" class="inline-form">
           <button class="{{ u.danger_class }}" type="submit">Restart</button>
         </form>

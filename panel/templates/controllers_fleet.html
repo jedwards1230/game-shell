@@ -17,15 +17,15 @@
         <td class="muted">{{ p.id }}</td>
         <td>{% if p.grabbed %}yes{% else %}no{% endif %}</td>
         <td>
-          <form hx-post="/devices/controllers/pad/battery" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+          <form hx-post="/devices/controllers/pad/battery" hx-disable="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="id" value="{{ p.id }}">
             <button type="submit">Battery</button>
           </form>
-          <form hx-post="/devices/controllers/pad/rumble-status" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+          <form hx-post="/devices/controllers/pad/rumble-status" hx-disable="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="id" value="{{ p.id }}">
             <button type="submit">Rumble status</button>
           </form>
-          <form hx-post="/devices/controllers/pad/rumble" hx-disabled-elt="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
+          <form hx-post="/devices/controllers/pad/rumble" hx-disable="find button" hx-target="#controllers-result" hx-swap="innerHTML" class="inline-form">
             <input type="hidden" name="id" value="{{ p.id }}">
             <input type="number" name="ms" value="200" min="20" max="3000" style="width:5rem;">
             <button type="submit">Test rumble</button>

@@ -19,10 +19,10 @@
        reason anyone opens it. `load` fires once; the button stays for an
        explicit refresh. Same pattern the Overview tiles use, and the route is
        Node-gated, so this only fires where a node actually answered. #}
-    <form hx-post="/remote/launcher/list" hx-trigger="load, submit" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+    <form hx-post="/remote/launcher/list" hx-trigger="load, submit" hx-disable="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
       <button class="btn-probe" type="submit">List apps</button>
     </form>
-    <form hx-post="/remote/launcher/recents" hx-disabled-elt="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
+    <form hx-post="/remote/launcher/recents" hx-disable="find button" hx-target="#launcher-result" hx-swap="innerHTML" class="inline-form">
       <button class="btn-probe" type="submit">Recents</button>
     </form>
   </div>

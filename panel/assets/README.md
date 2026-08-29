@@ -7,10 +7,9 @@ must work when the rest of the system is broken.
 ## `htmx.min.js`
 
 - **Library**: [htmx](https://htmx.org/)
-- **Version**: 2.0.4
-- **Source**: `https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js`
-  (identical byte-for-byte to the jsdelivr copy of the same release)
-- **SHA-256**: `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447`
+- **Version**: 4.0.0 (released 2026-08-28; a ground-up rewrite from the 2.x line -- see docs/PANEL.md and the migration PR that bumped this file for the attribute-rename and behavior-change audit)
+- **Source**: `https://unpkg.com/htmx.org@4.0.0/dist/htmx.min.js` (published under npm's `next` dist-tag as of this vendoring -- `latest` was still 2.x, so pin the exact version, not `@next`, when re-fetching)
+- **SHA-256**: `e484d9171a9db30a39c8f16e3d709d4137f3211c659f8e6125816635033d593f`
 - **License**: BSD 2-Clause (compatible with this repo's GPL-3.0)
 
 Committed verbatim from the official release — do not hand-edit. To update, fetch

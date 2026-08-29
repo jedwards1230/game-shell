@@ -16,7 +16,7 @@
 {% endif %}
 
 <div class="dev-screenshot">
-  <button hx-post="/dev/screenshot/capture" hx-disabled-elt="this" hx-target="#dev-screenshot-result" hx-swap="innerHTML">Load screenshot</button>
+  <button hx-post="/dev/screenshot/capture" hx-disable="this" hx-target="#dev-screenshot-result" hx-swap="innerHTML">Load screenshot</button>
   <div id="dev-screenshot-result"></div>
 </div>
 {% endblock %}

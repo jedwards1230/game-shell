@@ -17,13 +17,13 @@
 <div id="dev-result"></div>
 
 <div class="dev-actions">
-  <form class="dev-action" hx-post="/dev/restart-daemon" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+  <form class="dev-action" hx-post="/dev/restart-daemon" hx-disable="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Restart the tv-shell input daemon now?">
     <h3>Restart daemon <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
     <button class="warn-action" type="submit">Restart daemon</button>
   </form>
 
-  <form class="dev-action" hx-post="/dev/restart-shell" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+  <form class="dev-action" hx-post="/dev/restart-shell" hx-disable="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Restart the Quickshell UI now?">
     <h3>Restart shell <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
     <button class="warn-action" type="submit">Restart shell</button>
@@ -46,27 +46,27 @@
      (they proxy the daemon bridge). Reboot/Suspend are the panel's own exec
      tier, so `allow_dangerous` alone registers them. #}
   {% if deploy_enabled %}
-  <form class="dev-action" hx-post="/dev/deploy" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+  <form class="dev-action" hx-post="/dev/deploy" hx-disable="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Deploy the latest ref? This runs git fetch/checkout/reset on the daemon host.">
     <h3>Deploy <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
     <input type="text" name="git_ref" placeholder="ref (optional, e.g. main)">
     <button class="danger-severe" type="submit">Deploy</button>
   </form>
 
-  <form class="dev-action" hx-post="/dev/build" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+  <form class="dev-action" hx-post="/dev/build" hx-disable="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Rebuild the daemon binary now?">
     <h3>Build <span class="tier">Bridge if daemon is up, else direct exec</span></h3>
     <button class="danger-severe" type="submit">Build</button>
   </form>
   {% endif %}
 
-  <form class="dev-action" hx-post="/dev/reboot" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+  <form class="dev-action" hx-post="/dev/reboot" hx-disable="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Reboot the whole machine now?">
     <h3>Reboot <span class="tier">Direct exec</span></h3>
     <button class="danger-severe" type="submit">Reboot</button>
   </form>
 
-  <form class="dev-action" hx-post="/dev/suspend" hx-disabled-elt="find button" hx-target="#dev-result" hx-swap="innerHTML"
+  <form class="dev-action" hx-post="/dev/suspend" hx-disable="find button" hx-target="#dev-result" hx-swap="innerHTML"
         hx-confirm="Suspend the machine now?">
     <h3>Suspend <span class="tier">Direct exec</span></h3>
     <button class="danger-severe" type="submit">Suspend</button>

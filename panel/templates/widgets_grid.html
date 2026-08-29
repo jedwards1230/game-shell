@@ -5,8 +5,8 @@
   <div class="field-row">
     <label>Order</label>
     <div class="reorder-buttons">
-      <button type="button" class="btn-mutate" hx-post="/shell/widgets/reorder/{{ card.id }}/up" hx-target="#widget-grid" hx-swap="outerHTML" hx-disabled-elt="this"{% if loop.first %} disabled{% endif %} aria-label="Move {{ card.name }} up">&#9650;</button>
-      <button type="button" class="btn-mutate" hx-post="/shell/widgets/reorder/{{ card.id }}/down" hx-target="#widget-grid" hx-swap="outerHTML" hx-disabled-elt="this"{% if loop.last %} disabled{% endif %} aria-label="Move {{ card.name }} down">&#9660;</button>
+      <button type="button" class="btn-mutate" hx-post="/shell/widgets/reorder/{{ card.id }}/up" hx-target="#widget-grid" hx-swap="outerHTML" hx-disable="this"{% if loop.first %} disabled{% endif %} aria-label="Move {{ card.name }} up">&#9650;</button>
+      <button type="button" class="btn-mutate" hx-post="/shell/widgets/reorder/{{ card.id }}/down" hx-target="#widget-grid" hx-swap="outerHTML" hx-disable="this"{% if loop.last %} disabled{% endif %} aria-label="Move {{ card.name }} down">&#9660;</button>
     </div>
     <input type="hidden" name="w_{{ card.id }}_order" value="{{ card.order }}">
   </div>

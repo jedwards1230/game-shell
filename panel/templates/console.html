@@ -28,7 +28,7 @@
     guarded flows — sending them here still works, with a warning and a
     stronger confirm prompt.
   </p>
-  <form id="console-raw-form" hx-post="/dev/console/raw" hx-disabled-elt="find button" hx-target="#console-result" hx-swap="innerHTML" class="inline-form"
+  <form id="console-raw-form" hx-post="/dev/console/raw" hx-disable="find button" hx-target="#console-result" hx-swap="innerHTML" class="inline-form"
         hx-confirm="Send this raw IPC command to the daemon? It may mutate state.">
     <input type="text" id="console-raw-cmd" name="cmd" class="field-wide" placeholder="e.g. sys-status" required>
     <button class="btn-mutate" type="submit">Send</button>

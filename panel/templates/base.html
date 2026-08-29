@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}tv-shell panel{% endblock %}</title>
 <link rel="stylesheet" href="/assets/style.css">
+{# htmx 4 default request timeout is 60s; the dev/recovery build and deploy actions have server-side ceilings of 180-190s (panel/src/bridge.rs CLIENT_TIMEOUT, panel/src/exec.rs BUILD_TIMEOUT), so this raises the client timeout to match -- every other IPC-console-routed action in this panel is bounded well under 60s server-side already, so this does not mask a real timeout anywhere else. #}
+<meta name="htmx-config" content='{"defaultTimeout": 200000}'>
 <script src="/assets/htmx.min.js"></script>
 </head>
 <body>

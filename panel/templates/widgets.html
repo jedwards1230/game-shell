@@ -29,7 +29,7 @@
   for those first if you don't want to lose them.
 </p>
 
-<form hx-post="/shell/widgets/save" hx-disabled-elt="find button" hx-target="#widgets-result" hx-swap="innerHTML">
+<form hx-post="/shell/widgets/save" hx-disable="find button" hx-target="#widgets-result" hx-swap="innerHTML">
   {% include "widgets_grid.html" %}
   <button type="submit">Save widgets</button>
 </form>
