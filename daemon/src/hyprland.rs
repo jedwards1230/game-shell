@@ -1110,7 +1110,6 @@ async fn watch_events(
                 // target from the event's own address and moves it SILENTLY, so it
                 // can neither pick the wrong window nor change what is displayed.
                 if let Some(address) = openwindow_address(data) {
-                    let address = address.to_string();
                     let hint = openwindow_class(data).unwrap_or("").to_string();
                     let registry = Arc::clone(&registry);
                     spawn_park_window(registry, address, hint);
@@ -1590,16 +1589,48 @@ fn parse_openwindow(data: &str) -> String {
 }
 
 /// Extract the window address from an `openwindow` event's raw data
-/// (`ADDRESS,WORKSPACENAME,CLASS,TITLE`). `None` for an empty/missing address
-/// so callers skip the fullscreen dispatch rather than target an empty
-/// selector. Also requires the `0x` prefix Hyprland always uses for window
-/// addresses — cheap defense-in-depth against a malformed/truncated event
-/// line reaching `dispatch focuswindow address:<...>` with garbage.
-fn openwindow_address(data: &str) -> Option<&str> {
-    data.split(',')
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && s.starts_with("0x"))
+/// (`ADDRESS,WORKSPACENAME,CLASS,TITLE`), normalised to the `0x`-prefixed form.
+/// `None` for an empty/missing or non-hex address so callers skip the dispatch
+/// rather than target a garbage selector.
+///
+/// **The two address spellings are not interchangeable, and assuming they were
+/// disabled this whole code path in production.** Hyprland prints window
+/// addresses two different ways:
+///
+/// | Source | Spelling |
+/// |---|---|
+/// | `hyprctl -j clients` (the `address` field) | `0x55cbfce523a0` |
+/// | the `socket2` event stream (`openwindow>>`) | `55cbfce523a0` |
+///
+/// This function used to *require* the `0x` prefix as "defense-in-depth against
+/// a malformed event line". Since socket2 never sends one, it returned `None`
+/// for every window ever opened — so `spawn_park_window` was never called, and
+/// park-on-open (the only per-window enforcement of the kiosk invariant) silently
+/// did nothing from the day it landed. The journal showed zero `parked` lines and
+/// only `reconciled` ones: the reconnect sweep was quietly doing all the work,
+/// and it does not run on a window open. A Steam Remote Play game therefore
+/// opened onto whatever workspace Hyprland chose — in the captured case
+/// workspace 2, already owned by `steam` — putting two apps back on one screen,
+/// the exact state #444 set out to make unrepresentable.
+///
+/// The unit tests missed it because every fixture was hand-written with a `0x`
+/// prefix, asserting the shape the code wanted instead of the shape the
+/// compositor sends. The wire-shape cases below are pinned from a real journal
+/// line off the deploy box.
+///
+/// Both spellings are accepted (`hyprctl` output can legitimately flow in here
+/// too) and the result is always emitted `0x`-prefixed, because that is the form
+/// `movetoworkspacesilent ...,address:<addr>` and the `j/clients` address
+/// comparison in `client_class` both require.
+fn openwindow_address(data: &str) -> Option<String> {
+    let first = data.split(',').next().map(str::trim)?;
+    let hex = first.strip_prefix("0x").unwrap_or(first);
+    // Validate rather than trust: a truncated event line must not reach a
+    // dispatch selector. Hex-only is the whole contract for an address.
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{hex}"))
 }
 
 /// Kiosk enforcement: force a newly-mapped window to take over the screen,
@@ -2018,13 +2049,51 @@ mod tests {
     fn openwindow_address_extracts_first_field() {
         assert_eq!(
             openwindow_address("0x12345678,1,steam,Steam Big Picture"),
-            Some("0x12345678")
+            Some("0x12345678".to_string())
         );
-        // Works for any class — the kiosk fullscreen enforcement it feeds is
+        // Works for any class — the kiosk enforcement it feeds is
         // class-agnostic by design.
         assert_eq!(
             openwindow_address("0xabc,games,some.random.App,Title"),
-            Some("0xabc")
+            Some("0xabc".to_string())
+        );
+    }
+
+    // THE REGRESSION. socket2 sends addresses BARE; only `hyprctl -j clients`
+    // spells them with `0x`. Requiring the prefix here rejected every real
+    // event, so no window was ever parked on open and two apps could land on
+    // one workspace (see `openwindow_address`). These lines are copied from the
+    // journal on the deploy box, commas and all.
+    #[test]
+    fn openwindow_address_accepts_the_bare_socket2_wire_shape() {
+        assert_eq!(
+            openwindow_address("55cbfce523a0,2,streaming_client,Red Dead Redemption 2"),
+            Some("0x55cbfce523a0".to_string())
+        );
+        assert_eq!(
+            openwindow_address("55cbfcc1dfa0,1,steam,Steam Big Picture Mode"),
+            Some("0x55cbfcc1dfa0".to_string())
+        );
+        assert_eq!(
+            openwindow_address("55cbfce16580,1,tv.plex.Plex,Plex HTPC"),
+            Some("0x55cbfce16580".to_string())
+        );
+    }
+
+    // Both spellings must normalise to the SAME value: it is used both as a
+    // `address:<addr>` dispatch selector and as an equality key against the
+    // `j/clients` address field, and those two only agree in the `0x` form.
+    #[test]
+    fn openwindow_address_normalises_both_spellings_identically() {
+        assert_eq!(
+            openwindow_address("55cbfce523a0,2,streaming_client,Title"),
+            openwindow_address("0x55cbfce523a0,2,streaming_client,Title")
+        );
+        // And the normalised form is what `move_command` needs.
+        let addr = openwindow_address("55cbfce523a0,2,streaming_client,Title").unwrap();
+        assert_eq!(
+            crate::workspaces::move_command(4, &addr),
+            "dispatch movetoworkspacesilent 4,address:0x55cbfce523a0"
         );
     }
 
@@ -2033,9 +2102,17 @@ mod tests {
         assert_eq!(openwindow_address(""), None);
         assert_eq!(openwindow_address(",1,steam,Title"), None);
         assert_eq!(openwindow_address("  ,1,steam,Title"), None);
-        // Missing `0x` prefix must also be rejected (defense-in-depth).
-        assert_eq!(openwindow_address("12345678,1,steam,Title"), None);
-        assert_eq!(openwindow_address("abc,1,steam,Title"), None);
+        assert_eq!(openwindow_address("0x,1,steam,Title"), None);
+    }
+
+    // Validation still has to bite — a truncated or garbled line must not reach
+    // a dispatch selector. It is hex-ness, not the prefix, that establishes it.
+    #[test]
+    fn openwindow_address_rejects_non_hex() {
+        assert_eq!(openwindow_address("nothex,1,steam,Title"), None);
+        assert_eq!(openwindow_address("0xZZZ,1,steam,Title"), None);
+        assert_eq!(openwindow_address("55cb-fce5,1,steam,Title"), None);
+        assert_eq!(openwindow_address("55cbfce523a0 oops,1,steam,Title"), None);
     }
 
     #[test]
