@@ -108,6 +108,36 @@ and **hibernates** whenever hibernation is enabled. See `host/src/power.rs`.
 > the security model changed (still plaintext HTTP + a static shared secret on a
 > trusted LAN), but rotate the token accordingly if it leaks.
 
+> ⚠️ **Windows hosts: disable lock-on-wake first, or `/sleep` strands the box.**
+> The suspend deliberately leaves wake events armed (`disableWakeEvent: false`),
+> so Wake-on-LAN brings the host back in about a second. But Windows' *default*
+> is to lock the console session on resume, and the credential UI lives on the
+> Winlogon **secure desktop** — a capture/streaming process running in the
+> user's session can neither capture it nor inject input into it. The result is
+> a host that is powered on, answering on the network, and unreachable from the
+> couch: the only way back in is to physically attach a keyboard and type the
+> password.
+>
+> **Autologin does not cover this.** Autologin applies at *logon*; resuming from
+> S3 is not a logon (the session is already there, merely locked) and Windows
+> has no supported auto-unlock. The lock has to be prevented:
+>
+> ```powershell
+> # "Require a password when a computer wakes" -> No, for every power scheme.
+> # 0e796bdb-... is CONSOLELOCK under the SUB_NONE subgroup.
+> $k = 'HKLM:\SOFTWARE\Policies\Microsoft\Power\PowerSettings\{0e796bdb-100d-47d6-a2d5-f7d2daa51f51}'
+> New-Item -Path $k -Force | Out-Null
+> Set-ItemProperty -Path $k -Name ACSettingIndex -Value 0 -Type DWord
+> Set-ItemProperty -Path $k -Name DCSettingIndex -Value 0 -Type DWord
+> ```
+>
+> Use the **Group Policy key above rather than a per-scheme
+> `powercfg /SETACVALUEINDEX ... CONSOLELOCK 0`**: the policy applies to every
+> scheme, so a driver install or a Windows update that flips the active scheme
+> cannot silently re-arm the lock. In the homelab this is
+> `windows_common_disable_lock_on_wake` in homelab-ansible's `windows-common`
+> role.
+
 ### `GET /capabilities`
 
 What this node declares it can do, so a client builds its UI and registers its
@@ -310,6 +340,12 @@ firewall to port 47995. See the role for the full variable list.
    ```
 
    Steam must be running in the same interactive session for launches to work.
+
+5. **If you will use `/sleep`, disable lock-on-wake** — see the warning under
+   [`POST /sleep`](#post-sleep). Without it the host suspends fine and wakes
+   fine, but resumes to a lock screen no streaming client can get past, and the
+   only way back in is a physically attached keyboard. This is *not* solved by
+   autologin.
 
 > **Dual-boot note.** A dual-boot gaming PC may present the **same LAN IP from
 > both OSes** or a **different IP per OS** (per-OS static leases / hostnames).
