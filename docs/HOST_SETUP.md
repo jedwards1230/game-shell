@@ -123,20 +123,48 @@ and **hibernates** whenever hibernation is enabled. See `host/src/power.rs`.
 > has no supported auto-unlock. The lock has to be prevented:
 >
 > ```powershell
-> # "Require a password when a computer wakes" -> No, for every power scheme.
-> # 0e796bdb-... is CONSOLELOCK under the SUB_NONE subgroup.
-> $k = 'HKLM:\SOFTWARE\Policies\Microsoft\Power\PowerSettings\{0e796bdb-100d-47d6-a2d5-f7d2daa51f51}'
-> New-Item -Path $k -Force | Out-Null
-> Set-ItemProperty -Path $k -Name ACSettingIndex -Value 0 -Type DWord
-> Set-ItemProperty -Path $k -Name DCSettingIndex -Value 0 -Type DWord
+> $CL  = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'   # CONSOLELOCK
+> $SUB = 'fea3413e-7e05-4911-9a71-700331f1c294'   # SUB_NONE
+>
+> # 1. The Group Policy override must NOT exist. A policy-managed power setting
+> #    cannot be changed locally, so while it is present the powercfg calls
+> #    below return rc=0 and write NOTHING.
+> Remove-Item "HKLM:\SOFTWARE\Policies\Microsoft\Power\PowerSettings\{$CL}" `
+>   -Recurse -Force -ErrorAction SilentlyContinue
+>
+> # 2. Unhide the setting. It ships with Attributes=1, and powercfg /query omits
+> #    hidden settings ENTIRELY -- no error, just absence. You need this to read
+> #    the value back.
+> Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\$CL" `
+>   -Name Attributes -Value 2 -Type DWord
+>
+> # 3. Set it to No on EVERY scheme, so a scheme switch cannot re-arm the lock.
+> (powercfg /list) | Select-String 'GUID: ([0-9a-f-]{36})' |
+>   ForEach-Object { $_.Matches[0].Groups[1].Value } | ForEach-Object {
+>     powercfg /SETACVALUEINDEX $_ $SUB $CL 0
+>     powercfg /SETDCVALUEINDEX $_ $SUB $CL 0
+>   }
+> powercfg /setactive ((powercfg /getactivescheme) -split ':')[1].Trim().Split(' ')[0]
 > ```
 >
-> Use the **Group Policy key above rather than a per-scheme
-> `powercfg /SETACVALUEINDEX ... CONSOLELOCK 0`**: the policy applies to every
-> scheme, so a driver install or a Windows update that flips the active scheme
-> cannot silently re-arm the lock. In the homelab this is
-> `windows_common_disable_lock_on_wake` in homelab-ansible's `windows-common`
-> role.
+> ⚠️ **Do not use the Group Policy key on its own** — it looks like the tidier
+> answer and it does not work. It never applies itself (the GP Power Management
+> extension consumes that hive only at a policy refresh; `gpupdate /force` was
+> observed hanging past 180s without applying it), *and* its presence blocks the
+> `powercfg` calls that do work. An earlier revision of this document
+> recommended exactly that; it was wrong.
+>
+> Two things that look alarming and are not: the `SUB_NONE` subgroup key
+> (`fea3413e-…`) does not exist in the registry on Windows 11 25H2 — only the
+> setting does, at the PowerSettings root, and `powercfg` resolves the GUID
+> anyway. And `powercfg` does **not** store the value under
+> `…\Power\User\PowerSchemes\<scheme>\<sub>\<setting>`; that path stays
+> empty even when the setting is correctly applied, so **verify with
+> `powercfg /query <scheme> SUB_NONE CONSOLELOCK`, never by reading that
+> registry path**.
+>
+> In the homelab this is `windows_common_disable_lock_on_wake` in
+> homelab-ansible's `windows-common` role.
 
 ### `GET /capabilities`
 
