@@ -54,28 +54,98 @@ input routes unpredictably, 3.16.23) is still open; and the full Steam client wr
 switches between Steam and a game), so it may overwrite the kit's own list; a first
 unscripted run of the full client under this prototype (2026-09-05) saw exactly that: Steam
 detected gamescope, tagged its own windows 769, and rewrote `GAMESCOPECTRL_BASELAYER_APPID`
-within about ten seconds. That is why the kit's Steam list carries 769 and never re-tags a
-window Steam tagged itself, and why `--watch-baselayer` exists. `launch.sh steam`
+within about ten seconds. The measured run below settles it — Steam wins the base layer
+outright and rewrites it per stream start and stop. That is why the kit's Steam list
+carries 769 and never re-tags a window Steam tagged itself, and why `--watch-baselayer`
+exists. `launch.sh steam`
 sets `GAMESCOPE_DISPLAY_DISABLED=1` and `GAMESCOPE_ZENITY_DISABLE=1` the way SteamOS does
 (the first keeps `streaming_client` on the X11 + layer path, the one HDR ships on; the
 second turns a layer failure into a loud exit instead of an invisible dialog).
 
-**Criterion 10, first result (2026-09-05, gamescope 3.16.23, this box):** with the full
-Steam client under the prototype and a Remote Play stream started on the pad, the stream
-rendered **only with the WSI layer disabled**, as SDR 4K120 HEVC NV12 BT.709 through plain
-Xwayland; with the layer enabled the client showed a black screen and its log had only the
-layer's unconditional `Forcing on VK_EXT_swapchain_maintenance1` line, no `Creating
-Gamescope surface`, then the "non-Gamescope swapchain" dialog. That is a **hook miss, not a
-gamescope limitation**: the root cause is the `WAYLAND_DISPLAY` mismatch pressure-vessel
-creates under an `--expose-wayland` session (Known gaps, below), and the fix under test is
-config-only: run Steam with `WAYLAND_DISPLAY` unset (`launch.sh steam` now does), or start
-the session with `TV_SHELL_GS_EXPOSE_WAYLAND=0`. The success signature to look for in
-Steam's `logs/console-linux.txt` is `[Gamescope WSI] Executable name: streaming_client`,
-then `Creating Gamescope surface: xid:`, a `Surface state:` block with `server hdr output
-enabled: true` / `hdr formats exposed to client: true`, and a swapchain created with
-`VK_COLOR_SPACE_HDR10_ST2084_EXT`; in `streaming_client.log`, `Created vulkan renderer on
-x11 using the HDR10 colorspace` instead of `sRGB`. Until that run happens, read the row as
-"SDR works, HDR blocked by a session flag", not as "gamescope cannot do it".
+### Criterion 10, measured (2026-09-05, gamescope 3.16.23, this box)
+
+Full Steam client under the prototype, `launch.sh steam --watch-baselayer` (which runs
+`env -u WAYLAND_DISPLAY GAMESCOPE_DISPLAY_DISABLED=1 GAMESCOPE_ZENITY_DISABLE=1 steam
+-bigpicture`), two real Remote Play streams started by hand on the pad from the streaming
+host, one after the other. The session was still running **with `--expose-wayland` on**;
+the input daemon and the CEC watchdog were stopped so the pad was free.
+
+**The WSI hook fix works, and the per-app unset alone is enough.** Steam's
+`logs/console-linux.txt` at both stream starts:
+
+```
+[Gamescope WSI] Executable name: streaming_client
+[Gamescope WSI] Creating Gamescope surface: xid: 0x2e0002f
+[Gamescope WSI] Made gamescope surface for xid: 0x2e0002f
+[Gamescope WSI] Surface state:
+  server hdr output enabled:     true
+  hdr formats exposed to client: true
+```
+
+That is exactly the success signature predicted below, reached **without a session
+restart**: `--expose-wayland` was still set, and unsetting `WAYLAND_DISPLAY` for Steam
+alone was sufficient. `TV_SHELL_GS_EXPOSE_WAYLAND=0` is not required for Steam.
+
+**Steam still requests SDR, and that is now a client-side gate, not a gap in this stack.**
+The very next line, both times:
+
+```
+Creating swapchain ... format: VK_FORMAT_B8G8R8A8_UNORM - colorspace: VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+```
+
+8-bit sRGB, immediately after the layer told the client `hdr formats exposed to client:
+true`. Previously one could argue HDR was never offered because the layer was not hooking;
+it is now offered explicitly and **declined by the client**. Steam Remote Play is SDR on
+Linux by Steam's own gate — not this configuration, not gamescope, not the pin. **Moonlight
+remains the HDR path** (criterion 8). The display itself stayed HDR + VRR throughout
+(`GAMESCOPE_HDR_OUTPUT_FEEDBACK=1`, `GAMESCOPE_VRR_FEEDBACK=1`), so gamescope was
+tonemapping Steam's SDR into an HDR output.
+
+**120 fps held with a live Remote Play stream as the base layer**: the stats FIFO read
+`fps=120.000000` / `119.952019` / `120.048019` repeatedly with `focus=3321460`.
+
+**Tagging: `--keep-existing` is the right rule, and Steam tags the stream window with the
+*game's* app id, not its own.** From `steam-tag.log`:
+
+```
+known 0x1c00035 "Steam Big Picture Mode" (has STEAM_GAME=769, left alone)
+known 'Steam' (already STEAM_GAME=9004)
+known 0x2e0002f "Streaming Client" (has STEAM_GAME=252950, left alone)
+```
+
+252950 is the streamed game's app id. The kit deferred to Steam's own tag on all three.
+
+**The base-layer fight is confirmed, and it is stronger than "may fight": Steam wins
+outright.** The kit set `9004,769,9001`; Steam overwrote it within seconds and kept
+rewriting it on every stream start and stop:
+
+```
+15:54:43 baselayer=[413091, 769]              focused=[769]
+15:56:28 baselayer=[413091, 252950, 769]      focused=[252950]
+15:57:12 baselayer=[413091, 769]              focused=[769]
+15:57:24 baselayer=[413091, 3321460, 769]     focused=[3321460]
+```
+
+The kit's own 9004 was dropped from `GAMESCOPE_FOCUSABLE_APPS` entirely (it read
+`3321460, 769, 9001`). So a shell must **reconcile after Steam's writes**, not expect to
+hold that list. `413091` appears persistently as the first element and we do not know what
+it is; it is recorded here unexplained rather than guessed at.
+
+`launch.sh steamlink` exits 2 with its "not installed" message — Steam Link is genuinely
+not installed on the box, so only the full-client path is exercised. Steam Link's own HDR
+behaviour is unmeasured.
+
+**Still unverified:** whether the pad reaches the streamed game. That needs a person at
+the TV and is not claimed either way.
+
+**The old failure signature, kept so a regression is recognisable.** Before the
+`WAYLAND_DISPLAY` fix, the same run rendered **only with the WSI layer disabled**, as SDR
+4K120 HEVC NV12 BT.709 through plain Xwayland; with the layer enabled the client showed a
+black screen and its log had only the layer's unconditional `Forcing on
+VK_EXT_swapchain_maintenance1` line, no `Creating Gamescope surface`, then the
+"non-Gamescope swapchain" dialog. That was a hook miss caused by the `WAYLAND_DISPLAY`
+mismatch pressure-vessel creates under an `--expose-wayland` session (Known gaps, below).
+If those lines come back, the unset was lost, not gamescope regressed.
 
 ## Install and select
 
@@ -231,8 +301,8 @@ one of the candidate sources. Two Steam-specific rules: a window the client tagg
 selectable either way; and `--watch-baselayer` logs every change of
 `GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp
 (`steam-baselayer.log`, `focus.sh watch-baselayer` by hand), because the full client writes
-that atom itself when it starts a stream (the SteamOS mechanism) and whether it fights the
-kit's list is a thing to record, not assume. `launch.sh steamlink` does the same for the
+that atom itself when it starts a stream (the SteamOS mechanism). It does fight the kit's
+list, and wins: the 2026-09-05 run above has the log. `launch.sh steamlink` does the same for the
 standalone Steam Link client (`flatpak run com.valvesoftware.SteamLink` when installed,
 else a `steamlink` on `PATH`, else a clear "not installed"), app id 9005, base list
 `9005,9001`.
@@ -315,9 +385,12 @@ shell over it; the busy-host refusal exited 3 within a second naming the running
 
 ## Known gaps, on purpose
 
-- Criterion 10 has one measured result (2026-09-05, below) and a fix under test; the Steam
-  verbs themselves were exercised on the box once by hand and otherwise in the fixture
-  (a fake process family + fake `xprop`).
+- Criterion 10 has been run on the box with two real Remote Play streams (2026-09-05,
+  above): the WSI hook fix is confirmed, Steam declines HDR itself, 120 fps held, and
+  Steam wins the base layer outright. Two parts remain open — whether the pad reaches the
+  streamed game (needs a person at the TV) and the Steam Link client (not installed here).
+  Beyond that run the Steam verbs are exercised only in the fixture (a fake process family
+  + fake `xprop`).
 - **`--expose-wayland` silently disables the WSI layer for every Steam-runtime app.** With
   it, gamescope hands its children `WAYLAND_DISPLAY=gamescope-0`; inside the Steam
   container pressure-vessel rewrites that to `wayland-0` (it only preserves `wayland-*`
@@ -327,9 +400,12 @@ shell over it; the busy-host refusal exited 3 within a second naming the running
   the dialogs on, hangs black) on "Creating swapchain for non-Gamescope swapchain". Any
   pressure-vessel / Steam Linux Runtime app under such a session has no HDR. SteamOS never
   passes `--expose-wayland`. `TV_SHELL_GS_EXPOSE_WAYLAND=0` drops it; `launch.sh steam`
-  also unsets the variable for Steam itself, which is the same fix without a session
-  restart. Recommended: `0` for Steam measurement runs (Moonlight is unaffected either way;
-  it runs on the host, where both variables read `gamescope-0`).
+  also unsets the variable for Steam itself, and the 2026-09-05 run **proved that per-app
+  unset sufficient on its own** — the layer hooked `streaming_client` with
+  `--expose-wayland` still on and no session restart. The session-level flag is therefore
+  optional for Steam. The trap itself stands for any other pressure-vessel / Steam Linux
+  Runtime app launched under such a session without the unset. Moonlight is unaffected
+  either way; it runs on the host, where both variables read `gamescope-0`.
 - **Do not chase this with gamescope master.** Nothing in the layer changed between 3.16.23
   and 3.16.28 on this path (four unrelated commits), and master's bd52d6e sets
   `WAYLAND_DISPLAY=""` for children, which pressure-vessel turns into `wayland-0` again,
