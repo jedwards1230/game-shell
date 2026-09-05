@@ -12,6 +12,8 @@
 set -u
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=dev/gamescope/lib.sh
+. "$KIT/lib.sh"
 ENV_FILE="${TV_SHELL_GS_ENV_FILE:-/tmp/tv-shell-gamescope.env}"
 SHELL_APPID="${TV_SHELL_GS_SHELL_APPID:-9001}"
 SHELL_TITLE="tv-shell-proto"
@@ -37,7 +39,14 @@ export QT_QPA_PLATFORM="${TV_SHELL_GS_QPA:-xcb}"
 export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
 export ENABLE_GAMESCOPE_WSI=1
 
-QML_BIN="$(command -v qml || echo /usr/lib/qt6/bin/qml)"
+# Qt 6 only (see lib.sh). The env file above is written first on purpose:
+# the SSH-side tools still work against a session whose shell never came up.
+if ! QML_BIN="$(gs_resolve_qml6 2>&1)"; then
+    log "FATAL: $QML_BIN"
+    log "install qt6-declarative (or set TV_SHELL_GS_QML) and restart the session"
+    exit 1
+fi
+log "qml runtime: $QML_BIN ($(gs_qml_version "$QML_BIN"))"
 
 # Tag the shell window with a game id so SteamControlled focus will consider
 # it, then make it the base layer. Retry: the window maps asynchronously. A
@@ -59,6 +68,7 @@ tag_shell() {
 launch_shell() {
     "$QML_BIN" "$KIT/proto-shell.qml" &
     SHELL_PID=$!
+    LAUNCHED_AT=$SECONDS
     log "prototype shell pid=$SHELL_PID qpa=$QT_QPA_PLATFORM"
     tag_shell
 }
@@ -67,11 +77,33 @@ launch_shell
 
 # Keep the primary child alive. If the shell dies, relaunch it (crude
 # supervisor; the v2 supervisor design is separate).
+#
+# Backoff: every relaunch re-tags the new window and re-asserts it as the base
+# layer, which stomps on any focus test running from SSH. A shell that dies
+# within FAST_EXIT_SECS of launch FAST_EXIT_LIMIT times in a row is not going
+# to come up (a broken runtime, a QML error), so the retry interval stretches
+# to BACKOFF_SECS. It never stops relaunching: a fixed runtime is picked up on
+# the next attempt.
+FAST_EXIT_SECS=10
+FAST_EXIT_LIMIT=3
+BACKOFF_SECS=60
+fast_exits=0
 while true; do
-    if ! kill -0 "$SHELL_PID" 2>/dev/null; then
-        log "prototype shell exited; relaunching in 2s"
-        sleep 2
-        launch_shell
+    wait "$SHELL_PID"
+    rc=$?
+    alive=$((SECONDS - LAUNCHED_AT))
+    if [ "$alive" -lt "$FAST_EXIT_SECS" ]; then
+        fast_exits=$((fast_exits + 1))
+    else
+        fast_exits=0
     fi
-    sleep 5
+    if [ "$fast_exits" -ge "$FAST_EXIT_LIMIT" ]; then
+        delay=$BACKOFF_SECS
+        log "prototype shell exited rc=$rc after ${alive}s ($fast_exits fast exits in a row); backing off, relaunching in ${delay}s"
+    else
+        delay=2
+        log "prototype shell exited rc=$rc after ${alive}s; relaunching in ${delay}s"
+    fi
+    sleep "$delay"
+    launch_shell
 done

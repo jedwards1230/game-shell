@@ -16,9 +16,15 @@
 #   TV_SHELL_GS_SDR_NITS    --hdr-sdr-content-nits            (200)
 #   TV_SHELL_GS_DAEMON      1 = start tv-shell-input.service  (1)
 #   TV_SHELL_GS_EXTRA       extra gamescope args, word-split  ("")
+#   TV_SHELL_GS_STATS       stats FIFO path        (/tmp/tv-shell-gamescope-stats)
+#   TV_SHELL_GS_ENV_FILE    env file for the SSH-side tools (/tmp/tv-shell-gamescope.env)
+#   TV_SHELL_GS_LOG         log file               (/tmp/tv-shell-gamescope.log)
 #
-# Logs: journal tag `tv-shell-gamescope` plus /tmp/tv-shell-gamescope.log.
-# Stats: /tmp/tv-shell-gamescope-stats (gamescope --stats-path).
+# Logs: journal tag `tv-shell-gamescope` plus the log file.
+# Stats: the stats path is a FIFO this script creates; gamescope only open()s
+# an existing one (retrying every 10 s), it never creates it. One reader at a
+# time (`cat` or `tail -f` it); lines are `fps=<float>` / `focus=<appid>` at
+# ~1 Hz. It is removed when the session ends.
 set -u
 
 SHELL_DIR="${TV_SHELL_DIR:-/opt/tv-shell}"
@@ -29,9 +35,9 @@ export TV_SHELL_SOCK
 export XDG_CURRENT_DESKTOP=gamescope
 export PATH="$SHELL_DIR/scripts:$PATH"
 
-LOG=/tmp/tv-shell-gamescope.log
-STATS=/tmp/tv-shell-gamescope-stats
-ENV_FILE=/tmp/tv-shell-gamescope.env
+LOG="${TV_SHELL_GS_LOG:-/tmp/tv-shell-gamescope.log}"
+STATS="${TV_SHELL_GS_STATS:-/tmp/tv-shell-gamescope-stats}"
+ENV_FILE="${TV_SHELL_GS_ENV_FILE:-/tmp/tv-shell-gamescope.env}"
 
 W="${TV_SHELL_GS_WIDTH:-3840}"
 H="${TV_SHELL_GS_HEIGHT:-2160}"
@@ -53,6 +59,13 @@ else
 fi
 
 rm -f "$ENV_FILE" "$STATS"
+# gamescope --stats-path open()s an EXISTING FIFO and never creates one; a
+# missing file just makes it retry every 10 s and the stats never appear.
+if mkfifo "$STATS"; then
+    log "stats FIFO $STATS (one reader at a time: cat or tail -f it)"
+else
+    log "WARN: mkfifo $STATS failed; gamescope will have no stats output"
+fi
 log "starting: ${W}x${H}@${R} hdr=$HDR vrr=$VRR sdr_nits=$NITS daemon=$DAEMON"
 
 STARTED_DAEMON=0
@@ -79,7 +92,7 @@ cleanup() {
     if [ "$STARTED_DAEMON" = "1" ]; then
         systemctl --user stop tv-shell-input.service >/dev/null 2>&1 || true
     fi
-    rm -f "$ENV_FILE"
+    rm -f "$ENV_FILE" "$STATS"
 }
 trap cleanup EXIT
 
