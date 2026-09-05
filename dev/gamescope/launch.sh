@@ -4,9 +4,14 @@
 # WAYLAND_DISPLAY so the clients land inside gamescope, not on a stray socket.
 #
 #   launch.sh overlay                 QML overlay tagged STEAM_OVERLAY + STEAM_INPUT_FOCUS
-#   launch.sh x11 <id> [cmd...]       any X11 app; every window of its pid is tagged
-#                                     STEAM_GAME=<id> as it appears (pass --name <wm-name>
-#                                     BEFORE the command as an extra lookup hint)
+#   launch.sh x11 <id> [opts] [cmd...] any X11 app; every window of its pid is tagged
+#                                     STEAM_GAME=<id> as it appears. Options go BEFORE the
+#                                     command: --name <wm-name> / --class <wm-class> (lookup
+#                                     hints), --no-wsi (ENABLE_GAMESCOPE_WSI=0
+#                                     DISABLE_GAMESCOPE_WSI=1: no layer, so SDR through
+#                                     Xwayland), --no-wayland-display (run the child with
+#                                     WAYLAND_DISPLAY unset; what a Steam-runtime app needs
+#                                     for the layer to hook under an --expose-wayland session)
 #   launch.sh apps <host>             what the streaming host is running now, and the exact
 #                                     app names (quoted: leading spaces are part of them)
 #   launch.sh moonlight [--quit] [args...]
@@ -23,6 +28,30 @@
 #                                     "hdr formats exposed to client: false")
 #   launch.sh moonlight --wayland [args...]  the native-Wayland (xdg-shell) experiment;
 #                                     no focus selector, and Moonlight-qt 6.1 crashed here
+#   launch.sh steam [--gamepadui] [--watch-baselayer] [--no-wsi] [--wayland-display] [args...]
+#                                     the full Steam client on X11 (`steam -bigpicture`;
+#                                     --gamepadui runs `steam -gamepadui`), run as
+#                                     `env -u WAYLAND_DISPLAY GAMESCOPE_DISPLAY_DISABLED=1
+#                                     GAMESCOPE_ZENITY_DISABLE=1 steam ...` (SteamOS's own
+#                                     streaming_client env; see the README) so the WSI layer
+#                                     hooks inside the container and a layer failure exits
+#                                     loudly instead of hanging on an invisible dialog.
+#                                     --wayland-display keeps WAYLAND_DISPLAY (the broken
+#                                     pre-K9 shape, for an A/B); --no-wsi disables the layer
+#                                     (SDR control run). Every window of
+#                                     the Steam FAMILY (steam, steamwebhelper, and the
+#                                     streaming_client a Remote Play stream spawns) is
+#                                     tagged STEAM_GAME=9004 as it appears, for up to
+#                                     TV_SHELL_GS_STEAM_WATCH_SECS (600) s in a detached
+#                                     watcher; a window Steam tagged itself is left alone.
+#                                     Base list 9004,769,9001. --watch-baselayer also logs
+#                                     every change of GAMESCOPECTRL_BASELAYER_APPID.
+#   launch.sh steamlink [--no-wsi] [--wayland-display] [args...]
+#                                     the standalone Steam Link client (flatpak
+#                                     com.valvesoftware.SteamLink, else `steamlink`),
+#                                     tagged STEAM_GAME=9005 the same way and started with
+#                                     the same env as `steam` (it is a containerized
+#                                     streaming client too), with the same two overrides
 #   launch.sh xmessage <text>         the simplest possible X11 window
 set -u
 
@@ -214,18 +243,25 @@ case "${1:-}" in
         APPID="${1:?app id}"; shift
         # --name is a lookup hint, --class a second predicate for toolkits
         # that set no _NET_WM_PID (Xt/Athena); both go to gs_tag_pid.
+        # env(1) takes its -u options before any NAME=VALUE, so unsets and
+        # sets are collected separately whatever order the flags came in.
         NAME_OPTS=()
+        ENV_UNSET=()
+        ENV_SET=()
         while :; do
             case "${1:-}" in
                 --name|--class) NAME_OPTS+=("$1" "$2"); shift 2 ;;
+                --no-wsi) ENV_SET+=(ENABLE_GAMESCOPE_WSI=0 DISABLE_GAMESCOPE_WSI=1); shift ;;
+                --no-wayland-display) ENV_UNSET+=(-u WAYLAND_DISPLAY); shift ;;
                 *) break ;;
             esac
         done
-        [ $# -ge 1 ] || { echo "launch.sh x11 <id> [--name <wm-name>] [--class <wm-class>] <cmd...>" >&2; exit 2; }
+        ENV_OPTS=("${ENV_UNSET[@]}" "${ENV_SET[@]}")
+        [ $# -ge 1 ] || { echo "launch.sh x11 <id> [--name <wm-name>] [--class <wm-class>] [--no-wsi] [--no-wayland-display] <cmd...>" >&2; exit 2; }
         export QT_QPA_PLATFORM=xcb
         export SDL_VIDEODRIVER=x11
         export ENABLE_GAMESCOPE_WSI=1
-        nohup "$@" > "$LOG_DIR/x11-$APPID.log" 2>&1 &
+        nohup env "${ENV_OPTS[@]}" "$@" > "$LOG_DIR/x11-$APPID.log" 2>&1 &
         PID=$!
         echo "x11 app pid $PID (log $LOG_DIR/x11-$APPID.log)"
         tag_pid_then_base "$PID" "$APPID" --timeout 20 --log "$LOG_DIR/x11-$APPID.log" "${NAME_OPTS[@]}"
@@ -333,6 +369,102 @@ case "${1:-}" in
         "$KIT/focus.sh" list 2>/dev/null | grep -E 'FOCUSABLE_APPS|FOCUSED_APP'
         exit $rc
         ;;
+    steam|steamlink)
+        VERB="$1"; shift
+        # Steam Remote Play is a peer of Moonlight here, not a variant of it:
+        # both must stay independently testable (criterion 10). Steam is a
+        # process FAMILY (launcher script -> client -> steamwebhelper, plus the
+        # separate streaming_client a Remote Play stream spawns), each with
+        # its own X connection, so tagging follows the pid tree AND the
+        # WM_CLASS set; a window Steam tagged itself (769, or the streamed
+        # app's id) is left alone and reported, because whether the client
+        # rewrites GAMESCOPECTRL_BASELAYER_APPID on its own is one of the
+        # things this measures. The stream itself is started by hand on the
+        # pad, so the watcher runs detached for TV_SHELL_GS_STEAM_WATCH_SECS.
+        export QT_QPA_PLATFORM=xcb
+        export SDL_VIDEODRIVER=x11
+        export ENABLE_GAMESCOPE_WSI=1
+        WATCH_SECS="${TV_SHELL_GS_STEAM_WATCH_SECS:-600}"
+        WATCH_BL=""
+        MODE=-bigpicture
+        # K9: the Steam client and everything it runs (streaming_client
+        # included) live in a pressure-vessel container. The WSI layer hooks
+        # there only when WAYLAND_DISPLAY is absent: pressure-vessel renames a
+        # non-"wayland-*" value (our --expose-wayland session's gamescope-0)
+        # to wayland-0 and GAMESCOPE_WAYLAND_DISPLAY to an absolute socket
+        # path, the layer's isRunningUnderGamescope() compares the two, and
+        # they can never match. So Steam is started with the variable unset.
+        # The other two are SteamOS's own streaming_client environment:
+        # GAMESCOPE_DISPLAY_DISABLED=1 ("disable gamescope path in
+        # streaming_client until buffer frozen issues are understood better",
+        # i.e. present through X11 + the layer, the path HDR ships on) and
+        # GAMESCOPE_ZENITY_DISABLE=1 so a layer failure powers through and
+        # exits instead of blocking on an unmapped "Hooking has failed" dialog.
+        KEEP_WD=""
+        NO_WSI=""
+        while :; do
+            case "${1:-}" in
+                --gamepadui) MODE=-gamepadui; shift ;;
+                --watch-baselayer) WATCH_BL=1; shift ;;
+                --no-wsi) NO_WSI=1; shift ;;
+                --wayland-display) KEEP_WD=1; shift ;;
+                *) break ;;
+            esac
+        done
+        ENV_OPTS=()
+        [ -n "$KEEP_WD" ] || ENV_OPTS+=(-u WAYLAND_DISPLAY)
+        ENV_OPTS+=(GAMESCOPE_DISPLAY_DISABLED=1 GAMESCOPE_ZENITY_DISABLE=1)
+        [ -z "$NO_WSI" ] || ENV_OPTS+=(ENABLE_GAMESCOPE_WSI=0 DISABLE_GAMESCOPE_WSI=1)
+        if [ "$VERB" = steam ]; then
+            APPID=9004
+            BASE_LIST="9004,769,$SHELL_APPID"
+            CLASSES=(--class steam --class steamwebhelper --class streaming_client)
+            NAMES=(--name Steam --name "Steam Big Picture Mode")
+            STEAM_BIN="${TV_SHELL_GS_STEAM:-steam}"
+            command -v "$STEAM_BIN" >/dev/null 2>&1 || { echo "launch.sh steam: '$STEAM_BIN' not installed (set TV_SHELL_GS_STEAM)" >&2; exit 2; }
+            CMD=("$STEAM_BIN" "$MODE" "$@")
+        else
+            APPID=9005
+            BASE_LIST="9005,$SHELL_APPID"
+            CLASSES=(--class steamlink --class streaming_client)
+            NAMES=(--name "Steam Link")
+            if [ -n "${TV_SHELL_GS_STEAMLINK:-}" ]; then
+                CMD=("$TV_SHELL_GS_STEAMLINK" "$@")
+            elif command -v flatpak >/dev/null 2>&1 && flatpak info com.valvesoftware.SteamLink >/dev/null 2>&1; then
+                CMD=(flatpak run com.valvesoftware.SteamLink "$@")
+            elif command -v steamlink >/dev/null 2>&1; then
+                CMD=(steamlink "$@")
+            else
+                echo "launch.sh steamlink: Steam Link is not installed (flatpak com.valvesoftware.SteamLink, or a 'steamlink' on PATH, or TV_SHELL_GS_STEAMLINK=<path>)" >&2
+                exit 2
+            fi
+        fi
+        nohup env "${ENV_OPTS[@]}" "${CMD[@]}" > "$LOG_DIR/$VERB.log" 2>&1 &
+        PID=$!
+        echo "$VERB pid $PID: env ${ENV_OPTS[*]} ${CMD[*]} (log $LOG_DIR/$VERB.log)"
+        "$KIT/focus.sh" app "$BASE_LIST"
+        echo "base layer preference $BASE_LIST set; waiting for the first window of the family"
+        gs_tag_pid "$PID" "$APPID" --family --keep-existing --timeout 60 --expect 1 \
+            --log "$LOG_DIR/$VERB.log" "${CLASSES[@]}" "${NAMES[@]}"
+        rc=$?
+        "$KIT/focus.sh" list 2>/dev/null | grep -E 'FOCUSABLE_APPS|FOCUSED_APP|BASELAYER_APPID'
+        # keep tagging new family windows (the Remote Play window comes when
+        # the operator starts a stream on the pad) without holding the SSH
+        # session; one watcher per verb, the previous one is replaced.
+        # pkill -f takes an ERE, so anchor on this kit's own focus.sh path
+        # (metacharacters escaped) rather than a loose "focus.sh" match.
+        KIT_RE="$(printf '%s' "$KIT" | sed 's,[][\\.*^$/+?(){}|],\\&,g')"
+        pkill -f "bash ${KIT_RE}/focus\\.sh tag-pid [0-9]+ $APPID --family" 2>/dev/null || true
+        nohup "$KIT/focus.sh" tag-pid "$PID" "$APPID" --family --keep-existing --timeout "$WATCH_SECS" \
+            --log "$LOG_DIR/$VERB.log" "${CLASSES[@]}" "${NAMES[@]}" > "$LOG_DIR/$VERB-tag.log" 2>&1 &
+        echo "watching the $VERB family for new windows for ${WATCH_SECS}s: tail -f $LOG_DIR/$VERB-tag.log"
+        if [ -n "$WATCH_BL" ]; then
+            pkill -f "bash ${KIT_RE}/focus\\.sh watch-baselayer" 2>/dev/null || true
+            nohup "$KIT/focus.sh" watch-baselayer "$WATCH_SECS" > "$LOG_DIR/$VERB-baselayer.log" 2>&1 &
+            echo "logging GAMESCOPECTRL_BASELAYER_APPID changes for ${WATCH_SECS}s: tail -f $LOG_DIR/$VERB-baselayer.log"
+        fi
+        exit $rc
+        ;;
     xmessage)
         shift
         nohup xmessage -center "${*:-hello from gamescope}" > "$LOG_DIR/xmessage.log" 2>&1 &
@@ -342,7 +474,7 @@ case "${1:-}" in
         tag_pid_then_base "$PID" 9002 --timeout 10 --expect 1 --name xmessage --class xmessage
         ;;
     *)
-        sed -n '2,26p' "$0"
+        sed -n '2,39p' "$0"
         exit 2
         ;;
 esac

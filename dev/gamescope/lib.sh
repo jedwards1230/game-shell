@@ -104,21 +104,43 @@ gs_props_field() {
     esac
 }
 
-# gs_props_match <props> <pid> <class> -> 0 when the window belongs to <pid>,
-# or (when <class> is non-empty) when its WM_CLASS carries "<class>".
+# gs_props_match <props> "<pid>..." "<class>..." -> 0 when the window's
+# _NET_WM_PID is one of the pids, or its WM_CLASS carries one of the classes
+# (both lists space-separated, either may be empty).
 gs_props_match() {
-    local wpid wclass
+    local wpid wclass p c
     wpid="$(gs_props_field "$1" pid)"
-    [ -n "$wpid" ] && [ "$wpid" = "$2" ] && return 0
+    if [ -n "$wpid" ]; then
+        for p in $2; do [ "$wpid" = "$p" ] && return 0; done
+    fi
     if [ -n "$3" ]; then
         wclass="$(gs_props_field "$1" class)"
-        case "$wclass" in *"\"$3\""*) return 0 ;; esac
+        for c in $3; do
+            case "$wclass" in *"\"$c\""*) return 0 ;; esac
+        done
     fi
     return 1
 }
 
-# gs_root_candidates <pid> -> hex xids from _NET_CLIENT_LIST (all of them) and
-# from the GAMESCOPE_FOCUSABLE_WINDOWS triplets whose pid is <pid>.
+# gs_pid_family <pid> -> <pid> and every live descendant, one per line
+# (breadth-first over `pgrep -P`). Steam is a family: the launcher script, the
+# client, steamwebhelper, and the separate streaming_client that a Remote Play
+# stream spawns, each with its own X connection and windows.
+gs_pid_family() {
+    local queue=("$1") p k
+    printf '%s\n' "$1"
+    while [ ${#queue[@]} -gt 0 ]; do
+        p="${queue[0]}"; queue=("${queue[@]:1}")
+        for k in $(pgrep -P "$p" 2>/dev/null); do
+            printf '%s\n' "$k"
+            queue+=("$k")
+        done
+    done
+}
+
+# gs_root_candidates "<pid>..." -> hex xids from _NET_CLIENT_LIST (all of
+# them) and from the GAMESCOPE_FOCUSABLE_WINDOWS triplets whose pid is one of
+# the given pids.
 gs_root_candidates() {
     local out line vals i n arr=()
     out="$(xprop -root _NET_CLIENT_LIST GAMESCOPE_FOCUSABLE_WINDOWS 2>/dev/null)" || return 0
@@ -131,10 +153,14 @@ gs_root_candidates() {
     IFS=',' read -r -a arr <<< "$vals"
     n=${#arr[@]}
     i=0
+    local p
     while [ $((i + 2)) -lt "$n" ]; do
-        if [ "${arr[$((i + 2))]}" = "$1" ]; then
-            printf '0x%x\n' "${arr[$i]}"
-        fi
+        for p in $1; do
+            if [ "${arr[$((i + 2))]}" = "$p" ]; then
+                printf '0x%x\n' "${arr[$i]}"
+                break
+            fi
+        done
         i=$((i + 3))
     done
 }
@@ -159,7 +185,13 @@ gs_log_candidates() {
 # otherwise, and 1 when <pid> exits before any window of it is found.
 #
 #   --timeout <s>       give up after this long (default 60)
-#   --class <wm-class>  also accept windows whose WM_CLASS carries this
+#   --class <wm-class>  also accept windows whose WM_CLASS carries this (repeatable)
+#   --family            <pid> means <pid> and every descendant, re-read each poll
+#                       (a Steam family: steam, steamwebhelper, streaming_client);
+#                       the watch ends only when the whole family is gone
+#   --keep-existing     a window that already carries a DIFFERENT STEAM_GAME is
+#                       reported and left alone instead of re-tagged (Steam tags
+#                       its own windows; overwriting that is the fight we measure)
 #   --log <file>        harvest xids from this WSI-layer log (repeatable)
 #   --name <wm-name>    also look a window up by WM_NAME (repeatable)
 #   --expect <n>        stop once <n> windows are tagged
@@ -167,11 +199,13 @@ gs_log_candidates() {
 gs_tag_pid() {
     local pid="${1:?gs_tag_pid: pid}" appid="${2:?gs_tag_pid: appid}"
     shift 2
-    local timeout=60 class="" expect=0 done_glob="" logs=() names=()
+    local timeout=60 classes="" family="" keep="" expect=0 done_glob="" logs=() names=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --timeout) timeout="$2"; shift 2 ;;
-            --class) class="$2"; shift 2 ;;
+            --class) classes="${classes:+$classes }$2"; shift 2 ;;
+            --family) family=1; shift ;;
+            --keep-existing) keep=1; shift ;;
             --log) logs+=("$2"); shift 2 ;;
             --name) names+=("$2"); shift 2 ;;
             --expect) expect="$2"; shift 2 ;;
@@ -181,7 +215,22 @@ gs_tag_pid() {
     done
     local poll="${TV_SHELL_GS_POLL_SECS:-1}" probe="${TV_SHELL_GS_XID_PROBE:-32}"
     local -A seen=() maxid=() name_done=()
-    local start=$SECONDS tagged=0 known=0 finished="" c props wname base cands n
+    local start=$SECONDS tagged=0 known=0 finished="" c props wname base cands n wgame
+    local pids="$pid" alive p
+
+    # gs_tag_pid_refresh_family -> pids = the root pid plus every descendant,
+    # plus earlier members that are still alive even if the root has gone
+    # (a launcher that exits after spawning the client).
+    gs_tag_pid_refresh_family() {
+        local next="" seenp=" "
+        for p in $(gs_pid_family "$pid") $pids; do
+            case "$seenp" in *" $p "*) continue ;; esac
+            kill -0 "$p" 2>/dev/null || continue
+            seenp="$seenp$p "
+            next="${next:+$next }$p"
+        done
+        pids="$next"
+    }
 
     # gs_tag_pid_note <wm-name> tagged|known -> counts a hit and applies the
     # stop conditions (--done-name on either kind, --expect on new tags only).
@@ -203,12 +252,16 @@ gs_tag_pid() {
         if [ -z "${maxid[$base]:-}" ] || [ $((xid)) -gt "${maxid[$base]}" ]; then
             maxid[$base]=$((xid))
         fi
-        gs_props_match "$xprops" "$pid" "$class" || return 0
+        gs_props_match "$xprops" "$pids" "$classes" || return 0
         wn="$(gs_props_field "$xprops" name)"
         wgame="$(gs_props_field "$xprops" game)"
         if [ "$wgame" = "$appid" ]; then
             seen[$xid]=tagged
             echo "known $xid \"$wn\" (already STEAM_GAME=$appid)"
+            gs_tag_pid_note "$wn" known
+        elif [ -n "$keep" ] && [ -n "$wgame" ]; then
+            seen[$xid]=tagged
+            echo "known $xid \"$wn\" (has STEAM_GAME=$wgame, left alone)"
             gs_tag_pid_note "$wn" known
         else
             xprop -id "$xid" -f STEAM_GAME 32c -set STEAM_GAME "$appid" 2>/dev/null || return 0
@@ -220,7 +273,14 @@ gs_tag_pid() {
     }
 
     while :; do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        alive=""
+        if [ -n "$family" ]; then
+            gs_tag_pid_refresh_family
+            [ -n "$pids" ] && alive=1
+        else
+            kill -0 "$pid" 2>/dev/null && alive=1
+        fi
+        if [ -z "$alive" ]; then
             if [ $((tagged + known)) -eq 0 ]; then
                 echo "gs_tag_pid: pid $pid exited before any window of it appeared" >&2
                 return 1
@@ -231,7 +291,7 @@ gs_tag_pid() {
         cands=()
         while IFS= read -r c; do
             [ -n "$c" ] && cands+=("$c")
-        done < <(gs_root_candidates "$pid"; gs_log_candidates "${logs[@]}")
+        done < <(gs_root_candidates "$pids"; gs_log_candidates "${logs[@]}")
         for c in "${cands[@]}"; do gs_tag_pid_consider "$c"; done
         for base in "${!maxid[@]}"; do
             n=1
@@ -245,10 +305,14 @@ gs_tag_pid() {
         for wname in "${names[@]}"; do
             [ -z "${name_done[$wname]:-}" ] || continue
             props="$(xprop -name "$wname" _NET_WM_PID WM_CLASS WM_NAME STEAM_GAME 2>/dev/null)" || continue
-            gs_props_match "$props" "$pid" "$class" || continue
+            gs_props_match "$props" "$pids" "$classes" || continue
             name_done[$wname]=1
-            if [ "$(gs_props_field "$props" game)" = "$appid" ]; then
+            wgame="$(gs_props_field "$props" game)"
+            if [ "$wgame" = "$appid" ]; then
                 echo "known '$wname' (already STEAM_GAME=$appid)"
+                gs_tag_pid_note "$wname" known
+            elif [ -n "$keep" ] && [ -n "$wgame" ]; then
+                echo "known '$wname' (has STEAM_GAME=$wgame, left alone)"
                 gs_tag_pid_note "$wname" known
             else
                 xprop -name "$wname" -f STEAM_GAME 32c -set STEAM_GAME "$appid" 2>/dev/null || continue
@@ -266,5 +330,31 @@ gs_tag_pid() {
             return 0
         fi
         sleep "$poll"
+    done
+}
+
+# gs_watch_baselayer [secs] -> logs every change of GAMESCOPECTRL_BASELAYER_APPID
+# and GAMESCOPE_FOCUSED_APP with a timestamp, one line per change, until
+# <secs> elapse (default 600; 0 = forever). Exists because the full Steam
+# client writes the base-layer atom itself when it starts a stream (the
+# SteamOS mechanism), so whether it fights the kit's own `focus.sh app` is a
+# thing to record, not assume. Polls every TV_SHELL_GS_WATCH_SECS (0.5).
+gs_watch_baselayer() {
+    local secs="${1:-600}" every="${TV_SHELL_GS_WATCH_SECS:-0.5}" start=$SECONDS
+    local out cur prev=""
+    echo "$(date '+%H:%M:%S.%N' | cut -c1-12) watching GAMESCOPECTRL_BASELAYER_APPID / GAMESCOPE_FOCUSED_APP for ${secs}s"
+    while :; do
+        out="$(xprop -root GAMESCOPECTRL_BASELAYER_APPID GAMESCOPECTRL_BASELAYER_WINDOW GAMESCOPE_FOCUSED_APP 2>/dev/null)"
+        cur="$(printf '%s\n' "$out" | sed -n 's/^GAMESCOPECTRL_BASELAYER_APPID(CARDINAL) = //p' | head -1)"
+        cur="baselayer=[${cur:-unset}] window=[$(printf '%s\n' "$out" | sed -n 's/^GAMESCOPECTRL_BASELAYER_WINDOW(CARDINAL) = //p' | head -1)] focused=[$(printf '%s\n' "$out" | sed -n 's/^GAMESCOPE_FOCUSED_APP(CARDINAL) = //p' | head -1)]"
+        if [ "$cur" != "$prev" ]; then
+            echo "$(date '+%H:%M:%S.%N' | cut -c1-12) $cur"
+            prev="$cur"
+        fi
+        if [ "$secs" -gt 0 ] && [ $((SECONDS - start)) -ge "$secs" ]; then
+            echo "$(date '+%H:%M:%S.%N' | cut -c1-12) watch ended after ${secs}s"
+            return 0
+        fi
+        sleep "$every"
     done
 }

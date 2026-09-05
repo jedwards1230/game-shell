@@ -32,9 +32,120 @@ decisive, hence this kit.
 | 7 | Gamepad reaches the shell | press D-pad | `last key` counter climbs in the prototype shell (daemon uinput path works under gamescope) |
 | 8 | Moonlight HDR via the WSI layer | `sudo measure.sh` (`HDR to clients`), then `launch.sh moonlight` | `GAMESCOPE_HDR_OUTPUT_FEEDBACK` is 1; stream is HDR on the TV, no fallback to SDR tonemap |
 | 9 | Qt on gamescope is usable | eyes | prototype shell renders at full size, no decorations, keyboard focus YES |
+| 10 | Steam Remote Play under gamescope | launch the local Steam client (`launch.sh steam --watch-baselayer`, Big Picture; then the standalone Steam Link client, `launch.sh steamlink`), tag it, base-layer it, start a stream from the streaming host on the pad; `focus.sh list` + `steam-tag.log` + `steam-baselayer.log` + stats FIFO + eyes | stream shown (its window tagged, `GAMESCOPE_FOCUSED_APP` on it); HDR on the TV, or SDR recorded as such (see the risks below); `fps=120` held; `GAMESCOPECTRL_BASELAYER_APPID` still reads what `focus.sh` wrote, or Steam's own write wins once and stays put, never flapping (no base-layer fight with a Steam client that writes that atom itself under `--steam`; `steam-baselayer.log` is the record); the pad reaches the game. Gates the supported flavour, see `docs/V2_DESIGN.md` §12 |
 
 Decision rule agreed 2026-09-04: if 1 or 3 fails, gamescope is out for v2 and the
 Hyprland-plugin path is next; Smithay stays the v3 target on HDR grounds.
+
+**Streaming clients are peers.** Moonlight (criteria 3 and 8) and Steam Remote Play
+(criterion 10) are two first-class, independently testable clients of the prototype, not
+one path with a fallback. Each has its own `launch.sh` verb, app id (9003 / 9004, Steam Link
+9005), log, and tagging rule, and a change to one must leave the other runnable: a Steam
+finding never retires the Moonlight test, and vice versa.
+
+Criterion 10 carries two known risks, both from the SteamOS 3.9 session
+(`~/tv-shell-v2-research/steamos-39-gamescope-shell.md`, §focus and §Remote Play):
+the SteamOS session exports `GAMESCOPE_DISPLAY_DISABLED=1` for `streaming_client` ("disable
+gamescope path in streaming_client until buffer frozen issues are understood better"), so
+Valve itself presents the Remote Play client through plain Xwayland rather than the
+gamescope-direct path, and gamescope issue #2196 (Remote Play under `--steam` flickers,
+input routes unpredictably, 3.16.23) is still open; and the full Steam client writes
+`GAMESCOPECTRL_BASELAYER_APPID` itself when it starts or ends a stream (that is how SteamOS
+switches between Steam and a game), so it may overwrite the kit's own list; a first
+unscripted run of the full client under this prototype (2026-09-05) saw exactly that: Steam
+detected gamescope, tagged its own windows 769, and rewrote `GAMESCOPECTRL_BASELAYER_APPID`
+within about ten seconds. The measured run below settles it — Steam wins the base layer
+outright and rewrites it per stream start and stop. That is why the kit's Steam list
+carries 769 and never re-tags a window Steam tagged itself, and why `--watch-baselayer`
+exists. `launch.sh steam`
+sets `GAMESCOPE_DISPLAY_DISABLED=1` and `GAMESCOPE_ZENITY_DISABLE=1` the way SteamOS does
+(the first keeps `streaming_client` on the X11 + layer path, the one HDR ships on; the
+second turns a layer failure into a loud exit instead of an invisible dialog).
+
+### Criterion 10, measured (2026-09-05, gamescope 3.16.23, this box)
+
+Full Steam client under the prototype, `launch.sh steam --watch-baselayer` (which runs
+`env -u WAYLAND_DISPLAY GAMESCOPE_DISPLAY_DISABLED=1 GAMESCOPE_ZENITY_DISABLE=1 steam
+-bigpicture`), two real Remote Play streams started by hand on the pad from the streaming
+host, one after the other. The session was still running **with `--expose-wayland` on**;
+the input daemon and the CEC watchdog were stopped so the pad was free.
+
+**The WSI hook fix works, and the per-app unset alone is enough.** Steam's
+`logs/console-linux.txt` at both stream starts:
+
+```
+[Gamescope WSI] Executable name: streaming_client
+[Gamescope WSI] Creating Gamescope surface: xid: 0x2e0002f
+[Gamescope WSI] Made gamescope surface for xid: 0x2e0002f
+[Gamescope WSI] Surface state:
+  server hdr output enabled:     true
+  hdr formats exposed to client: true
+```
+
+That is exactly the success signature predicted below, reached **without a session
+restart**: `--expose-wayland` was still set, and unsetting `WAYLAND_DISPLAY` for Steam
+alone was sufficient. `TV_SHELL_GS_EXPOSE_WAYLAND=0` is not required for Steam.
+
+**Steam still requests SDR, and that is now a client-side gate, not a gap in this stack.**
+The very next line, both times:
+
+```
+Creating swapchain ... format: VK_FORMAT_B8G8R8A8_UNORM - colorspace: VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+```
+
+8-bit sRGB, immediately after the layer told the client `hdr formats exposed to client:
+true`. Previously one could argue HDR was never offered because the layer was not hooking;
+it is now offered explicitly and **declined by the client**. Steam Remote Play is SDR on
+Linux by Steam's own gate — not this configuration, not gamescope, not the pin. **Moonlight
+remains the HDR path** (criterion 8). The display itself stayed HDR + VRR throughout
+(`GAMESCOPE_HDR_OUTPUT_FEEDBACK=1`, `GAMESCOPE_VRR_FEEDBACK=1`), so gamescope was
+tonemapping Steam's SDR into an HDR output.
+
+**120 fps held with a live Remote Play stream as the base layer**: the stats FIFO read
+`fps=120.000000` / `119.952019` / `120.048019` repeatedly with `focus=3321460`.
+
+**Tagging: `--keep-existing` is the right rule, and Steam tags the stream window with the
+*game's* app id, not its own.** From `steam-tag.log`:
+
+```
+known 0x1c00035 "Steam Big Picture Mode" (has STEAM_GAME=769, left alone)
+known 'Steam' (already STEAM_GAME=9004)
+known 0x2e0002f "Streaming Client" (has STEAM_GAME=252950, left alone)
+```
+
+252950 is the streamed game's app id. The kit deferred to Steam's own tag on all three.
+
+**The base-layer fight is confirmed, and it is stronger than "may fight": Steam wins
+outright.** The kit set `9004,769,9001`; Steam overwrote it within seconds and kept
+rewriting it on every stream start and stop:
+
+```
+15:54:43 baselayer=[413091, 769]              focused=[769]
+15:56:28 baselayer=[413091, 252950, 769]      focused=[252950]
+15:57:12 baselayer=[413091, 769]              focused=[769]
+15:57:24 baselayer=[413091, 3321460, 769]     focused=[3321460]
+```
+
+The kit's own 9004 was dropped from `GAMESCOPE_FOCUSABLE_APPS` entirely (it read
+`3321460, 769, 9001`). So a shell must **reconcile after Steam's writes**, not expect to
+hold that list. `413091` appears persistently as the first element and we do not know what
+it is; it is recorded here unexplained rather than guessed at.
+
+`launch.sh steamlink` exits 2 with its "not installed" message — Steam Link is genuinely
+not installed on the box, so only the full-client path is exercised. Steam Link's own HDR
+behaviour is unmeasured.
+
+**Still unverified:** whether the pad reaches the streamed game. That needs a person at
+the TV and is not claimed either way.
+
+**The old failure signature, kept so a regression is recognisable.** Before the
+`WAYLAND_DISPLAY` fix, the same run rendered **only with the WSI layer disabled**, as SDR
+4K120 HEVC NV12 BT.709 through plain Xwayland; with the layer enabled the client showed a
+black screen and its log had only the layer's unconditional `Forcing on
+VK_EXT_swapchain_maintenance1` line, no `Creating Gamescope surface`, then the
+"non-Gamescope swapchain" dialog. That was a hook miss caused by the `WAYLAND_DISPLAY`
+mismatch pressure-vessel creates under an `--expose-wayland` session (Known gaps, below).
+If those lines come back, the unset was lost, not gamescope regressed.
 
 ## Install and select
 
@@ -60,11 +171,11 @@ for the week. The default boot session is untouched; log out (or set it back) to
 |---|---|
 | `session.sh` | The session. Starts `tv-shell-input.service`, creates the stats FIFO, execs gamescope with `--steam --expose-wayland --keep-alive -W/-H/-r --hdr-enabled --adaptive-sync`, logs to journal tag `tv-shell-gamescope` |
 | `client.sh` | gamescope's primary child. Runs `proto-shell.qml` on X11 with a Qt 6 runtime, tags it `STEAM_GAME=9001`, makes it the base layer, writes `/tmp/tv-shell-gamescope.env` for the SSH-side tools, relaunches it on exit (with backoff once it crash-loops) |
-| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides) and `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below) |
+| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides), `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below; `--family` follows the pid tree, `--class` repeats, `--keep-existing` never overwrites a tag the client set itself), and `gs_watch_baselayer`, the base-layer atom logger |
 | `proto-shell.qml` | The prototype shell: shows window size, keyboard focus, last key, a moving dot, and a black-to-white strip |
 | `proto-overlay.qml` | Overlay test client, semi-transparent side panel |
-| `focus.sh` | `list` / `tag` / `tag-pid` / `app` / `window` / `clear` over gamescope's root X11 atoms. `tag-pid <pid> <id>` tags every window of a pid as it appears (`--timeout`, `--class`, `--log`, `--name`, `--expect`, `--done-name`) |
-| `launch.sh` | `overlay` / `x11` / `apps <host>` / `moonlight [--quit]` (X11, every window of its pid tagged `STEAM_GAME=9003`; `--wayland` for the xdg-shell experiment) / `xmessage` into the running session from SSH |
+| `focus.sh` | `list` / `tag` / `tag-pid` / `watch-baselayer` / `app` / `window` / `clear` over gamescope's root X11 atoms. `tag-pid <pid> <id>` tags every window of a pid as it appears (`--timeout`, `--class`, `--family`, `--keep-existing`, `--log`, `--name`, `--expect`, `--done-name`); `watch-baselayer [secs]` logs every change of `GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp |
+| `launch.sh` | `overlay` / `x11` / `apps <host>` / `moonlight [--quit]` (X11, every window of its pid tagged `STEAM_GAME=9003`; `--wayland` for the xdg-shell experiment) / `steam [--gamepadui] [--watch-baselayer]` (the full Steam client, its whole process family tagged `STEAM_GAME=9004` as windows appear, for 10 min in a detached watcher) / `steamlink` (the standalone Steam Link client, `STEAM_GAME=9005`) / `xmessage` into the running session from SSH |
 | `measure.sh` | Reads DRM connector properties, debugfs bit depth, the active mode, gamescope's own info (`gamescopectl`, `backend_info`, `help`) and the root feedback atoms, and prints verdicts. Every DRM read is scoped to one connector (the first connected + enabled one, or `TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1` to choose on a two-output box) and to the CRTC driving it. Under `sudo` the gamescope-side reads run as the session user |
 
 ## Running a measurement
@@ -80,6 +191,11 @@ ssh box '/opt/tv-shell/dev/gamescope/launch.sh apps <host>'     # what the strea
 ssh box "/opt/tv-shell/dev/gamescope/launch.sh moonlight stream <host> ' Steam Big Picture' \
     --resolution 3840x2160 --fps 120 --hdr --display-mode fullscreen"   # criteria 3, 8
 ssh box 'cat /tmp/tv-shell-gamescope-stats'                     # criterion 3 (a FIFO, see below)
+ssh box '/opt/tv-shell/dev/gamescope/launch.sh steam --watch-baselayer'   # criterion 10: then start a
+                                                                #   Remote Play stream on the pad
+ssh box 'tail -f /tmp/tv-shell-gamescope-clients/steam-tag.log'          #   windows tagged as they appear
+ssh box 'tail -f /tmp/tv-shell-gamescope-clients/steam-baselayer.log'    #   who writes the base layer
+ssh box '/opt/tv-shell/dev/gamescope/launch.sh steamlink'       # criterion 10 with the standalone client
 ```
 
 First check the journal (`journalctl -t tv-shell-gamescope -b`) for the line
@@ -168,6 +284,29 @@ apps <host>` prints the host's state, the running app, and every cached name in 
 (`'  Desktop'`, with `<- running now` on the current one), plus the live `moonlight list
 <host>` output the same way, so the exact string can be copied.
 
+`launch.sh steam` runs the full Steam client on X11 (`steam -bigpicture`; `--gamepadui`
+for `steam -gamepadui`), sets the base-layer preference `9004,769,9001` first, waits for the
+first window of the family, prints the focus atoms, and then leaves a detached watcher
+running for `TV_SHELL_GS_STEAM_WATCH_SECS` (600) s (`steam-tag.log`) because the Remote
+Play stream is started by hand on the pad. Steam is a process **family**, not one pid:
+the launcher script, the client, `steamwebhelper`, and the separate `streaming_client`
+that a stream spawns, each with its own X connection and windows. The watcher therefore
+follows the pid tree (`--family`, re-read every poll, and the watch outlives a launcher
+that exits) and the `WM_CLASS` set `steam` / `steamwebhelper` / `streaming_client`, and
+gamescope itself lists the Remote Play window in `GAMESCOPE_FOCUSABLE_WINDOWS` even
+untagged (`STEAM_STREAMING_CLIENT=1` makes it a focus candidate under `--steam`), which is
+one of the candidate sources. Two Steam-specific rules: a window the client tagged itself
+(`STEAM_GAME=769` for Steam, or the streamed app's id) is reported and **left alone**
+(`--keep-existing`), never overwritten, and 769 sits in the base list so those windows are
+selectable either way; and `--watch-baselayer` logs every change of
+`GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp
+(`steam-baselayer.log`, `focus.sh watch-baselayer` by hand), because the full client writes
+that atom itself when it starts a stream (the SteamOS mechanism). It does fight the kit's
+list, and wins: the 2026-09-05 run above has the log. `launch.sh steamlink` does the same for the
+standalone Steam Link client (`flatpak run com.valvesoftware.SteamLink` when installed,
+else a `steamlink` on `PATH`, else a clear "not installed"), app id 9005, base list
+`9005,9001`.
+
 X11 is the path that survives here, and the **only** HDR path: gamescope's WSI layer
 hardcodes `hdrOutput = false` for native-Wayland surfaces (3.16.23
 `layer/VkLayer_FROG_gamescope_wsi.cpp:758`, master `:834`) and gamescope's own Wayland
@@ -245,6 +384,32 @@ shell over it; the busy-host refusal exited 3 within a second naming the running
 `launch.sh apps` showed the leading space in the quoted names.
 
 ## Known gaps, on purpose
+
+- Criterion 10 has been run on the box with two real Remote Play streams (2026-09-05,
+  above): the WSI hook fix is confirmed, Steam declines HDR itself, 120 fps held, and
+  Steam wins the base layer outright. Two parts remain open — whether the pad reaches the
+  streamed game (needs a person at the TV) and the Steam Link client (not installed here).
+  Beyond that run the Steam verbs are exercised only in the fixture (a fake process family
+  + fake `xprop`).
+- **`--expose-wayland` silently disables the WSI layer for every Steam-runtime app.** With
+  it, gamescope hands its children `WAYLAND_DISPLAY=gamescope-0`; inside the Steam
+  container pressure-vessel rewrites that to `wayland-0` (it only preserves `wayland-*`
+  names) and `GAMESCOPE_WAYLAND_DISPLAY` to `/run/pressure-vessel/gamescope-socket`; the
+  layer's `isRunningUnderGamescope()` compares the two, they never match, the layer
+  registers no instance, every surface hook passes through, and the client dies (or, with
+  the dialogs on, hangs black) on "Creating swapchain for non-Gamescope swapchain". Any
+  pressure-vessel / Steam Linux Runtime app under such a session has no HDR. SteamOS never
+  passes `--expose-wayland`. `TV_SHELL_GS_EXPOSE_WAYLAND=0` drops it; `launch.sh steam`
+  also unsets the variable for Steam itself, and the 2026-09-05 run **proved that per-app
+  unset sufficient on its own** — the layer hooked `streaming_client` with
+  `--expose-wayland` still on and no session restart. The session-level flag is therefore
+  optional for Steam. The trap itself stands for any other pressure-vessel / Steam Linux
+  Runtime app launched under such a session without the unset. Moonlight is unaffected
+  either way; it runs on the host, where both variables read `gamescope-0`.
+- **Do not chase this with gamescope master.** Nothing in the layer changed between 3.16.23
+  and 3.16.28 on this path (four unrelated commits), and master's bd52d6e sets
+  `WAYLAND_DISPLAY=""` for children, which pressure-vessel turns into `wayland-0` again,
+  re-creating the same breakage for every Steam Linux Runtime game. 3.16.28 is the safe pin.
 
 - The prototype shell launches nothing. Everything is driven from SSH, because the point
   is to measure the compositor, not to port the shell.
