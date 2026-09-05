@@ -29,6 +29,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Lint the kit and its fixture
+        # The runner's packaged shellcheck (0.9.0 on ubuntu-24.04) is older than
+        # what a dev box is likely to have, and the two disagree: "function only
+        # reached via a trap" is SC2317 up to 0.9.x and SC2329 from 0.10 on. Any
+        # disable directive for that has to name BOTH codes. `--version` is
+        # printed so the next disagreement is one line into the log, not a guess.
         run: |
           shellcheck --version
           shellcheck -x dev/gamescope/*.sh dev/gamescope/tests/*.sh dev/gamescope/tests/bin/*
