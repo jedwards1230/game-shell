@@ -50,8 +50,9 @@ printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=TV Shell (gamescope pro
   > /usr/share/wayland-sessions/tv-shell-gamescope.desktop
 ```
 
-Then pick "TV Shell (gamescope prototype)" at the greeter. The default boot session is
-untouched; log out to return to it.
+Then pick "TV Shell (gamescope prototype)" at the greeter, or, on an autologin kiosk that
+never shows one, point the display manager's autologin session at `tv-shell-gamescope`
+for the week. The default boot session is untouched; log out (or set it back) to return to it.
 
 ## Files
 
