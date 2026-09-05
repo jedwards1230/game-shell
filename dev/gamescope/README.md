@@ -32,6 +32,7 @@ decisive, hence this kit.
 | 7 | Gamepad reaches the shell | press D-pad | `last key` counter climbs in the prototype shell (daemon uinput path works under gamescope) |
 | 8 | Moonlight HDR via the WSI layer | `sudo measure.sh` (`HDR to clients`), then `launch.sh moonlight` | `GAMESCOPE_HDR_OUTPUT_FEEDBACK` is 1; stream is HDR on the TV, no fallback to SDR tonemap |
 | 9 | Qt on gamescope is usable | eyes | prototype shell renders at full size, no decorations, keyboard focus YES |
+| 10 | Steam Remote Play under gamescope | launch the local Steam client (Big Picture, then the standalone Steam Link client), tag it, base-layer it, start a stream from the streaming host; `focus.sh list` + stats FIFO + eyes | stream shown; HDR on the TV; `fps=120` held; `GAMESCOPECTRL_BASELAYER_APPID` still reads what `focus.sh` wrote (no base-layer fight with a Steam client that writes that atom itself under `--steam`); the pad reaches the game. Gates the supported flavour, see `docs/V2_DESIGN.md` §12 |
 
 Decision rule agreed 2026-09-04: if 1 or 3 fails, gamescope is out for v2 and the
 Hyprland-plugin path is next; Smithay stays the v3 target on HDR grounds.

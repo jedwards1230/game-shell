@@ -11,11 +11,12 @@
 1. The kiosk invariant — exactly one app fills the screen, backgrounded apps keep running and never share it — is enforced by a compositor primitive that no window can refuse and that cannot half-succeed.
 2. Every claim the shell makes about the screen is verified against the compositor's own published state, and a claim that cannot be verified is a failure, never a silence.
 3. 4K120 HDR10 with VRR on the TV, with a real 4K120 HDR Moonlight stream presenting at the refresh rate alone and with the shell drawn over it.
-4. One Rust core process owns policy; the shell UI is an ordinary client of the compositor with no privileged surface type.
+4. We do not write a compositor. As SteamOS does, we own what sits on top of gamescope: the shell, the pad daemon, AV control and the supervisor. One Rust core process owns policy; the shell UI is an ordinary client of the compositor with no privileged surface type.
 5. In-repo supervision: a session target with a frame heartbeat, restart with backoff, and a couch-reachable and LAN-reachable escape hatch in every state.
 6. The whole window model is testable in CI against a real headless compositor, and asserted in the field by the running core.
-7. v1 keeps working on the couch until v2 replaces it; both are selectable sessions on the same install and neither can break the other.
-8. IP is the AV authority; CEC is an observer. The box never claims or releases the display unless it owns it.
+7. Moonlight and Steam Remote Play are both first-class, permanently supported, independently testable streaming clients (§12).
+8. v1 keeps working on the couch until v2 replaces it; both are selectable sessions on the same install and neither can break the other.
+9. IP is the AV authority; CEC is an observer. The box never claims or releases the display unless it owns it.
 
 **Non-goals** (PRD §4 stands; these are the v2 additions)
 
@@ -26,7 +27,7 @@
 | A virtual-pad twin while a game is on screen | Games get the real evdev node (§7) |
 | libcec / `cec-rs` in the core | Six contenders for one exclusive tty; the in-process design is the defect generator (§8) |
 | Deciding the plugin mechanism now | Requirements only (§13 Q2) |
-| SteamOS itself, an immutable root, nested per-app gamescope | Rejected 2026-08-29; unchanged |
+| SteamOS itself, an immutable root, nested per-app gamescope | Rejected 2026-08-29; unchanged. The Steam-as-shell fallback in §12 is a gamescope-session on our own OS, not this |
 
 ## 2. The vision that does not change
 
@@ -58,7 +59,7 @@ The two durable v1 fixes (#352 "declare ownership, never infer it"; #444 "a swit
 
 ## 4. Architecture
 
-Compositor: **gamescope**, DRM backend, `--steam` (SteamControlled focus policy), pinned 3.16.28 or newer (3.16.23 lacks the August keyboard-focus reclaim fixes and `focus_info`). Decided 2026-09-05 on the measured numbers in §6.
+Compositor: **gamescope**, DRM backend, `--steam` (SteamControlled focus policy), pinned 3.16.28 or newer (3.16.23 lacks the August keyboard-focus reclaim fixes and `focus_info`). Decided 2026-09-05 on the measured numbers in §6. Nothing below is a compositor of our own: the unit shape is SteamOS's, and the ChimeraOS `gamescope-session` unit files and scripts (ready-fd handshake, environment dump, short-session tracker, session select) are the starting point for the supervisor rather than units written from scratch.
 
 ```
 display manager (autologin, Relogin=true) ── selects one of:
@@ -129,7 +130,7 @@ Rules the core enforces:
 - **One write, then verify.** A switch is one `GAMESCOPECTRL_BASELAYER_APPID` write followed by a read of `GAMESCOPE_FOCUSED_WINDOW`'s app id within a bounded window (measured 14–19 ms). A mismatch is an IPC error, a metric and a log line, never `ok`.
 - **Transient unmaps are held, not followed.** An app whose last window unmaps for a moment (Moonlight main → stream window, a browser navigation) would drop the base layer to the shell, flip grab and audio, and flip back. The core pins `GAMESCOPECTRL_BASELAYER_WINDOW` across known transitions and applies a short hysteresis before treating a fallback as an exit. Exit fallback itself is unmeasured and is a bench row (§10).
 - **Audio follows the base window.** "You hear the workspace on screen" becomes "you hear the base window's app id"; PipeWire nodes are still attributed by `application.process.binary`.
-- **The shell's app id is 769 deliberately.** Under `--steam` that id carries Steam's window semantics (always fullscreen-sized, no focus loss when the cursor hides, `focus=steam` in the stats pipe), all of which a shell wants; a private id loses the auto-fullscreen.
+- **The shell's app id is private** (the kit used 9001). Under `--steam`, 769 is the Steam client's own id (`window_is_steam`: forced fullscreen sizing, `focus=steam` in the stats pipe) and is reserved for the Steam client when it runs as an app (§12); the shell sizes itself to the output instead of inheriting that path.
 
 ## 6. Display and HDR
 
@@ -228,23 +229,36 @@ The panel becomes the recovery and observability surface for the supervisor (uni
 - **Cutover criteria**: §6 table green on the pinned build, driven through the runtime atoms, including the eyes-only rows and the new bench rows; field assertions at zero and heartbeat false positives at zero for seven consecutive days of normal use; every PRD §3 journey reproduced; a Moonlight session, a Plex session and a web app each survive a shell restart underneath; the §8 site preconditions verified; v1 still boots after a v2 deploy.
 - **Rollback** is selecting the v1 session at the display manager, by hand or by the short-session hook.
 
-## 12. App classes in scope
+## 12. Streaming clients and app classes
+
+**Two streaming clients are first-class, permanently supported, and independently testable.** The user streams over Moonlight today and expects to move to Steam Remote Play as its features catch up; Moonlight stays in the repo regardless. Both sit under one contract: a window resolved by scope or tagged by pid, one base-layer switch, HDR through the X11 WSI path, audio ownership by the base window, the `gamepad` input contract.
+
+| | Moonlight | Steam Remote Play |
+|---|---|---|
+| Status under gamescope | **Proven 2026-09-05**: xcb, tag-by-pid on the stream window (its second X window, K6), HDR10 swapchain exposed to the client, 120 fps alone and with the shell over it | **Unproven.** Never run under the kit |
+| Flavours | one | (a) the full Steam client in Big Picture as a tagged app, carrying the `streaming_client` window (`STEAM_STREAMING_CLIENT=1`, always a focus candidate under SteamControlled); (b) the standalone Steam Link client, a plain SDL app with no shell-role contention, HDR on Linux unverified |
+| Known risks | check the host's `<currentgame>` before launching (a busy host shows an invisible dialog) | (1) SteamOS 3.9's session exports `GAMESCOPE_DISPLAY_DISABLED=1` for `streaming_client` "until buffer frozen issues are understood better", and gamescope#2196 (flicker, unpredictable input under `--steam`) is open. (2) The full Steam client under `-e` expects to be app 769 and writes `GAMESCOPECTRL_BASELAYER_APPID` itself when a stream starts, so it may fight our shell for the base layer (`steamos-39-gamescope-shell.md` §2, §6) |
+| Gate | kit criteria 3 and 8 (pass) | **kit criterion 10**: stream shown, HDR on the TV, 120 fps, no base-layer fight, pad reaches the game. It decides which flavour is supported and is §13 Q3 |
+
+Other app classes:
 
 | Class | Launch | Id | Notes |
 |---|---|---|---|
-| Moonlight stream | Moonlight on xcb, WSI layer on, own Xwayland server | scope; tag repair on the stream window | The only HDR path; check the host's `<currentgame>` before launching (a busy host shows an invisible dialog) |
-| Steam Remote Play (local Steam client) | Steam on its own server | `STEAM_STREAMING_CLIENT` | §13 Q3 |
 | Plex HTPC (native) | own server; `keyboard` contract | scope | Keep its CEC disabled; it runs under `bwrap`, which must keep the host pid namespace or scope and pid both fail |
 | Chromium `--app` web apps | own server, own `--user-data-dir`/`--class`; `keyboard` contract | scope, class fallback | §13 Q4 |
 | Home Assistant, music streaming | later, as plugins | | §13 Q2: requirements only |
 
 Plugin requirements (mechanism undecided): a plugin declares an app class, a launch command, an id strategy (scope, pid, or class), an input contract (`gamepad` / `keyboard`), an HDR expectation, and optional home-widget manifests; it never writes compositor atoms itself.
 
+### Fallback considered
+
+If criterion 10 fails, or if a Steam-first future makes a custom shell not worth its cost, the fallback is a **Bazzite/ChimeraOS-style `gamescope-session` with Steam Big Picture as the shell**. It buys Remote Play, Steam Input, the overlay and HDR for free, with Moonlight and Plex as non-Steam shortcuts. It costs what this design exists to keep: our shell as a peer of apps, native Plex and web apps, and daemon-owned AV control, which would move into a sidecar or a Decky-style plugin. It is a real path, not a strawman, and criterion 10 is where it is chosen. Either way the ChimeraOS session files are reused (§4).
+
 ## 13. Open questions
 
 1. **Shell runtime: Quickshell on xcb, or a plain Qt Quick application?** Whichever it is must set X11 properties on its own windows before map (a C++ helper or plugin) and split drawer, QAM and toasts into separate toplevels; Quickshell's layer-shell window is unusable here and its xcb operation is unverified. The plain `qml` runtime (Qt 6) worked as the prototype shell at 4K120. Porting cost of `shell/` versus a rewrite is the trade.
 2. **Plugin mechanism** for Home Assistant and music streaming: manifest-driven `.desktop` extensions, a core-side registry, or out-of-process plugins over the IPC.
-3. **Steam Remote Play client handling.** SteamOS currently exports `GAMESCOPE_DISPLAY_DISABLED=1` to keep `streaming_client` off the gamescope-direct path ("buffer frozen issues"), and gamescope#2196 (flicker, unpredictable input under `--steam`) is open. The v1 postmortem also found its capture-window selection is a Valve-side bug. Support it as a tagged X11 client, or scope it out in favour of Moonlight.
+3. **Steam Remote Play under gamescope (kit criterion 10).** Which flavour is supported: the full Steam client in Big Picture as a tagged app, or the standalone Steam Link client. Open risks: `GAMESCOPE_DISPLAY_DISABLED=1` in SteamOS 3.9's session, gamescope#2196, the base-layer fight with a Steam client that writes `GAMESCOPECTRL_BASELAYER_APPID` itself, Steam Link's HDR on Linux, and the v1 finding that Steam's capture-window selection is a Valve-side bug. A failure selects the §12 fallback.
 4. **Chromium: Xwayland or native Wayland, and per-app profiles.** Native has no focus selector under SteamControlled; Xwayland is the safe path but hardware decode and Widevine under Xwayland on this GPU are unmeasured, and the per-app `--user-data-dir` split costs shared logins.
 5. **gamescope pin and packaging.** Arch's package at the 3.16.28 tag, a built tag, or tracking master for content-driven HDR (commit 6513879, not in any tag).
 6. **Kernel colour pipeline.** Stay on the stock kernel (composite path, measured fine for a switch) or ship one with `CONFIG_AMD_PRIVATE_COLOR` for direct scanout; decide after the overlay-over-HDR bench row and the TV panel's bit-depth reading.
@@ -267,6 +281,7 @@ Plugin requirements (mechanism undecided): a plugin declares an app class, a lau
 | 2026-09-04 | Compositor gated on a one-week gamescope measurement; fail rule: 10-bit HDR at 4K120 or composite cost | `dev/gamescope/README.md` |
 | 2026-09-05 | Phases 1–3 pass; bit depth unmeasurable on this kernel; bare `gamescopectl <convar>` resets the convar; Moonlight must be xcb; tag by pid | #454, `gamescope-hdr-feedback.md` |
 | 2026-09-05 | **gamescope is the v2 compositor**, pin ≥ 3.16.28; Hyprland stays v1-only; Smithay dropped; SteamOS unit shape and base-layer contract adopted; wiki writes held until this document exists | this document |
+| 2026-09-05 | Moonlight and Steam Remote Play are both first-class and permanently supported; Remote Play under gamescope is kit criterion 10 and gates the flavour (Big Picture vs Steam Link); a Steam-as-shell `gamescope-session` is the named fallback; the shell's app id is private, 769 stays Steam's | this document, `dev/gamescope/README.md` |
 | 2026-09-05 | Review findings folded in: `app-steam-app` scope prefix is the upstream contract and the primary id; shell self-tags; the core is stateless and reads the base-layer list back on restart; v1 and v2 share no config file, prefix or unit name; the heartbeat is a forced-paint probe with one FIFO reader; `GAMESCOPE_FOCUSED_WINDOW` not `_APP` is the truth under an overlay; presenters collapse to `gamepad`/`keyboard` with persistent uinput devices | this document |
 
 ## 15. References
