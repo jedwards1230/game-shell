@@ -4,7 +4,14 @@
 # --steam (SteamControlled strategy), which session.sh passes.
 #
 #   focus.sh list                 show focusable apps/windows and the current focus
-#   focus.sh tag <wm-name> <id>   set STEAM_GAME=<id> on the window titled <wm-name>
+#   focus.sh tag <wm-name> <id>   set STEAM_GAME=<id> on the ONE window titled <wm-name>
+#   focus.sh tag-pid <pid> <id> [opts]
+#                                 set STEAM_GAME=<id> on EVERY window of <pid>, and keep
+#                                 watching for new ones (default 60 s; see lib.sh
+#                                 gs_tag_pid for --timeout/--class/--log/--name/
+#                                 --expect/--done-name). This is what a multi-window
+#                                 client such as Moonlight needs: its stream window
+#                                 is not the window named "Moonlight"
 #   focus.sh app <id>[,<id>...]   base layer = first running app in this priority list
 #   focus.sh window <xid>         base layer = this exact X window
 #   focus.sh clear                remove the base-layer overrides
@@ -12,6 +19,9 @@
 # Run from inside the session, or from SSH after `source /tmp/tv-shell-gamescope.env`.
 set -eu
 
+KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=dev/gamescope/lib.sh
+. "$KIT/lib.sh"
 ENV_FILE="${TV_SHELL_GS_ENV_FILE:-/tmp/tv-shell-gamescope.env}"
 if [ -z "${DISPLAY:-}" ] && [ -r "$ENV_FILE" ]; then
     # shellcheck source=/dev/null
@@ -23,7 +33,7 @@ if [ -z "${DISPLAY:-}" ]; then
 fi
 command -v xprop >/dev/null 2>&1 || { echo "focus.sh: xprop not installed (xorg-xprop)" >&2; exit 2; }
 
-usage() { sed -n '2,12p' "$0"; exit 2; }
+usage() { sed -n '2,19p' "$0"; exit 2; }
 
 case "${1:-}" in
     list)
@@ -34,6 +44,11 @@ case "${1:-}" in
     tag)
         [ $# -eq 3 ] || usage
         xprop -name "$2" -f STEAM_GAME 32c -set STEAM_GAME "$3"
+        ;;
+    tag-pid)
+        [ $# -ge 3 ] || usage
+        PID="$2"; APPID="$3"; shift 3
+        gs_tag_pid "$PID" "$APPID" "$@"
         ;;
     app)
         [ $# -eq 2 ] || usage

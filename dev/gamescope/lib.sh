@@ -51,3 +51,211 @@ gs_qml_version() {
     QT_QPA_PLATFORM=offscreen timeout 5 "$1" --version 2>/dev/null \
         | sed -n 's/^Qml Runtime \([0-9][0-9.]*\).*/\1/p' | head -1
 }
+
+# ---------------------------------------------------------------------------
+# Tagging windows by pid.
+#
+# gamescope's SteamControlled focus policy only considers X11 windows that
+# carry STEAM_GAME. Tagging "the window named X" (`xprop -name`) reaches ONE
+# window, and for Moonlight it is the wrong one: its Qt main window, which
+# `moonlight stream` unmaps once the session starts. The stream itself is a
+# second X window (WM_NAME "<host> - Moonlight", WM_CLASS "moonlight",
+# _NET_WM_PID = Moonlight's pid) that appears 5-20 s after launch, once the
+# handshake is done. So the kit tags by pid: every window whose _NET_WM_PID is
+# the client's pid (or whose WM_CLASS is a given class) gets STEAM_GAME, and
+# the scan repeats once a second so windows created later are tagged as they
+# appear.
+#
+# xprop is the only X client the kit relies on, and gamescope publishes no
+# _NET_CLIENT_LIST (it is not among the atoms steamcompmgr.cpp sets), so no
+# single call enumerates every window. Candidate xids come from four cheap
+# sources instead:
+#   1. root _NET_CLIENT_LIST, when a window manager offers one (not gamescope)
+#   2. root GAMESCOPE_FOCUSABLE_WINDOWS (xid, appid, pid) triplets: windows
+#      gamescope already knows, so a re-run finds what was tagged before
+#   3. xids gamescope's Vulkan WSI layer logs into the client's own log
+#      ("Creating Gamescope surface: xid: 0x..."), passed as --log <file>
+#   4. neighbours: an X client allocates resource ids sequentially, so its
+#      later windows sit just above its earlier ones; every known window of
+#      the client seeds a probe of the next TV_SHELL_GS_XID_PROBE ids (default
+#      32, 0 disables) on each poll
+# plus WM_NAME lookups (--name <wm-name>), checked and tagged through
+# `xprop -name` because xprop cannot print the xid of a window it found by
+# name. Every candidate is kept only when its _NET_WM_PID is the pid (or its
+# WM_CLASS carries --class), so a stale window with the right title but the
+# wrong pid is never tagged.
+
+# gs_win_props <xid> -> prints the raw xprop lines for _NET_WM_PID, WM_CLASS,
+# WM_NAME and STEAM_GAME, or returns 1 when <xid> is not a window.
+gs_win_props() {
+    local out
+    out="$(xprop -id "$1" _NET_WM_PID WM_CLASS WM_NAME STEAM_GAME 2>/dev/null)" || return 1
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+}
+
+# gs_props_field <props> pid|class|name|game -> the value, or "" when absent.
+gs_props_field() {
+    case "$2" in
+        pid) printf '%s\n' "$1" | sed -n 's/^_NET_WM_PID(CARDINAL) = \([0-9]*\).*/\1/p' | head -1 ;;
+        class) printf '%s\n' "$1" | sed -n 's/^WM_CLASS([^)]*) = \(.*\)$/\1/p' | head -1 ;;
+        name) printf '%s\n' "$1" | sed -n 's/^WM_NAME([^)]*) = "\(.*\)"$/\1/p' | head -1 ;;
+        game) printf '%s\n' "$1" | sed -n 's/^STEAM_GAME(CARDINAL) = \([0-9]*\).*/\1/p' | head -1 ;;
+    esac
+}
+
+# gs_props_match <props> <pid> <class> -> 0 when the window belongs to <pid>,
+# or (when <class> is non-empty) when its WM_CLASS carries "<class>".
+gs_props_match() {
+    local wpid wclass
+    wpid="$(gs_props_field "$1" pid)"
+    [ -n "$wpid" ] && [ "$wpid" = "$2" ] && return 0
+    if [ -n "$3" ]; then
+        wclass="$(gs_props_field "$1" class)"
+        case "$wclass" in *"\"$3\""*) return 0 ;; esac
+    fi
+    return 1
+}
+
+# gs_root_candidates <pid> -> hex xids from _NET_CLIENT_LIST (all of them) and
+# from the GAMESCOPE_FOCUSABLE_WINDOWS triplets whose pid is <pid>.
+gs_root_candidates() {
+    local out line vals i n arr=()
+    out="$(xprop -root _NET_CLIENT_LIST GAMESCOPE_FOCUSABLE_WINDOWS 2>/dev/null)" || return 0
+    line="$(printf '%s\n' "$out" | sed -n 's/^_NET_CLIENT_LIST(WINDOW): window id # //p')"
+    if [ -n "$line" ]; then
+        printf '%s\n' "$line" | tr ',' '\n' | tr -d ' ' | grep -E '^0x[0-9a-fA-F]+$' || true
+    fi
+    vals="$(printf '%s\n' "$out" | sed -n 's/^GAMESCOPE_FOCUSABLE_WINDOWS(CARDINAL) = //p' | tr -d ' ')"
+    [ -n "$vals" ] || return 0
+    IFS=',' read -r -a arr <<< "$vals"
+    n=${#arr[@]}
+    i=0
+    while [ $((i + 2)) -lt "$n" ]; do
+        if [ "${arr[$((i + 2))]}" = "$1" ]; then
+            printf '0x%x\n' "${arr[$i]}"
+        fi
+        i=$((i + 3))
+    done
+}
+
+# gs_log_candidates <file>... -> hex xids the gamescope WSI layer logged.
+gs_log_candidates() {
+    local f
+    for f in "$@"; do
+        [ -r "$f" ] || continue
+        grep -o 'Creating Gamescope surface: xid: 0x[0-9a-fA-F]*' "$f" 2>/dev/null | awk '{ print $NF }'
+    done
+}
+
+# gs_tag_pid <pid> <appid> [options] -> tags every X window of <pid> with
+# STEAM_GAME=<appid>, re-scanning every TV_SHELL_GS_POLL_SECS (1) seconds until
+# --timeout (60 s), --expect windows are tagged, or a tagged window's WM_NAME
+# matches --done-name. Prints one line per window as it is tagged. Returns 0
+# when at least one window is tagged (or was already), 1 otherwise, and 1 when
+# <pid> exits before any window of it is found.
+#
+#   --timeout <s>       give up after this long (default 60)
+#   --class <wm-class>  also accept windows whose WM_CLASS carries this
+#   --log <file>        harvest xids from this WSI-layer log (repeatable)
+#   --name <wm-name>    also look a window up by WM_NAME (repeatable)
+#   --expect <n>        stop once <n> windows are tagged
+#   --done-name <glob>  stop once a tagged window's WM_NAME matches <glob>
+gs_tag_pid() {
+    local pid="${1:?gs_tag_pid: pid}" appid="${2:?gs_tag_pid: appid}"
+    shift 2
+    local timeout=60 class="" expect=0 done_glob="" logs=() names=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --timeout) timeout="$2"; shift 2 ;;
+            --class) class="$2"; shift 2 ;;
+            --log) logs+=("$2"); shift 2 ;;
+            --name) names+=("$2"); shift 2 ;;
+            --expect) expect="$2"; shift 2 ;;
+            --done-name) done_glob="$2"; shift 2 ;;
+            *) echo "gs_tag_pid: unknown option '$1'" >&2; return 2 ;;
+        esac
+    done
+    local poll="${TV_SHELL_GS_POLL_SECS:-1}" probe="${TV_SHELL_GS_XID_PROBE:-32}"
+    local -A seen=() maxid=() name_done=()
+    local start=$SECONDS tagged=0 finished="" c props wname base cands n
+
+    # gs_tag_pid_consider <xid> -> checks one xid once, tags it when it matches.
+    gs_tag_pid_consider() {
+        local xid="$1" xprops wgame wn
+        [ -z "${seen[$xid]:-}" ] || return 0
+        xprops="$(gs_win_props "$xid")" || return 0
+        seen[$xid]=window
+        base=$(( xid & ~0x1FFFFF ))
+        if [ -z "${maxid[$base]:-}" ] || [ $((xid)) -gt "${maxid[$base]}" ]; then
+            maxid[$base]=$((xid))
+        fi
+        gs_props_match "$xprops" "$pid" "$class" || return 0
+        wn="$(gs_props_field "$xprops" name)"
+        wgame="$(gs_props_field "$xprops" game)"
+        if [ "$wgame" = "$appid" ]; then
+            seen[$xid]=tagged
+            echo "known $xid \"$wn\" (already STEAM_GAME=$appid)"
+        else
+            xprop -id "$xid" -f STEAM_GAME 32c -set STEAM_GAME "$appid" 2>/dev/null || return 0
+            seen[$xid]=tagged
+            echo "tagged $xid \"$wn\" STEAM_GAME=$appid (t+$((SECONDS - start))s)"
+        fi
+        tagged=$((tagged + 1))
+        # shellcheck disable=SC2254  # a glob is what --done-name takes
+        case "$wn" in $done_glob) [ -n "$done_glob" ] && finished=1 ;; esac
+        [ "$expect" -gt 0 ] && [ "$tagged" -ge "$expect" ] && finished=1
+        return 0
+    }
+
+    while :; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            if [ "$tagged" -eq 0 ]; then
+                echo "gs_tag_pid: pid $pid exited before any window of it appeared" >&2
+                return 1
+            fi
+            echo "gs_tag_pid: pid $pid exited; $tagged window(s) had been tagged"
+            return 0
+        fi
+        cands=()
+        while IFS= read -r c; do
+            [ -n "$c" ] && cands+=("$c")
+        done < <(gs_root_candidates "$pid"; gs_log_candidates "${logs[@]}")
+        for c in "${cands[@]}"; do gs_tag_pid_consider "$c"; done
+        for base in "${!maxid[@]}"; do
+            n=1
+            while [ "$n" -le "$probe" ]; do
+                # maxid is re-read on every step, so a hit extends the window
+                c="$(printf '0x%x' $((maxid[$base] + n)))"
+                [ -n "${seen[$c]:-}" ] || gs_tag_pid_consider "$c"
+                n=$((n + 1))
+            done
+        done
+        for wname in "${names[@]}"; do
+            [ -z "${name_done[$wname]:-}" ] || continue
+            props="$(xprop -name "$wname" _NET_WM_PID WM_CLASS WM_NAME STEAM_GAME 2>/dev/null)" || continue
+            gs_props_match "$props" "$pid" "$class" || continue
+            name_done[$wname]=1
+            if [ "$(gs_props_field "$props" game)" = "$appid" ]; then
+                echo "known '$wname' (already STEAM_GAME=$appid)"
+            else
+                xprop -name "$wname" -f STEAM_GAME 32c -set STEAM_GAME "$appid" 2>/dev/null || continue
+                echo "tagged '$wname' STEAM_GAME=$appid (t+$((SECONDS - start))s)"
+            fi
+            tagged=$((tagged + 1))
+            # shellcheck disable=SC2254
+            case "$wname" in $done_glob) [ -n "$done_glob" ] && finished=1 ;; esac
+            [ "$expect" -gt 0 ] && [ "$tagged" -ge "$expect" ] && finished=1
+        done
+        [ -n "$finished" ] && return 0
+        if [ $((SECONDS - start)) -ge "$timeout" ]; then
+            if [ "$tagged" -eq 0 ]; then
+                echo "gs_tag_pid: no window of pid $pid appeared within ${timeout}s; nothing tagged" >&2
+                return 1
+            fi
+            echo "gs_tag_pid: watch ended after ${timeout}s; $tagged window(s) tagged"
+            return 0
+        fi
+        sleep "$poll"
+    done
+}
