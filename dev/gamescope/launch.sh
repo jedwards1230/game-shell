@@ -127,6 +127,10 @@ host_state() {
     HOST_STATE="$(xml_field "$info" state)"
     HOST_CURRENT="$(xml_field "$info" currentgame)"
     HOST_NAME="$(xml_field "$info" hostname)"
+    # A reply that parses to nothing (an HTML error page, a captive portal,
+    # a truncated body) is not serverinfo; report it as unreachable rather
+    # than as an idle host.
+    [ -n "$HOST_STATE" ] || [ -n "$HOST_NAME" ] || return 1
     idx="$(conf_host_index "$HOST_NAME")"
     [ -n "$idx" ] || idx="$(conf_host_index "$1")"
     HOST_INDEX="$idx"
@@ -142,7 +146,7 @@ host_state() {
 moonlight_precheck() {
     local host="$1" app="$2"
     if ! host_state "$host"; then
-        echo "WARN: no serverinfo from $host:$SUNSHINE_PORT; cannot tell what it is running (streaming anyway)" >&2
+        echo "WARN: no usable serverinfo from $host:$SUNSHINE_PORT; cannot tell what it is running (streaming anyway)" >&2
         return 0
     fi
     if [ -z "$HOST_CURRENT" ]; then

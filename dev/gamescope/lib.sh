@@ -151,9 +151,12 @@ gs_log_candidates() {
 # gs_tag_pid <pid> <appid> [options] -> tags every X window of <pid> with
 # STEAM_GAME=<appid>, re-scanning every TV_SHELL_GS_POLL_SECS (1) seconds until
 # --timeout (60 s), --expect windows are tagged, or a tagged window's WM_NAME
-# matches --done-name. Prints one line per window as it is tagged. Returns 0
-# when at least one window is tagged (or was already), 1 otherwise, and 1 when
-# <pid> exits before any window of it is found.
+# matches --done-name. Prints one line per window as it is tagged. A window
+# that already carries STEAM_GAME=<appid> is reported as "known" (and satisfies
+# --done-name) but is never counted: only tags made by this run count toward
+# --expect, so a window reached by both a name lookup and an xid cannot be
+# counted twice. Returns 0 when at least one window was tagged or known, 1
+# otherwise, and 1 when <pid> exits before any window of it is found.
 #
 #   --timeout <s>       give up after this long (default 60)
 #   --class <wm-class>  also accept windows whose WM_CLASS carries this
@@ -178,7 +181,17 @@ gs_tag_pid() {
     done
     local poll="${TV_SHELL_GS_POLL_SECS:-1}" probe="${TV_SHELL_GS_XID_PROBE:-32}"
     local -A seen=() maxid=() name_done=()
-    local start=$SECONDS tagged=0 finished="" c props wname base cands n
+    local start=$SECONDS tagged=0 known=0 finished="" c props wname base cands n
+
+    # gs_tag_pid_note <wm-name> tagged|known -> counts a hit and applies the
+    # stop conditions (--done-name on either kind, --expect on new tags only).
+    gs_tag_pid_note() {
+        if [ "$2" = tagged ]; then tagged=$((tagged + 1)); else known=$((known + 1)); fi
+        # shellcheck disable=SC2254  # a glob is what --done-name takes
+        case "$1" in $done_glob) [ -n "$done_glob" ] && finished=1 ;; esac
+        [ "$expect" -gt 0 ] && [ "$tagged" -ge "$expect" ] && finished=1
+        return 0
+    }
 
     # gs_tag_pid_consider <xid> -> checks one xid once, tags it when it matches.
     gs_tag_pid_consider() {
@@ -196,25 +209,23 @@ gs_tag_pid() {
         if [ "$wgame" = "$appid" ]; then
             seen[$xid]=tagged
             echo "known $xid \"$wn\" (already STEAM_GAME=$appid)"
+            gs_tag_pid_note "$wn" known
         else
             xprop -id "$xid" -f STEAM_GAME 32c -set STEAM_GAME "$appid" 2>/dev/null || return 0
             seen[$xid]=tagged
             echo "tagged $xid \"$wn\" STEAM_GAME=$appid (t+$((SECONDS - start))s)"
+            gs_tag_pid_note "$wn" tagged
         fi
-        tagged=$((tagged + 1))
-        # shellcheck disable=SC2254  # a glob is what --done-name takes
-        case "$wn" in $done_glob) [ -n "$done_glob" ] && finished=1 ;; esac
-        [ "$expect" -gt 0 ] && [ "$tagged" -ge "$expect" ] && finished=1
         return 0
     }
 
     while :; do
         if ! kill -0 "$pid" 2>/dev/null; then
-            if [ "$tagged" -eq 0 ]; then
+            if [ $((tagged + known)) -eq 0 ]; then
                 echo "gs_tag_pid: pid $pid exited before any window of it appeared" >&2
                 return 1
             fi
-            echo "gs_tag_pid: pid $pid exited; $tagged window(s) had been tagged"
+            echo "gs_tag_pid: pid $pid exited; $tagged window(s) had been tagged, $known already tagged"
             return 0
         fi
         cands=()
@@ -238,22 +249,20 @@ gs_tag_pid() {
             name_done[$wname]=1
             if [ "$(gs_props_field "$props" game)" = "$appid" ]; then
                 echo "known '$wname' (already STEAM_GAME=$appid)"
+                gs_tag_pid_note "$wname" known
             else
                 xprop -name "$wname" -f STEAM_GAME 32c -set STEAM_GAME "$appid" 2>/dev/null || continue
                 echo "tagged '$wname' STEAM_GAME=$appid (t+$((SECONDS - start))s)"
+                gs_tag_pid_note "$wname" tagged
             fi
-            tagged=$((tagged + 1))
-            # shellcheck disable=SC2254
-            case "$wname" in $done_glob) [ -n "$done_glob" ] && finished=1 ;; esac
-            [ "$expect" -gt 0 ] && [ "$tagged" -ge "$expect" ] && finished=1
         done
         [ -n "$finished" ] && return 0
         if [ $((SECONDS - start)) -ge "$timeout" ]; then
-            if [ "$tagged" -eq 0 ]; then
+            if [ $((tagged + known)) -eq 0 ]; then
                 echo "gs_tag_pid: no window of pid $pid appeared within ${timeout}s; nothing tagged" >&2
                 return 1
             fi
-            echo "gs_tag_pid: watch ended after ${timeout}s; $tagged window(s) tagged"
+            echo "gs_tag_pid: watch ended after ${timeout}s; $tagged window(s) tagged, $known already tagged"
             return 0
         fi
         sleep "$poll"
