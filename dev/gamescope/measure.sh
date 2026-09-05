@@ -62,8 +62,8 @@ if command -v modetest >/dev/null 2>&1; then
     MODETEST_OUT="$(timeout 10 modetest -M amdgpu -c -e -p 2>/dev/null || true)"
 fi
 # modetest lists EVERY object: each connector's props, then each CRTC's. On a
-# box with two outputs (htpc-1 has two HDMI outs) an unscoped scan reports
-# whichever comes first, so every read is scoped to one object block: a
+# box with two outputs an unscoped scan reports whichever comes first, so
+# every read is scoped to one object block: a
 # "Connectors:" / "CRTCs:" section, then the object row whose column <col>
 # equals <key> ("402  401  connected  HDMI-A-1 ..." / "376  1338  (0,0)
 # (3840x2160)"). An empty key means the whole section, which the verdicts then
