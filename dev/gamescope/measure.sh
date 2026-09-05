@@ -5,6 +5,15 @@
 # Run on the box while the prototype session is up. DRM connector properties are
 # readable by any user; the debugfs bit-depth file needs root, so run with sudo
 # for the full picture:   sudo dev/gamescope/measure.sh
+# Under sudo the gamescope-side reads (gamescopectl, xprop) are run as the
+# session user (SUDO_USER, else the owner of the env file): root cannot open
+# gamescope's Xwayland display or its Wayland socket.
+#
+# Bit depth: amdgpu's debugfs output_bpc prints a "Current:" line only when it
+# can resolve the connector's active stream; on some kernels it prints just
+# "Maximum:", and then NOTHING on the box reports the negotiated link depth
+# (the connector's "max bpc" property is the cap the compositor requested, not
+# what was negotiated). The verdict says so instead of guessing.
 #
 # Reads are scoped to ONE connector (first connected + enabled, or
 # TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1 to pick) and the CRTC driving it.
@@ -47,12 +56,17 @@ BPC_FILE=""
 for d in /sys/kernel/debug/dri/*/"$CONN_NAME"/output_bpc; do
     [ -r "$d" ] && BPC_FILE="$d" && break
 done
+CUR_BPC=""
+DEBUGFS_MAX_BPC=""
 if [ -n "$BPC_FILE" ]; then
     echo "$BPC_FILE:"; sed 's/^/  /' "$BPC_FILE"
     CUR_BPC="$(sed -n 's/^Current: *\([0-9]*\).*/\1/p' "$BPC_FILE")"
+    DEBUGFS_MAX_BPC="$(sed -n 's/^Maximum: *\([0-9]*\).*/\1/p' "$BPC_FILE")"
+    [ -n "$CUR_BPC" ] || echo "  (no Current: line: this kernel does not expose the negotiated link depth)"
+elif [ "$(id -u)" = "0" ]; then
+    echo "output_bpc: no readable debugfs file for $CONN_NAME"
 else
-    echo "output_bpc: not readable (run with sudo)"
-    CUR_BPC=""
+    echo "output_bpc: not readable (debugfs needs root; run with sudo)"
 fi
 
 # --- DRM properties via modetest ---------------------------------------------
@@ -124,38 +138,80 @@ echo "active CRTC mode:         ${CUR_MODE:-?}"
 
 # --- gamescope's own view ----------------------------------------------------
 section "gamescope"
+HDR_FEEDBACK=""
+SUPPORTS_HDR=""
 if [ -r "$ENV_FILE" ]; then
+    # Source the env file BEFORE any gamescope-side read: DISPLAY, the Wayland
+    # socket and XDG_RUNTIME_DIR all come from it.
     # shellcheck source=/dev/null
     . "$ENV_FILE"
+    # Under sudo, run every gamescope-side read as the session user: root
+    # cannot open gamescope's Xwayland display (XAUTHORITY is empty in the
+    # env file, the server only admits its own uid) nor its Wayland socket.
+    RUN_AS_USER=""
+    if [ "$(id -u)" = "0" ]; then
+        RUN_AS_USER="${SUDO_USER:-$(stat -c %U "$ENV_FILE" 2>/dev/null)}"
+        [ "$RUN_AS_USER" != "root" ] || RUN_AS_USER=""
+    fi
+    as_user() { # as_user <cmd...>: as the session user when root; 5 s cap
+        if [ -n "$RUN_AS_USER" ]; then
+            timeout 5 sudo -u "$RUN_AS_USER" env "DISPLAY=${DISPLAY:-}" "XAUTHORITY=${XAUTHORITY:-}" \
+                "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}" \
+                "GAMESCOPE_WAYLAND_DISPLAY=${GAMESCOPE_WAYLAND_DISPLAY:-}" "$@"
+        else
+            timeout 5 "$@"
+        fi
+    }
+    [ -z "$RUN_AS_USER" ] || echo "(gamescope-side reads run as $RUN_AS_USER)"
     if command -v gamescopectl >/dev/null 2>&1; then
-        RUN_AS=""
-        if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then RUN_AS="sudo -u $SUDO_USER env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR GAMESCOPE_WAYLAND_DISPLAY=$GAMESCOPE_WAYLAND_DISPLAY"; fi
-        for cmd in backend_info focus_info; do
-            echo "-- gamescopectl $cmd"
-            # shellcheck disable=SC2086 # RUN_AS is intentionally word-split
-            timeout 5 $RUN_AS gamescopectl "$cmd" 2>&1 | sed 's/^/  /' | head -40
-        done
+        # Bare gamescopectl prints the display gamescope drives (connector,
+        # make/model, valid refresh rates); `help` lists the commands and
+        # convars this build actually has, so a missing one is visible here
+        # rather than guessed at (focus_info does not exist in 3.16.x).
+        echo "-- gamescopectl"
+        as_user gamescopectl 2>&1 | sed 's/^/  /' | head -40
+        echo "-- gamescopectl backend_info"
+        as_user gamescopectl backend_info 2>&1 | sed 's/^/  /' | head -40
+        echo "-- gamescopectl help (available commands and convars)"
+        as_user gamescopectl help 2>&1 | sed 's/^/  /'
     fi
     if [ -n "${DISPLAY:-}" ] && command -v xprop >/dev/null 2>&1; then
-        echo "-- focus atoms"
-        xprop -root GAMESCOPE_FOCUSED_APP GAMESCOPE_FOCUSED_WINDOW GAMESCOPE_FOCUSABLE_APPS 2>&1 | sed 's/^/  /'
+        echo "-- focus + feedback atoms"
+        ATOMS="$(as_user xprop -root GAMESCOPE_FOCUSED_APP GAMESCOPE_FOCUSED_WINDOW GAMESCOPE_FOCUSABLE_APPS \
+            GAMESCOPE_HDR_OUTPUT_FEEDBACK GAMESCOPE_DISPLAY_SUPPORTS_HDR \
+            GAMESCOPE_VRR_FEEDBACK GAMESCOPE_VRR_ENABLED 2>&1)"
+        printf '%s\n' "$ATOMS" | sed 's/^/  /'
+        # "NAME(CARDINAL) = 1" -> "1"; a "not found." line yields nothing.
+        atom() { printf '%s\n' "$ATOMS" | sed -n "s/^$1(CARDINAL) = *\([0-9]*\).*/\1/p" | head -1; }
+        HDR_FEEDBACK="$(atom GAMESCOPE_HDR_OUTPUT_FEEDBACK)"
+        SUPPORTS_HDR="$(atom GAMESCOPE_DISPLAY_SUPPORTS_HDR)"
     fi
 else
     echo "$ENV_FILE missing: prototype session not running (or client.sh never started)"
 fi
-if [ -r "$STATS" ]; then
-    echo "-- stats tail ($STATS)"
-    tail -n 8 "$STATS" | sed 's/^/  /'
+if [ -p "$STATS" ]; then
+    # A FIFO: reading it takes the stream over from any other reader for the
+    # sample window, and a plain tail would never see EOF.
+    echo "-- stats sample ($STATS, 4 s; empty until gamescope attaches to a reader)"
+    timeout 4 head -n 6 "$STATS" 2>/dev/null | sed 's/^/  /'
+elif [ -e "$STATS" ]; then
+    echo "-- $STATS exists but is not a FIFO; session.sh predates the mkfifo fix?"
 fi
 
 # --- verdicts ----------------------------------------------------------------
 section "verdicts"
+# What IS known: debugfs Maximum (the sink's ceiling) and the connector's
+# "max bpc" property (the cap the compositor requested). Neither is the
+# negotiated link depth; only a "Current:" line is.
+BPC_KNOWN="debugfs Maximum: ${DEBUGFS_MAX_BPC:-n/a}; max bpc property = ${MAX_BPC:-n/a} (requested cap, not negotiated depth)"
 if [ -n "$CUR_BPC" ]; then
-    if [ "$CUR_BPC" -ge 10 ]; then pass "output bit depth" "Current: $CUR_BPC bpc"; else fail "output bit depth" "Current: $CUR_BPC bpc (need >= 10; gamescope never sets max bpc, see ValveSoftware/gamescope#2075)"; fi
-elif [ -n "$MAX_BPC" ]; then
-    if [ "$MAX_BPC" -ge 10 ]; then unknown "output bit depth" "max bpc property = $MAX_BPC but debugfs Current unreadable; re-run with sudo"; else fail "output bit depth" "max bpc property = $MAX_BPC"; fi
+    if [ "$CUR_BPC" -ge 10 ]; then pass "output bit depth" "Current: $CUR_BPC bpc ($BPC_KNOWN)"; else fail "output bit depth" "Current: $CUR_BPC bpc (need >= 10; gamescope never sets max bpc, see ValveSoftware/gamescope#2075)"; fi
+elif [ -n "$MAX_BPC" ] && [ "$MAX_BPC" -lt 10 ]; then
+    fail "output bit depth" "max bpc property = $MAX_BPC caps the link below 10"
+elif [ -z "$BPC_FILE" ] && [ "$(id -u)" != "0" ]; then
+    unknown "output bit depth" "$BPC_KNOWN; debugfs needs root, re-run with sudo"
 else
-    unknown "output bit depth" "no modetest or debugfs data"
+    unknown "output bit depth" "$BPC_KNOWN; this kernel does not expose the negotiated link depth; judge by the TV's info panel"
 fi
 
 case "${COLORSPACE_NAME:-}" in
@@ -185,14 +241,26 @@ case "${VRR_PROP:-}" in
     *) unknown "VRR" "no VRR_ENABLED property read" ;;
 esac
 
+# Criterion 8's signal. The WSI layer only offers HDR swapchains to a client
+# when GAMESCOPE_HDR_OUTPUT_FEEDBACK is 1 on the X11 root (the Wayland path is
+# hardcoded off upstream), so a PQ/BT2020 connector with this atom at 0 still
+# means every client, Moonlight included, gets SDR.
+case "${HDR_FEEDBACK:-}:${SUPPORTS_HDR:-}" in
+    1:*) pass "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=1" ;;
+    0:1) fail "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=0 while GAMESCOPE_DISPLAY_SUPPORTS_HDR=1: gamescope drives the display in HDR but offers clients SDR only" ;;
+    0:*) unknown "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=0 and GAMESCOPE_DISPLAY_SUPPORTS_HDR=${SUPPORTS_HDR:-unset}: display not reported HDR-capable" ;;
+    *) unknown "HDR to clients" "feedback atoms not read (no session, no xprop, or root without a session user)" ;;
+esac
+
 cat <<'EOF'
 
-Not measurable by script; judge on the TV and in the stats file:
-  - composite cost: with a single HDR client, does the stats file show a steady frame
+Not measurable by script; judge on the TV and in the stats FIFO:
+  - composite cost: with a single HDR client, does the stats FIFO show a steady frame
     time at the refresh, or does it sit at 2x? (gamescope composites in Vulkan whenever
     it cannot direct-scanout; this kernel lacks CONFIG_AMD_PRIVATE_COLOR)
   - SDR black floor: the black end of the strip at the top of the prototype shell should
     be as black as the letterbox around a 16:9 HDR film, not grey
   - overlay: launch.sh overlay, then confirm the app underneath keeps animating
   - focus: launch.sh xmessage / focus.sh app 9001 should switch instantly, every time
+  - bit depth when the kernel hides it: the TV's own info panel is the only reading
 EOF
