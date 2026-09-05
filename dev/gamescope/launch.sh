@@ -23,6 +23,19 @@
 #                                     "hdr formats exposed to client: false")
 #   launch.sh moonlight --wayland [args...]  the native-Wayland (xdg-shell) experiment;
 #                                     no focus selector, and Moonlight-qt 6.1 crashed here
+#   launch.sh steam [--gamepadui] [--watch-baselayer] [args...]
+#                                     the full Steam client on X11 (`steam -bigpicture`;
+#                                     --gamepadui runs `steam -gamepadui`). Every window of
+#                                     the Steam FAMILY (steam, steamwebhelper, and the
+#                                     streaming_client a Remote Play stream spawns) is
+#                                     tagged STEAM_GAME=9004 as it appears, for up to
+#                                     TV_SHELL_GS_STEAM_WATCH_SECS (600) s in a detached
+#                                     watcher; a window Steam tagged itself is left alone.
+#                                     Base list 9004,769,9001. --watch-baselayer also logs
+#                                     every change of GAMESCOPECTRL_BASELAYER_APPID.
+#   launch.sh steamlink [args...]     the standalone Steam Link client (flatpak
+#                                     com.valvesoftware.SteamLink, else `steamlink`),
+#                                     tagged STEAM_GAME=9005 the same way
 #   launch.sh xmessage <text>         the simplest possible X11 window
 set -u
 
@@ -333,6 +346,78 @@ case "${1:-}" in
         "$KIT/focus.sh" list 2>/dev/null | grep -E 'FOCUSABLE_APPS|FOCUSED_APP'
         exit $rc
         ;;
+    steam|steamlink)
+        VERB="$1"; shift
+        # Steam Remote Play is a peer of Moonlight here, not a variant of it:
+        # both must stay independently testable (criterion 10). Steam is a
+        # process FAMILY (launcher script -> client -> steamwebhelper, plus the
+        # separate streaming_client a Remote Play stream spawns), each with
+        # its own X connection, so tagging follows the pid tree AND the
+        # WM_CLASS set; a window Steam tagged itself (769, or the streamed
+        # app's id) is left alone and reported, because whether the client
+        # rewrites GAMESCOPECTRL_BASELAYER_APPID on its own is one of the
+        # things this measures. The stream itself is started by hand on the
+        # pad, so the watcher runs detached for TV_SHELL_GS_STEAM_WATCH_SECS.
+        export QT_QPA_PLATFORM=xcb
+        export SDL_VIDEODRIVER=x11
+        export ENABLE_GAMESCOPE_WSI=1
+        WATCH_SECS="${TV_SHELL_GS_STEAM_WATCH_SECS:-600}"
+        WATCH_BL=""
+        MODE=-bigpicture
+        while :; do
+            case "${1:-}" in
+                --gamepadui) MODE=-gamepadui; shift ;;
+                --watch-baselayer) WATCH_BL=1; shift ;;
+                *) break ;;
+            esac
+        done
+        if [ "$VERB" = steam ]; then
+            APPID=9004
+            BASE_LIST="9004,769,$SHELL_APPID"
+            CLASSES=(--class steam --class steamwebhelper --class streaming_client)
+            NAMES=(--name Steam --name "Steam Big Picture Mode")
+            STEAM_BIN="${TV_SHELL_GS_STEAM:-steam}"
+            command -v "$STEAM_BIN" >/dev/null 2>&1 || { echo "launch.sh steam: '$STEAM_BIN' not installed (set TV_SHELL_GS_STEAM)" >&2; exit 2; }
+            CMD=("$STEAM_BIN" "$MODE" "$@")
+        else
+            APPID=9005
+            BASE_LIST="9005,$SHELL_APPID"
+            CLASSES=(--class steamlink --class streaming_client)
+            NAMES=(--name "Steam Link")
+            if [ -n "${TV_SHELL_GS_STEAMLINK:-}" ]; then
+                CMD=("$TV_SHELL_GS_STEAMLINK" "$@")
+            elif command -v flatpak >/dev/null 2>&1 && flatpak info com.valvesoftware.SteamLink >/dev/null 2>&1; then
+                CMD=(flatpak run com.valvesoftware.SteamLink "$@")
+            elif command -v steamlink >/dev/null 2>&1; then
+                CMD=(steamlink "$@")
+            else
+                echo "launch.sh steamlink: Steam Link is not installed (flatpak com.valvesoftware.SteamLink, or a 'steamlink' on PATH, or TV_SHELL_GS_STEAMLINK=<path>)" >&2
+                exit 2
+            fi
+        fi
+        nohup "${CMD[@]}" > "$LOG_DIR/$VERB.log" 2>&1 &
+        PID=$!
+        echo "$VERB pid $PID: ${CMD[*]} (log $LOG_DIR/$VERB.log)"
+        "$KIT/focus.sh" app "$BASE_LIST"
+        echo "base layer preference $BASE_LIST set; waiting for the first window of the family"
+        gs_tag_pid "$PID" "$APPID" --family --keep-existing --timeout 60 --expect 1 \
+            --log "$LOG_DIR/$VERB.log" "${CLASSES[@]}" "${NAMES[@]}"
+        rc=$?
+        "$KIT/focus.sh" list 2>/dev/null | grep -E 'FOCUSABLE_APPS|FOCUSED_APP|BASELAYER_APPID'
+        # keep tagging new family windows (the Remote Play window comes when
+        # the operator starts a stream on the pad) without holding the SSH
+        # session; one watcher per verb, the previous one is replaced.
+        pkill -f "focus.sh tag-pid .* $APPID --family" 2>/dev/null || true
+        nohup "$KIT/focus.sh" tag-pid "$PID" "$APPID" --family --keep-existing --timeout "$WATCH_SECS" \
+            --log "$LOG_DIR/$VERB.log" "${CLASSES[@]}" "${NAMES[@]}" > "$LOG_DIR/$VERB-tag.log" 2>&1 &
+        echo "watching the $VERB family for new windows for ${WATCH_SECS}s: tail -f $LOG_DIR/$VERB-tag.log"
+        if [ -n "$WATCH_BL" ]; then
+            pkill -f "focus.sh watch-baselayer" 2>/dev/null || true
+            nohup "$KIT/focus.sh" watch-baselayer "$WATCH_SECS" > "$LOG_DIR/$VERB-baselayer.log" 2>&1 &
+            echo "logging GAMESCOPECTRL_BASELAYER_APPID changes for ${WATCH_SECS}s: tail -f $LOG_DIR/$VERB-baselayer.log"
+        fi
+        exit $rc
+        ;;
     xmessage)
         shift
         nohup xmessage -center "${*:-hello from gamescope}" > "$LOG_DIR/xmessage.log" 2>&1 &
@@ -342,7 +427,7 @@ case "${1:-}" in
         tag_pid_then_base "$PID" 9002 --timeout 10 --expect 1 --name xmessage --class xmessage
         ;;
     *)
-        sed -n '2,26p' "$0"
+        sed -n '2,39p' "$0"
         exit 2
         ;;
 esac

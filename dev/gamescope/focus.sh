@@ -8,10 +8,15 @@
 #   focus.sh tag-pid <pid> <id> [opts]
 #                                 set STEAM_GAME=<id> on EVERY window of <pid>, and keep
 #                                 watching for new ones (default 60 s; see lib.sh
-#                                 gs_tag_pid for --timeout/--class/--log/--name/
-#                                 --expect/--done-name). This is what a multi-window
-#                                 client such as Moonlight needs: its stream window
-#                                 is not the window named "Moonlight"
+#                                 gs_tag_pid for --timeout/--class/--family/
+#                                 --keep-existing/--log/--name/--expect/--done-name).
+#                                 This is what a multi-window client such as Moonlight
+#                                 needs: its stream window is not the window named
+#                                 "Moonlight"; --family --class covers a process
+#                                 family such as Steam + streaming_client
+#   focus.sh watch-baselayer [secs]
+#                                 log every change of GAMESCOPECTRL_BASELAYER_APPID and
+#                                 GAMESCOPE_FOCUSED_APP with a timestamp (default 600 s)
 #   focus.sh app <id>[,<id>...]   base layer = first running app in this priority list
 #   focus.sh window <xid>         base layer = this exact X window
 #   focus.sh clear                remove the base-layer overrides
@@ -33,7 +38,7 @@ if [ -z "${DISPLAY:-}" ]; then
 fi
 command -v xprop >/dev/null 2>&1 || { echo "focus.sh: xprop not installed (xorg-xprop)" >&2; exit 2; }
 
-usage() { sed -n '2,19p' "$0"; exit 2; }
+usage() { sed -n '2,24p' "$0"; exit 2; }
 
 case "${1:-}" in
     list)
@@ -49,6 +54,9 @@ case "${1:-}" in
         [ $# -ge 3 ] || usage
         PID="$2"; APPID="$3"; shift 3
         gs_tag_pid "$PID" "$APPID" "$@"
+        ;;
+    watch-baselayer)
+        gs_watch_baselayer "${2:-600}"
         ;;
     app)
         [ $# -eq 2 ] || usage

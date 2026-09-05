@@ -32,9 +32,32 @@ decisive, hence this kit.
 | 7 | Gamepad reaches the shell | press D-pad | `last key` counter climbs in the prototype shell (daemon uinput path works under gamescope) |
 | 8 | Moonlight HDR via the WSI layer | `sudo measure.sh` (`HDR to clients`), then `launch.sh moonlight` | `GAMESCOPE_HDR_OUTPUT_FEEDBACK` is 1; stream is HDR on the TV, no fallback to SDR tonemap |
 | 9 | Qt on gamescope is usable | eyes | prototype shell renders at full size, no decorations, keyboard focus YES |
+| 10 | Steam Remote Play under gamescope | `launch.sh steam --watch-baselayer`, start a stream on the pad, stats FIFO + eyes | the stream is shown (its window tagged, `GAMESCOPE_FOCUSED_APP` on it); HDR or SDR recorded either way (see the risks below); 120 fps in the FIFO; no base-layer fight (the `steam-baselayer.log` shows the kit's list and Steam's own writes agreeing, or Steam's write winning once and staying put, never flapping); the pad reaches the game |
 
 Decision rule agreed 2026-09-04: if 1 or 3 fails, gamescope is out for v2 and the
 Hyprland-plugin path is next; Smithay stays the v3 target on HDR grounds.
+
+**Streaming clients are peers.** Moonlight (criteria 3 and 8) and Steam Remote Play
+(criterion 10) are two first-class, independently testable clients of the prototype, not
+one path with a fallback. Each has its own `launch.sh` verb, app id (9003 / 9004, Steam Link
+9005), log, and tagging rule, and a change to one must leave the other runnable: a Steam
+finding never retires the Moonlight test, and vice versa.
+
+Criterion 10 carries two known risks, both from the SteamOS 3.9 session
+(`~/tv-shell-v2-research/steamos-39-gamescope-shell.md`, §focus and §Remote Play):
+the SteamOS session exports `GAMESCOPE_DISPLAY_DISABLED=1` for `streaming_client` ("disable
+gamescope path in streaming_client until buffer frozen issues are understood better"), so
+Valve itself presents the Remote Play client through plain Xwayland rather than the
+gamescope-direct path, and gamescope issue #2196 (Remote Play under `--steam` flickers,
+input routes unpredictably, 3.16.23) is still open; and the full Steam client writes
+`GAMESCOPECTRL_BASELAYER_APPID` itself when it starts or ends a stream (that is how SteamOS
+switches between Steam and a game), so it may overwrite the kit's own list; a first
+unscripted run of the full client under this prototype (2026-09-05) saw exactly that: Steam
+detected gamescope, tagged its own windows 769, and rewrote `GAMESCOPECTRL_BASELAYER_APPID`
+within about ten seconds. That is why the kit's Steam list carries 769 and never re-tags a
+window Steam tagged itself, and why `--watch-baselayer` exists. The kit does not
+set `GAMESCOPE_DISPLAY_DISABLED`; if the stream freezes or flickers, re-run with
+`GAMESCOPE_DISPLAY_DISABLED=1 launch.sh steam` and record which one it was.
 
 ## Install and select
 
@@ -60,11 +83,11 @@ for the week. The default boot session is untouched; log out (or set it back) to
 |---|---|
 | `session.sh` | The session. Starts `tv-shell-input.service`, creates the stats FIFO, execs gamescope with `--steam --expose-wayland --keep-alive -W/-H/-r --hdr-enabled --adaptive-sync`, logs to journal tag `tv-shell-gamescope` |
 | `client.sh` | gamescope's primary child. Runs `proto-shell.qml` on X11 with a Qt 6 runtime, tags it `STEAM_GAME=9001`, makes it the base layer, writes `/tmp/tv-shell-gamescope.env` for the SSH-side tools, relaunches it on exit (with backoff once it crash-loops) |
-| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides) and `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below) |
+| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides), `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below; `--family` follows the pid tree, `--class` repeats, `--keep-existing` never overwrites a tag the client set itself), and `gs_watch_baselayer`, the base-layer atom logger |
 | `proto-shell.qml` | The prototype shell: shows window size, keyboard focus, last key, a moving dot, and a black-to-white strip |
 | `proto-overlay.qml` | Overlay test client, semi-transparent side panel |
-| `focus.sh` | `list` / `tag` / `tag-pid` / `app` / `window` / `clear` over gamescope's root X11 atoms. `tag-pid <pid> <id>` tags every window of a pid as it appears (`--timeout`, `--class`, `--log`, `--name`, `--expect`, `--done-name`) |
-| `launch.sh` | `overlay` / `x11` / `apps <host>` / `moonlight [--quit]` (X11, every window of its pid tagged `STEAM_GAME=9003`; `--wayland` for the xdg-shell experiment) / `xmessage` into the running session from SSH |
+| `focus.sh` | `list` / `tag` / `tag-pid` / `watch-baselayer` / `app` / `window` / `clear` over gamescope's root X11 atoms. `tag-pid <pid> <id>` tags every window of a pid as it appears (`--timeout`, `--class`, `--family`, `--keep-existing`, `--log`, `--name`, `--expect`, `--done-name`); `watch-baselayer [secs]` logs every change of `GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp |
+| `launch.sh` | `overlay` / `x11` / `apps <host>` / `moonlight [--quit]` (X11, every window of its pid tagged `STEAM_GAME=9003`; `--wayland` for the xdg-shell experiment) / `steam [--gamepadui] [--watch-baselayer]` (the full Steam client, its whole process family tagged `STEAM_GAME=9004` as windows appear, for 10 min in a detached watcher) / `steamlink` (the standalone Steam Link client, `STEAM_GAME=9005`) / `xmessage` into the running session from SSH |
 | `measure.sh` | Reads DRM connector properties, debugfs bit depth, the active mode, gamescope's own info (`gamescopectl`, `backend_info`, `help`) and the root feedback atoms, and prints verdicts. Every DRM read is scoped to one connector (the first connected + enabled one, or `TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1` to choose on a two-output box) and to the CRTC driving it. Under `sudo` the gamescope-side reads run as the session user |
 
 ## Running a measurement
@@ -80,6 +103,11 @@ ssh box '/opt/tv-shell/dev/gamescope/launch.sh apps <host>'     # what the strea
 ssh box "/opt/tv-shell/dev/gamescope/launch.sh moonlight stream <host> ' Steam Big Picture' \
     --resolution 3840x2160 --fps 120 --hdr --display-mode fullscreen"   # criteria 3, 8
 ssh box 'cat /tmp/tv-shell-gamescope-stats'                     # criterion 3 (a FIFO, see below)
+ssh box '/opt/tv-shell/dev/gamescope/launch.sh steam --watch-baselayer'   # criterion 10: then start a
+                                                                #   Remote Play stream on the pad
+ssh box 'tail -f /tmp/tv-shell-gamescope-clients/steam-tag.log'          #   windows tagged as they appear
+ssh box 'tail -f /tmp/tv-shell-gamescope-clients/steam-baselayer.log'    #   who writes the base layer
+ssh box '/opt/tv-shell/dev/gamescope/launch.sh steamlink'       # criterion 10 with the standalone client
 ```
 
 First check the journal (`journalctl -t tv-shell-gamescope -b`) for the line
@@ -168,6 +196,29 @@ apps <host>` prints the host's state, the running app, and every cached name in 
 (`'  Desktop'`, with `<- running now` on the current one), plus the live `moonlight list
 <host>` output the same way, so the exact string can be copied.
 
+`launch.sh steam` runs the full Steam client on X11 (`steam -bigpicture`; `--gamepadui`
+for `steam -gamepadui`), sets the base-layer preference `9004,769,9001` first, waits for the
+first window of the family, prints the focus atoms, and then leaves a detached watcher
+running for `TV_SHELL_GS_STEAM_WATCH_SECS` (600) s (`steam-tag.log`) because the Remote
+Play stream is started by hand on the pad. Steam is a process **family**, not one pid:
+the launcher script, the client, `steamwebhelper`, and the separate `streaming_client`
+that a stream spawns, each with its own X connection and windows. The watcher therefore
+follows the pid tree (`--family`, re-read every poll, and the watch outlives a launcher
+that exits) and the `WM_CLASS` set `steam` / `steamwebhelper` / `streaming_client`, and
+gamescope itself lists the Remote Play window in `GAMESCOPE_FOCUSABLE_WINDOWS` even
+untagged (`STEAM_STREAMING_CLIENT=1` makes it a focus candidate under `--steam`), which is
+one of the candidate sources. Two Steam-specific rules: a window the client tagged itself
+(`STEAM_GAME=769` for Steam, or the streamed app's id) is reported and **left alone**
+(`--keep-existing`), never overwritten, and 769 sits in the base list so those windows are
+selectable either way; and `--watch-baselayer` logs every change of
+`GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp
+(`steam-baselayer.log`, `focus.sh watch-baselayer` by hand), because the full client writes
+that atom itself when it starts a stream (the SteamOS mechanism) and whether it fights the
+kit's list is a thing to record, not assume. `launch.sh steamlink` does the same for the
+standalone Steam Link client (`flatpak run com.valvesoftware.SteamLink` when installed,
+else a `steamlink` on `PATH`, else a clear "not installed"), app id 9005, base list
+`9005,9001`.
+
 X11 is the path that survives here, and the **only** HDR path: gamescope's WSI layer
 hardcodes `hdrOutput = false` for native-Wayland surfaces (3.16.23
 `layer/VkLayer_FROG_gamescope_wsi.cpp:758`, master `:834`) and gamescope's own Wayland
@@ -245,6 +296,11 @@ shell over it; the busy-host refusal exited 3 within a second naming the running
 `launch.sh apps` showed the leading space in the quoted names.
 
 ## Known gaps, on purpose
+
+- Criterion 10 is **untested** as of this version: the Steam verbs were written against the
+  SteamOS 3.9 session notes and gamescope's source, and exercised only in the fixture
+  (a fake process family + fake `xprop`). Whether the client's own base-layer writes and
+  `GAMESCOPE_DISPLAY_DISABLED` matter on this box is what the first Steam run measures.
 
 - The prototype shell launches nothing. Everything is driven from SSH, because the point
   is to measure the compositor, not to port the shell.
