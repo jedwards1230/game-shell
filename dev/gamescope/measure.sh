@@ -146,8 +146,9 @@ if [ -r "$ENV_FILE" ]; then
     # shellcheck source=/dev/null
     . "$ENV_FILE"
     # Under sudo, run every gamescope-side read as the session user: root
-    # cannot open gamescope's Xwayland display (XAUTHORITY is empty in the
-    # env file, the server only admits its own uid) nor its Wayland socket.
+    # cannot open gamescope's Xwayland display (XAUTHORITY in the env file
+    # may be unset or empty, gamescope's Xwayland runs without an auth file
+    # and admits only its own uid) nor its Wayland socket.
     RUN_AS_USER=""
     if [ "$(id -u)" = "0" ]; then
         RUN_AS_USER="${SUDO_USER:-$(stat -c %U "$ENV_FILE" 2>/dev/null)}"
@@ -168,6 +169,15 @@ if [ -r "$ENV_FILE" ]; then
         # make/model, valid refresh rates); `help` lists the commands and
         # convars this build actually has, so a missing one is visible here
         # rather than guessed at (focus_info does not exist in 3.16.x).
+        #
+        # RULE: never run `gamescopectl <convar>` with no value. On 3.16.x and
+        # master that is not a read, it RESETS the convar to its type default
+        # (wlserver passes two args; Parse<bool>("") is false), so
+        # `gamescopectl hdr_enabled` silently turns HDR OFF. Only COMMANDS
+        # (bare gamescopectl, help, backend_info) are run here. Convar state is
+        # READ from the root atoms below (GAMESCOPE_DISPLAY_HDR_ENABLED,
+        # GAMESCOPE_HDR_OUTPUT_FEEDBACK, ...) and SET only with an explicit
+        # value: `gamescopectl hdr_enabled 1`.
         echo "-- gamescopectl"
         as_user gamescopectl 2>&1 | sed 's/^/  /' | head -40
         echo "-- gamescopectl backend_info"
@@ -177,8 +187,11 @@ if [ -r "$ENV_FILE" ]; then
     fi
     if [ -n "${DISPLAY:-}" ] && command -v xprop >/dev/null 2>&1; then
         echo "-- focus + feedback atoms"
+        # GAMESCOPE_DISPLAY_HDR_ENABLED is the hdr_enabled toggle as Steam sets
+        # it (absent = never toggled through the atom); the FEEDBACK atom is
+        # (EDID HDR10 && hdr_enabled), written before any client presents.
         ATOMS="$(as_user xprop -root GAMESCOPE_FOCUSED_APP GAMESCOPE_FOCUSED_WINDOW GAMESCOPE_FOCUSABLE_APPS \
-            GAMESCOPE_HDR_OUTPUT_FEEDBACK GAMESCOPE_DISPLAY_SUPPORTS_HDR \
+            GAMESCOPE_DISPLAY_HDR_ENABLED GAMESCOPE_HDR_OUTPUT_FEEDBACK GAMESCOPE_DISPLAY_SUPPORTS_HDR \
             GAMESCOPE_VRR_FEEDBACK GAMESCOPE_VRR_ENABLED 2>&1)"
         printf '%s\n' "$ATOMS" | sed 's/^/  /'
         # "NAME(CARDINAL) = 1" -> "1"; a "not found." line yields nothing.
@@ -247,7 +260,8 @@ esac
 # means every client, Moonlight included, gets SDR.
 case "${HDR_FEEDBACK:-}:${SUPPORTS_HDR:-}" in
     1:*) pass "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=1" ;;
-    0:1) fail "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=0 while GAMESCOPE_DISPLAY_SUPPORTS_HDR=1: gamescope drives the display in HDR but offers clients SDR only" ;;
+    0:1) fail "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=0 while GAMESCOPE_DISPLAY_SUPPORTS_HDR=1: the display is HDR-capable but hdr_enabled is off (a bare 'gamescopectl hdr_enabled' resets it)"
+         echo "         recovery: gamescopectl hdr_enabled 1   (then re-run; never query a convar without a value)" ;;
     0:*) unknown "HDR to clients" "GAMESCOPE_HDR_OUTPUT_FEEDBACK=0 and GAMESCOPE_DISPLAY_SUPPORTS_HDR=${SUPPORTS_HDR:-unset}: display not reported HDR-capable" ;;
     *) unknown "HDR to clients" "feedback atoms not read (no session, no xprop, or root without a session user)" ;;
 esac

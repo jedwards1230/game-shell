@@ -7,7 +7,10 @@
 #   launch.sh x11 <id> [cmd...]       any X11 app; window is tagged STEAM_GAME=<id> by
 #                                     WM_NAME once you pass --name <wm-name> (see below)
 #   launch.sh moonlight [args...]     Moonlight on X11 (xcb), tagged STEAM_GAME=9003 and
-#                                     made the base layer; HDR via gamescope WSI
+#                                     made the base layer; HDR via gamescope WSI.
+#                                     GAMESCOPE_WSI_FORCE_BYPASS=1 in the environment is
+#                                     passed through (try it when Moonlight logs
+#                                     "hdr formats exposed to client: false")
 #   launch.sh moonlight --wayland [args...]  the native-Wayland (xdg-shell) experiment;
 #                                     no focus selector, and Moonlight-qt 6.1 crashed here
 #   launch.sh xmessage <text>         the simplest possible X11 window
@@ -117,8 +120,17 @@ case "${1:-}" in
         # root for HDR, so nothing is lost versus Wayland on that front.
         export QT_QPA_PLATFORM=xcb
         export SDL_VIDEODRIVER=x11
+        # Opt-in: the WSI layer only exposes HDR10 formats when the window can
+        # bypass XWayland (matches its toplevel within 2 px). If Moonlight's
+        # log says "hdr formats exposed to client: false" while the root atom
+        # GAMESCOPE_HDR_OUTPUT_FEEDBACK is 1, force the bypass.
+        if [ -n "${GAMESCOPE_WSI_FORCE_BYPASS:-}" ]; then
+            export GAMESCOPE_WSI_FORCE_BYPASS
+            echo "GAMESCOPE_WSI_FORCE_BYPASS=$GAMESCOPE_WSI_FORCE_BYPASS (XWayland bypass forced)"
+        fi
         nohup "$MOONLIGHT_BIN" "$@" > "$LOG_DIR/moonlight.log" 2>&1 &
         echo "moonlight (xcb) pid $! (log $LOG_DIR/moonlight.log)"
+        echo "HDR signature in the log: 'server hdr output enabled: true' + 'hdr formats exposed to client: true'"
         tag_by_name Moonlight "$MOONLIGHT_APPID" && "$KIT/focus.sh" app "$MOONLIGHT_APPID,$SHELL_APPID"
         ;;
     xmessage)

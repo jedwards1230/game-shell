@@ -88,7 +88,20 @@ every DRM verdict from `measure.sh` is an artifact of "no client ever rendered".
 `measure.sh` needs `sudo` for the debugfs read, and under `sudo` runs the gamescope-side
 reads (`gamescopectl`, `xprop`) as the session user itself. Its `HDR to clients` verdict
 is criterion 8's signal: the WSI layer offers HDR swapchains only while the root atom
-`GAMESCOPE_HDR_OUTPUT_FEEDBACK` is 1, whatever the connector is doing.
+`GAMESCOPE_HDR_OUTPUT_FEEDBACK` is 1. On 3.16.x that atom is simply
+`(EDID says HDR10) && hdr_enabled`, written before any client presents, and the connector
+goes to PQ/BT2020 in the same loop iteration, so atom=1 and connector-in-HDR are one boolean.
+
+**Rule: never run `gamescopectl <convar>` without a value.** On gamescope 3.16.x and master
+a bare `gamescopectl hdr_enabled` is not a read, it **resets the convar to false** (the
+server always passes two arguments and an empty bool parses as false), turning HDR off
+for the whole session with no log line. The same holds for every convar (`vrr_enabled`,
+`composite_force`, ...). Commands are fine (`gamescopectl` bare, `help`, `backend_info`,
+which is all the kit runs). Read convar state from the root atoms instead
+(`xprop -root GAMESCOPE_DISPLAY_HDR_ENABLED GAMESCOPE_HDR_OUTPUT_FEEDBACK GAMESCOPE_DISPLAY_SUPPORTS_HDR`)
+and set one only with an explicit value. Recovery after an accidental reset:
+`gamescopectl hdr_enabled 1`, which `measure.sh` prints whenever `HDR to clients` is FAIL
+with `GAMESCOPE_DISPLAY_SUPPORTS_HDR=1`.
 
 The stats path is a **FIFO**, created by `session.sh` and removed with the session.
 gamescope only `open()`s an existing one (retrying every 10 s), so it attaches within
@@ -100,11 +113,21 @@ that window.
 `launch.sh moonlight` runs Moonlight on X11 (`QT_QPA_PLATFORM=xcb`, `SDL_VIDEODRIVER=x11`,
 `ENABLE_GAMESCOPE_WSI=1`), tags its window `STEAM_GAME=9003` and makes it the base layer
 over the shell, so `focus.sh app 9001` brings the shell back. That is the path that
-survives here: `launch.sh moonlight --wayland` keeps the native xdg-shell experiment,
-which Moonlight-qt 6.1.0 did not survive (below) and which has no focus selector. The one
-thing to compare between the two for criterion 3 is hardware decode: Moonlight warns that
-XWayland "will probably break hardware decoding", so if the X11 stream falls back to
-software decode or judders, `--wayland` is the control run.
+survives here, and the **only** HDR path: gamescope's WSI layer hardcodes `hdrOutput = false`
+for native-Wayland surfaces (3.16.23 `layer/VkLayer_FROG_gamescope_wsi.cpp:758`, master
+`:834`) and gamescope's own Wayland server offers clients no colour-management protocol, so
+a Wayland-native Moonlight can never get HDR under gamescope today. `launch.sh moonlight
+--wayland` keeps the xdg-shell experiment for decode/latency comparisons only; Moonlight-qt
+6.1.0 did not survive it (below) and it has no focus selector. The one thing to compare
+between the two for criterion 3 is hardware decode: Moonlight warns that XWayland "will
+probably break hardware decoding", so if the X11 stream falls back to software decode or
+judders, `--wayland` is the control run.
+
+The X11 layer exposes HDR10 formats only when the window can bypass XWayland (it must match
+its toplevel within 2 px). Success signature in `moonlight.log`: `server hdr output
+enabled: true` and `hdr formats exposed to client: true`. If the first is `true` and the
+second stays `false`, run `GAMESCOPE_WSI_FORCE_BYPASS=1 launch.sh moonlight` (the variable
+is passed through as-is). If the first is `false`, the root atom is 0: see the rule above.
 
 Tunables are environment variables read by `session.sh` (`TV_SHELL_GS_HDR=0` for an SDR
 control run, `TV_SHELL_GS_SDR_NITS`, `TV_SHELL_GS_EXTRA` for any other gamescope flag).
@@ -119,10 +142,10 @@ TV. The base layer was the kit's own prototype shell (SDR, X11). Verdicts:
 |---|---|---|
 | 1 | 10-bit HDR at 4K120 | PASS on what is measurable: colorspace `BT2020_RGB`, `HDR_OUTPUT_METADATA` blob with EOTF = PQ, mode `3840x2160 120.00`. **Bit depth is unmeasurable on this kernel**: debugfs `output_bpc` prints only `Maximum: 12` (no `Current:`), gamescope sets `max bpc` to 16 (a requested cap), `gamescopectl` has no output-format command and the gamescope log never states the scanout depth. Only the TV's info panel can answer it |
 | 2 | VRR engages | PASS: `VRR_ENABLED=1`, `backend_info` `VRR Active: true`, `GAMESCOPE_VRR_FEEDBACK=1`, `GAMESCOPE_DISPLAY_REFRESH_RATE_FEEDBACK=120` |
-| 3 | Lone HDR stream not double-composited | Held 120 fps in SDR: the stats stream read `fps=120.000000` (with a few `119.95`) over 45 s with the shell alone and with the overlay on top, never 60. Not yet measured with an HDR stream, since 8 blocks it |
+| 3 | Lone HDR stream not double-composited | UNTESTED with an HDR stream (8 was never reached). SDR baseline: the stats stream read `fps=120.000000` (with a few `119.95`) over 45 s with the shell alone and with the overlay on top, never 60. Re-run with an xcb Moonlight HDR stream once 8 passes |
 | 5 | Focus unrefusable + instant | PASS: 20 of 20 switches landed, 14 to 20 ms each; `GAMESCOPECTRL_BASELAYER_APPID` honoured every time |
 | 6 | Overlay over a running app | PASS (scriptable half): overlay tagged in 0.5 s, the app stayed the base window, 120 fps held, focus returned to the shell on close. "Keys go to the panel" needs a person at the TV |
-| 8 | Moonlight HDR via WSI | **FAIL**: `GAMESCOPE_HDR_OUTPUT_FEEDBACK=0` while `GAMESCOPE_DISPLAY_SUPPORTS_HDR=1` and the connector is in PQ/BT2020. Moonlight's WSI block logged `server hdr output enabled: false` and found no HDR-capable Vulkan device. Why the atom stays 0 with `--hdr-enabled` on 3.16.23 (EDID through the AVR? content-driven gating?) is the open question |
+| 8 | Moonlight HDR via WSI | **UNTESTED**: the reading `GAMESCOPE_HDR_OUTPUT_FEEDBACK=0` with `GAMESCOPE_DISPLAY_SUPPORTS_HDR=1` was self-inflicted. An ad-hoc probe ran a bare `gamescopectl hdr_enabled` at 10:24, which on this build resets `hdr_enabled` to false; every atom read and the xcb Moonlight run came after it, and the connector (last measured in PQ/BT2020 at 10:19) was never re-read. The native-Wayland run at 10:21 could not have shown HDR either (WSI layer, see above). Re-run with the rule above: xcb Moonlight, no bare convar queries, `measure.sh` `HDR to clients` PASS first |
 | 4, 7, 9 | black floor / pad / Qt usable | need a person at the TV; 9 partially yes (the Qt 6 shell maps, holds focus, presents at 120 Hz) |
 
 The kit defects that run exposed (a Qt 5 `qml` winning the resolver, the never-created
@@ -145,8 +168,12 @@ Moonlight on native Wayland crashing) are fixed in this version.
 - The negotiated output bit depth is not readable on every kernel (see above). `measure.sh`
   reports what it can (debugfs Maximum, the `max bpc` cap) and says UNKNOWN rather than
   guessing; the TV's info panel is the reading of record there.
-- HDR reaching clients depends on `GAMESCOPE_HDR_OUTPUT_FEEDBACK`, which gamescope owns.
-  The kit reports it; it cannot force it.
+- HDR reaching clients depends on `GAMESCOPE_HDR_OUTPUT_FEEDBACK`, which gamescope owns
+  (`hdr_enabled` && EDID HDR10). The kit reports it and never touches convars; a bare
+  `gamescopectl <convar>` from any other tool resets that convar (see the rule above), and
+  `gamescopectl hdr_enabled 1` is the recovery.
+- Native-Wayland clients never get HDR under gamescope (the WSI layer hardcodes it off for
+  Wayland surfaces, on 3.16.23 and on master). xcb is the only HDR path for Moonlight.
 - The `qml` runtime must be Qt 6. A Qt 5 `qml` on `PATH` is skipped, and if no Qt 6 one
   is found `client.sh` logs what it tried and exits, leaving gamescope up with nothing to
   present.
