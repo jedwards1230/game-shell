@@ -407,12 +407,15 @@ case "${1:-}" in
         # keep tagging new family windows (the Remote Play window comes when
         # the operator starts a stream on the pad) without holding the SSH
         # session; one watcher per verb, the previous one is replaced.
-        pkill -f "focus.sh tag-pid .* $APPID --family" 2>/dev/null || true
+        # pkill -f takes an ERE, so anchor on this kit's own focus.sh path
+        # (metacharacters escaped) rather than a loose "focus.sh" match.
+        KIT_RE="$(printf '%s' "$KIT" | sed 's,[][\\.*^$/+?(){}|],\\&,g')"
+        pkill -f "bash ${KIT_RE}/focus\\.sh tag-pid [0-9]+ $APPID --family" 2>/dev/null || true
         nohup "$KIT/focus.sh" tag-pid "$PID" "$APPID" --family --keep-existing --timeout "$WATCH_SECS" \
             --log "$LOG_DIR/$VERB.log" "${CLASSES[@]}" "${NAMES[@]}" > "$LOG_DIR/$VERB-tag.log" 2>&1 &
         echo "watching the $VERB family for new windows for ${WATCH_SECS}s: tail -f $LOG_DIR/$VERB-tag.log"
         if [ -n "$WATCH_BL" ]; then
-            pkill -f "focus.sh watch-baselayer" 2>/dev/null || true
+            pkill -f "bash ${KIT_RE}/focus\\.sh watch-baselayer" 2>/dev/null || true
             nohup "$KIT/focus.sh" watch-baselayer "$WATCH_SECS" > "$LOG_DIR/$VERB-baselayer.log" 2>&1 &
             echo "logging GAMESCOPECTRL_BASELAYER_APPID changes for ${WATCH_SECS}s: tail -f $LOG_DIR/$VERB-baselayer.log"
         fi
