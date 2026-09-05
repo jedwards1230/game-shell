@@ -101,7 +101,10 @@ that window.
 `ENABLE_GAMESCOPE_WSI=1`), tags its window `STEAM_GAME=9003` and makes it the base layer
 over the shell, so `focus.sh app 9001` brings the shell back. That is the path that
 survives here: `launch.sh moonlight --wayland` keeps the native xdg-shell experiment,
-which Moonlight-qt 6.1.0 did not survive (below) and which has no focus selector.
+which Moonlight-qt 6.1.0 did not survive (below) and which has no focus selector. The one
+thing to compare between the two for criterion 3 is hardware decode: Moonlight warns that
+XWayland "will probably break hardware decoding", so if the X11 stream falls back to
+software decode or judders, `--wayland` is the control run.
 
 Tunables are environment variables read by `session.sh` (`TV_SHELL_GS_HDR=0` for an SDR
 control run, `TV_SHELL_GS_SDR_NITS`, `TV_SHELL_GS_EXTRA` for any other gamescope flag).
