@@ -138,6 +138,14 @@ candidate is kept only when its `_NET_WM_PID` is the pid or its `WM_CLASS` carri
 pid as the rule, so a relaunched shell is never confused with a window of the instance
 being torn down) and is exposed as `focus.sh tag-pid <pid> <id>` for anything else.
 
+Two things the live run showed about the atoms themselves. `xprop -root _NET_CLIENT_LIST`
+answers `no such atom` under gamescope's XWM (the helper tolerates that; it is why the
+candidate sources above exist), so a leftover-window check after a client exits has to go
+through `xprop -name <title>` or `focus.sh list`, never a client list. And after the stream
+quits, `GAMESCOPECTRL_BASELAYER_APPID` still reads `9003, 9001` until `focus.sh app 9001`
+clears it; that is cosmetic, since with 9003 gone the shell is already the effective base
+layer, but read `GAMESCOPE_FOCUSED_APP`, not the preference, to know what is on screen.
+
 **Ask the streaming host before streaming.** `moonlight stream <host> <app>` while
 Sunshine is already running a *different* app pops a "quit the running app?" dialog
 inside Moonlight's unmapped GUI and waits forever (the first phase-3 attempt sat for 74 s
@@ -228,7 +236,13 @@ relaunch it.
 
 The three kit defects that pass exposed were: the stream window never tagged (it is not
 the window named "Moonlight"), `moonlight stream` hanging on the host's "quit the running
-app?" dialog, and the leading space in Sunshine's app names. All three are fixed above.
+app?" dialog, and the leading space in Sunshine's app names. All three are fixed above,
+and the fixes were re-run on the same box with no manual step: `launch.sh moonlight
+stream …` tagged the stream window 0x800031 at t+3 s, `GAMESCOPE_FOCUSABLE_APPS` read
+`9003, 9001` and `GAMESCOPE_FOCUSED_APP` 9003 at t+6 s, the TV switched by itself, the WSI
+signature and the HDR10 swapchain were as above, 120 fps held as base layer and with the
+shell over it; the busy-host refusal exited 3 within a second naming the running app; and
+`launch.sh apps` showed the leading space in the quoted names.
 
 ## Known gaps, on purpose
 
