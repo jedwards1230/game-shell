@@ -15,6 +15,8 @@
 #   TV_SHELL_GS_VRR         1 = --adaptive-sync               (1)
 #   TV_SHELL_GS_SDR_NITS    --hdr-sdr-content-nits            (200)
 #   TV_SHELL_GS_DAEMON      1 = start tv-shell-input.service  (1)
+#   TV_SHELL_GS_EXPOSE_WAYLAND
+#                           1 = --expose-wayland              (1; use 0 for Steam runs, see README)
 #   TV_SHELL_GS_EXTRA       extra gamescope args, word-split  ("")
 #   TV_SHELL_GS_STATS       stats FIFO path        (/tmp/tv-shell-gamescope-stats)
 #   TV_SHELL_GS_ENV_FILE    env file for the SSH-side tools (/tmp/tv-shell-gamescope.env)
@@ -46,6 +48,7 @@ HDR="${TV_SHELL_GS_HDR:-1}"
 VRR="${TV_SHELL_GS_VRR:-1}"
 NITS="${TV_SHELL_GS_SDR_NITS:-200}"
 DAEMON="${TV_SHELL_GS_DAEMON:-1}"
+EXPOSE_WAYLAND="${TV_SHELL_GS_EXPOSE_WAYLAND:-1}"
 
 log() { printf 'tv-shell-gamescope: %s\n' "$*"; }
 
@@ -66,7 +69,7 @@ if mkfifo "$STATS"; then
 else
     log "WARN: mkfifo $STATS failed; gamescope will have no stats output"
 fi
-log "starting: ${W}x${H}@${R} hdr=$HDR vrr=$VRR sdr_nits=$NITS daemon=$DAEMON"
+log "starting: ${W}x${H}@${R} hdr=$HDR vrr=$VRR sdr_nits=$NITS daemon=$DAEMON expose_wayland=$EXPOSE_WAYLAND"
 
 STARTED_DAEMON=0
 if [ "$DAEMON" = "1" ] && command -v systemctl >/dev/null 2>&1 \
@@ -102,8 +105,6 @@ ARGS=(
     # GAMESCOPECTRL_BASELAYER_* root atoms are ignored and there is no external
     # focus control at all, which is the property this prototype exists to test.
     --steam
-    # xdg-shell for Wayland-native clients (Moonlight, Quickshell FloatingWindow).
-    --expose-wayland
     # gamescope normally exits with its primary child; the shell must survive a
     # child crash and the supervisor must own restarts.
     --keep-alive
@@ -115,6 +116,19 @@ ARGS=(
     --stats-path "$STATS"
     --hide-cursor-delay 3000
 )
+# xdg-shell for Wayland-native clients (Moonlight --wayland, a Quickshell
+# FloatingWindow). Default on to keep the measured session shape, but it has a
+# cost for Steam: with it, gamescope hands children WAYLAND_DISPLAY=gamescope-0,
+# and pressure-vessel rewrites that to wayland-0 inside the Steam container
+# while GAMESCOPE_WAYLAND_DISPLAY becomes /run/pressure-vessel/gamescope-socket.
+# The two never match, the WSI layer's isRunningUnderGamescope() says no, and
+# every Steam-runtime Vulkan app (streaming_client included) silently loses the
+# layer: no HDR, and a black screen behind its "non-Gamescope swapchain" dialog.
+# SteamOS never passes --expose-wayland. TV_SHELL_GS_EXPOSE_WAYLAND=0 drops it
+# (gamescope then unsets WAYLAND_DISPLAY for its children, 3.16.x main.cpp).
+if [ "$EXPOSE_WAYLAND" = "1" ]; then
+    ARGS+=(--expose-wayland)
+fi
 if [ "$HDR" = "1" ]; then
     ARGS+=(--hdr-enabled --hdr-sdr-content-nits "$NITS")
 fi
