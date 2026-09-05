@@ -38,22 +38,32 @@ export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
 export ENABLE_GAMESCOPE_WSI=1
 
 QML_BIN="$(command -v qml || echo /usr/lib/qt6/bin/qml)"
-"$QML_BIN" "$KIT/proto-shell.qml" &
-SHELL_PID=$!
-log "prototype shell pid=$SHELL_PID qpa=$QT_QPA_PLATFORM"
 
-if [ "$QT_QPA_PLATFORM" = "xcb" ]; then
-    # Tag the shell window with a game id so SteamControlled focus will consider
-    # it, then make it the base layer. Retry: the window maps asynchronously.
+# Tag the shell window with a game id so SteamControlled focus will consider
+# it, then make it the base layer. Retry: the window maps asynchronously. A
+# relaunched shell is a NEW X11 window, so this must run after every launch or
+# focus.sh / launch.sh cannot select the shell again after its first crash.
+tag_shell() {
+    [ "$QT_QPA_PLATFORM" = "xcb" ] || return 0
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.5
         if "$KIT/focus.sh" tag "$SHELL_TITLE" "$SHELL_APPID" >/dev/null 2>&1; then
             "$KIT/focus.sh" app "$SHELL_APPID" || true
             log "tagged '$SHELL_TITLE' as app $SHELL_APPID and set it as base layer"
-            break
+            return 0
         fi
     done
-fi
+    log "WARN: '$SHELL_TITLE' never mapped; focus.sh cannot select it"
+}
+
+launch_shell() {
+    "$QML_BIN" "$KIT/proto-shell.qml" &
+    SHELL_PID=$!
+    log "prototype shell pid=$SHELL_PID qpa=$QT_QPA_PLATFORM"
+    tag_shell
+}
+
+launch_shell
 
 # Keep the primary child alive. If the shell dies, relaunch it (crude
 # supervisor; the v2 supervisor design is separate).
@@ -61,8 +71,7 @@ while true; do
     if ! kill -0 "$SHELL_PID" 2>/dev/null; then
         log "prototype shell exited; relaunching in 2s"
         sleep 2
-        "$QML_BIN" "$KIT/proto-shell.qml" &
-        SHELL_PID=$!
+        launch_shell
     fi
     sleep 5
 done

@@ -64,7 +64,7 @@ for the week. The default boot session is untouched; log out (or set it back) to
 | `proto-overlay.qml` | Overlay test client, semi-transparent side panel |
 | `focus.sh` | `list` / `tag` / `app` / `window` / `clear` over gamescope's root X11 atoms |
 | `launch.sh` | `overlay` / `x11` / `moonlight` / `xmessage` into the running session from SSH |
-| `measure.sh` | Reads DRM connector properties, debugfs bit depth, the active mode, gamescope's own info, and prints verdicts |
+| `measure.sh` | Reads DRM connector properties, debugfs bit depth, the active mode, gamescope's own info, and prints verdicts. Every DRM read is scoped to one connector (the first connected + enabled one, or `TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1` to choose on a two-output box) and to the CRTC driving it |
 
 ## Running a measurement
 

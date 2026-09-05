@@ -44,8 +44,13 @@ DAEMON="${TV_SHELL_GS_DAEMON:-1}"
 log() { printf 'tv-shell-gamescope: %s\n' "$*"; }
 
 # Everything this script and gamescope print goes to the journal AND a file,
-# so a session that dies before the shell appears still leaves evidence.
-exec > >(tee -a "$LOG" | systemd-cat -t tv-shell-gamescope) 2>&1
+# so a session that dies before the shell appears still leaves evidence. The
+# file is the floor: without systemd-cat (non-systemd launch) it is the only log.
+if command -v systemd-cat >/dev/null 2>&1; then
+    exec > >(tee -a "$LOG" | systemd-cat -t tv-shell-gamescope) 2>&1
+else
+    exec > >(tee -a "$LOG") 2>&1
+fi
 
 rm -f "$ENV_FILE" "$STATS"
 log "starting: ${W}x${H}@${R} hdr=$HDR vrr=$VRR sdr_nits=$NITS daemon=$DAEMON"

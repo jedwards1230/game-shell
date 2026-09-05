@@ -6,6 +6,8 @@
 # readable by any user; the debugfs bit-depth file needs root, so run with sudo
 # for the full picture:   sudo dev/gamescope/measure.sh
 #
+# Reads are scoped to ONE connector (first connected + enabled, or
+# TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1 to pick) and the CRTC driving it.
 # Everything is read-only.
 set -u
 
@@ -54,30 +56,70 @@ else
 fi
 
 # --- DRM properties via modetest ---------------------------------------------
+# -e is needed for the connector -> encoder -> CRTC walk below.
 MODETEST_OUT=""
 if command -v modetest >/dev/null 2>&1; then
-    MODETEST_OUT="$(timeout 10 modetest -M amdgpu -c -p 2>/dev/null || true)"
+    MODETEST_OUT="$(timeout 10 modetest -M amdgpu -c -e -p 2>/dev/null || true)"
 fi
-prop_value() { # prop_value <name>  -> the "value:" line following the property in the connector block
-    printf '%s\n' "$MODETEST_OUT" | awk -v want="$1" '
-        $0 ~ "^\t[0-9]+ " want ":" {grab=1; next}
-        grab && /value:/ {sub(/^[ \t]*value: */, ""); print; exit}
-        grab && /^\t[0-9]+ / {grab=0}
+# modetest lists EVERY object: each connector's props, then each CRTC's. On a
+# box with two outputs (htpc-1 has two HDMI outs) an unscoped scan reports
+# whichever comes first, so every read is scoped to one object block: a
+# "Connectors:" / "CRTCs:" section, then the object row whose column <col>
+# equals <key> ("402  401  connected  HDMI-A-1 ..." / "376  1338  (0,0)
+# (3840x2160)"). An empty key means the whole section, which the verdicts then
+# cannot attribute. Props are "\t<id> <name>:" followed by indented "flags:" /
+# "enums:" / "value:" lines; a blob prop's value: line is EMPTY, with the bytes
+# (if any) on the lines after it.
+#
+# obj_line <section> <col> <key> <prop> <field> -> that field's text. For a
+# blob prop: the first 16 bytes as hex, or "0" when no blob is attached.
+obj_line() {
+    printf '%s\n' "$MODETEST_OUT" | awk -v sec="$1" -v col="$2" -v key="$3" -v want="$4" -v field="$5" '
+        /^[A-Z][A-Za-z ]*:$/ {insec = ($0 == sec ":"); inobj = 0; grab = 0}
+        insec && /^[0-9]+\t/ {inobj = (key == "" || $col == key); grab = 0}
+        !inobj {next}
+        $0 ~ "^\t[0-9]+ " want ":" {grab = 1; next}
+        grab && $0 ~ ("^[ \t]*" field ":") {
+            v = $0; sub(/^[ \t]*[a-z]+: */, "", v)
+            if (v != "") {print v; exit}
+            blob = 1; next
+        }
+        blob {print (/^\t\t\t[0-9a-f]+$/ ? $1 : "0"); exit}
+        grab && /^\t[0-9]+ / {grab = 0}
     '
 }
-MAX_BPC="$(prop_value "max bpc")"
-COLORSPACE_IDX="$(prop_value "Colorspace")"
-HDR_BLOB="$(prop_value "HDR_OUTPUT_METADATA")"
-VRR_PROP="$(printf '%s\n' "$MODETEST_OUT" | awk '/VRR_ENABLED:/{grab=1;next} grab&&/value:/{sub(/^[ \t]*value: */,"");print;exit} grab&&/^\t[0-9]+ /{grab=0}')"
-COLORSPACE_NAME="$(printf '%s\n' "$MODETEST_OUT" | awk '/Colorspace:/{grab=1;next} grab&&/enums:/{print;exit} grab&&/^\t[0-9]+ /{grab=0}' | tr -s ' ' | sed 's/^ *enums: *//')"
+CONN_KEY="$CONN_NAME"
+[ "$CONN_NAME" != "unknown" ] || CONN_KEY=""
+# VRR_ENABLED and the active mode are CRTC properties, not connector ones. The
+# connector row's column 2 is its encoder id; that encoder row's column 2 is
+# the CRTC it drives (0 = none). Unresolved -> every CRTC, same as above.
+CRTC_ID="$(printf '%s\n' "$MODETEST_OUT" | awk -v name="$CONN_KEY" '
+    /^[A-Z][A-Za-z ]*:$/ {sec = $0}
+    sec == "Encoders:" && /^[0-9]+\t/ {crtc[$1] = $2}
+    sec == "Connectors:" && /^[0-9]+\t/ && $4 == name {enc = $2}
+    END {if (enc in crtc && crtc[enc] != "0") print crtc[enc]}
+')"
+conn_value() { obj_line Connectors 4 "$CONN_KEY" "$1" value; }
+crtc_value() { obj_line CRTCs 1 "$CRTC_ID" "$1" value; }
+MAX_BPC="$(conn_value "max bpc")"
+COLORSPACE_IDX="$(conn_value "Colorspace")"
+COLORSPACE_NAME="$(obj_line Connectors 4 "$CONN_KEY" "Colorspace" enums)"
+HDR_BLOB="$(conn_value "HDR_OUTPUT_METADATA")"
+VRR_PROP="$(crtc_value "VRR_ENABLED")"
+echo "crtc:                     ${CRTC_ID:-unresolved (reading every CRTC)}"
 echo "max bpc value:            ${MAX_BPC:-?}"
 echo "Colorspace value:         ${COLORSPACE_IDX:-?}   (${COLORSPACE_NAME:-enum list unavailable})"
 echo "HDR_OUTPUT_METADATA blob: ${HDR_BLOB:-?}"
 echo "VRR_ENABLED:              ${VRR_PROP:-?}"
 
 # --- current mode ------------------------------------------------------------
-# modetest -p prints each CRTC as "#N  WxH  R (...)" under a "CRTCs:" header.
-CUR_MODE="$(printf '%s\n' "$MODETEST_OUT" | awk '/^CRTCs:/{c=1;next} c&&/^\s*#[0-9]+ /{print $2, $3; exit}')"
+# Each CRTC row is followed by its mode as "  #0 3840x2160 120.00 ..."; an idle
+# CRTC prints "  #0  -nan 0 0 ..." with no WxH, which the $2 test skips.
+CUR_MODE="$(printf '%s\n' "$MODETEST_OUT" | awk -v key="$CRTC_ID" '
+    /^[A-Z][A-Za-z ]*:$/ {insec = ($0 == "CRTCs:"); inobj = 0}
+    insec && /^[0-9]+\t/ {inobj = (key == "" || $1 == key)}
+    inobj && /^ *#[0-9]+ / && $2 ~ /x/ {print $2, $3; exit}
+')"
 echo "active CRTC mode:         ${CUR_MODE:-?}"
 
 # --- gamescope's own view ----------------------------------------------------
