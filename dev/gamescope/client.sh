@@ -49,20 +49,23 @@ fi
 log "qml runtime: $QML_BIN ($(gs_qml_version "$QML_BIN"))"
 
 # Tag the shell window with a game id so SteamControlled focus will consider
-# it, then make it the base layer. Retry: the window maps asynchronously. A
-# relaunched shell is a NEW X11 window, so this must run after every launch or
-# focus.sh / launch.sh cannot select the shell again after its first crash.
+# it, then make it the base layer. The window maps asynchronously, so this
+# polls (gs_tag_pid, lib.sh). A relaunched shell is a NEW X11 window, so this
+# must run after every launch or focus.sh / launch.sh cannot select the shell
+# again after its first crash. Tagging is by pid, not by title alone: the
+# title is only a lookup hint, and a window carrying it is tagged only when its
+# _NET_WM_PID is THIS shell's pid, so a previous instance's window that is
+# still being torn down can never be the one that gets tagged.
 tag_shell() {
     [ "$QT_QPA_PLATFORM" = "xcb" ] || return 0
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        sleep 0.5
-        if "$KIT/focus.sh" tag "$SHELL_TITLE" "$SHELL_APPID" >/dev/null 2>&1; then
-            "$KIT/focus.sh" app "$SHELL_APPID" || true
-            log "tagged '$SHELL_TITLE' as app $SHELL_APPID and set it as base layer"
-            return 0
-        fi
-    done
-    log "WARN: '$SHELL_TITLE' never mapped; focus.sh cannot select it"
+    local out
+    if out="$(TV_SHELL_GS_POLL_SECS="${TV_SHELL_GS_POLL_SECS:-0.5}" \
+            gs_tag_pid "$SHELL_PID" "$SHELL_APPID" --timeout 10 --expect 1 --name "$SHELL_TITLE" 2>&1)"; then
+        "$KIT/focus.sh" app "$SHELL_APPID" || true
+        log "tagged '$SHELL_TITLE' (pid $SHELL_PID) as app $SHELL_APPID and set it as base layer: $out"
+        return 0
+    fi
+    log "WARN: no window of the shell (pid $SHELL_PID) appeared within 10s; focus.sh cannot select it: $out"
 }
 
 launch_shell() {
