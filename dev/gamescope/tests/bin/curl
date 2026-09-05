@@ -1,0 +1,10 @@
+#!/bin/bash
+# Fake curl: serves $FAKE_SERVERINFO for any /serverinfo URL, fails otherwise.
+set -u
+url=""
+for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
+echo "curl $url" >> "${FAKE_X:-/tmp}/calls.log"
+case "$url" in
+    *serverinfo*) [ -r "${FAKE_SERVERINFO:-}" ] && cat "$FAKE_SERVERINFO" && exit 0; exit 7 ;;
+esac
+exit 7

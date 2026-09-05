@@ -70,7 +70,7 @@ fi
 
 SHELL_APPID="${TV_SHELL_GS_SHELL_APPID:-9001}"
 MOONLIGHT_APPID=9003
-LOG_DIR=/tmp/tv-shell-gamescope-clients
+LOG_DIR="${TV_SHELL_GS_LOG_DIR:-/tmp/tv-shell-gamescope-clients}"
 mkdir -p "$LOG_DIR"
 MOONLIGHT_BIN="${TV_SHELL_GS_MOONLIGHT:-moonlight}"
 # Moonlight-qt's own host/app cache (QSettings INI): the only local source of

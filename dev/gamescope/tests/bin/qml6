@@ -1,0 +1,7 @@
+#!/bin/bash
+# Fake Qt 6 qml runtime for the client.sh fixture: reports 6.11.2, else idles.
+case "${1:-}" in
+    --version) echo "Qml Runtime 6.11.2"; exit 0 ;;
+esac
+echo $$ > "${FAKE_X:-/tmp}/shell.pid"
+sleep 300
