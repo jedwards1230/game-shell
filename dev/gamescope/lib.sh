@@ -126,11 +126,11 @@ gs_moonlight_x11_env() {
 # has to reach the operator instead of a subshell that vanishes.
 gs_scope_ready() {
     if ! command -v systemd-run >/dev/null 2>&1; then
-        echo "gs_scope_run: no systemd-run on PATH; gamescope identifies an app by its cgroup scope, so a scope-less launch cannot be focused" >&2
+        echo "gs_scope_ready: no systemd-run on PATH; gamescope identifies an app by its cgroup scope, so a scope-less launch cannot be focused" >&2
         return 1
     fi
     if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
-        echo "gs_scope_run: XDG_RUNTIME_DIR is unset, so 'systemd-run --user' has no session bus to talk to" >&2
+        echo "gs_scope_ready: XDG_RUNTIME_DIR is unset, so 'systemd-run --user' has no session bus to talk to" >&2
         echo "  source the session env file first (/tmp/tv-shell-gamescope.env), which carries both it and DBUS_SESSION_BUS_ADDRESS" >&2
         return 1
     fi
@@ -138,7 +138,7 @@ gs_scope_ready() {
         if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
             export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
         else
-            echo "gs_scope_run: DBUS_SESSION_BUS_ADDRESS is unset and $XDG_RUNTIME_DIR/bus is not a socket; 'systemd-run --user' has no session bus" >&2
+            echo "gs_scope_ready: DBUS_SESSION_BUS_ADDRESS is unset and $XDG_RUNTIME_DIR/bus is not a socket; 'systemd-run --user' has no session bus" >&2
             return 1
         fi
     fi
@@ -182,7 +182,14 @@ gs_scope_run() {
     [ $# -ge 1 ] || { echo "gs_scope_run: no command" >&2; return 2; }
     gs_scope_ready || return 1
     gs_scope_unit unit "$appid" "$BASHPID"
-    exec systemd-run --user --scope --collect --quiet --unit="$unit" -- "$@"
+    # No --quiet: `man systemd-run` says it "may not be combined with ...
+    # --scope". This systemd (261) tolerates the pair, but relying on
+    # undocumented tolerance is exactly the mistake this commit exists to fix —
+    # the kit leaned on gamescope tolerating post-hoc tagging while the
+    # documented contract was scope-first, and a point release ended that. The
+    # `Running as unit: <name>` line it would have suppressed is useful anyway:
+    # it records the scope name in the client log independently of us.
+    exec systemd-run --user --scope --collect --unit="$unit" -- "$@"
 }
 
 # gs_scope_of <pid> -> the `app-steam-app<id>-<pid>.scope` unit the pid is in,
