@@ -36,10 +36,34 @@
 #   `Upholds=` — its §9 "shell dies → restart under the live compositor" role —
 #   the moment that unit lands.
 #
-# None of Binds/Upholds/Wants carries ordering. Ordering is `graphical-session.target`,
-# which becomes active only after gamescope has sent READY=1 — and gamescope
-# sends that only once its environment file exists, so every unit ordered after
-# it can rely on the file being there.
+# None of Binds/Upholds/Wants carries ordering, INCLUDING the `After=` on this
+# target: ordering a target does not order the units it upholds. So each child
+# unit orders itself on `tv-shell-gamescope.service` directly — see the long
+# comment in tv-shell-core.service. `graphical-session.target` is deliberately
+# NOT the ordering anchor here: it is only ever `Wants=`-ed, nothing stops it,
+# and on any relogin within one user-manager lifetime it is already active, which
+# makes `After=graphical-session.target` satisfied instantly and therefore
+# vacuous.
+#
+# §9's CRASH-LOOP ROLLBACK IS NOT IMPLEMENTED.
+#
+#   §9's table says a crash-looping shell should be caught by a short-session
+#   tracker (ExecStartPre/ExecStopPost, 3 exits under 60 s), backed off, and then
+#   answered by a deployment hook that selects the v1 session. None of that
+#   exists: there is no ExecStartPre or ExecStopPost anywhere in this directory,
+#   no counter, and no hook. `[supervisor].restart_threshold` and
+#   `restart_window_secs` in core.toml are its configuration and nothing reads
+#   them; the core's own test lists them as unconsumed for exactly that reason.
+#
+#   The gamescope unit used to carry StartLimitIntervalSec=60/StartLimitBurst=3
+#   with a comment claiming it delivered this. It did not — that unit is
+#   Restart=no, so there is never a second attempt to count, and the session
+#   script's `reset-failed` clears the counter on every relogin regardless. It
+#   has been removed rather than left standing as a protection that is not there,
+#   because a comment like that stops the next person from looking.
+#
+#   Until the tracker lands, the rollback path is MANUAL: select the v1 session
+#   at the display manager (§11).
 Description=tv-shell v2 session (gamescope)
 
 # Stop the whole session if the compositor goes away.

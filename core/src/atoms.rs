@@ -40,8 +40,26 @@ use x11rb::wrapper::ConnectionExt as _;
 /// id of the focused **window** is the one every rule keys on, and a bare
 /// integer makes it trivially easy to hand it the wrong one. See
 /// [`crate::screen::ScreenState`].
+/// The field is **private**. A `pub` field made
+/// `AppId(state.focused_app_atom_diagnostic().unwrap())` compile — laundering the
+/// diagnostic-only `GAMESCOPE_FOCUSED_APP` value, which §5 records as reading
+/// empty under an input-focus overlay, into a first-class app id. Nothing did
+/// that, but nothing stopped it either. With [`AppId::new`] the launder still
+/// exists as a possibility, but it has to be *written*, which is the point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
-pub struct AppId(pub u32);
+pub struct AppId(u32);
+
+impl AppId {
+    /// Wrap a raw gamescope app id.
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// The raw id, for the wire and for formatting.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
 
 impl std::fmt::Display for AppId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,7 +70,7 @@ impl std::fmt::Display for AppId {
 impl std::str::FromStr for AppId {
     type Err = std::num::ParseIntError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        s.parse::<u32>().map(AppId)
+        s.parse::<u32>().map(AppId::new)
     }
 }
 
@@ -105,6 +123,28 @@ pub enum AtomError {
         "{atom} holds {len} values, which is not a whole number of (xid, appid, pid) triplets"
     )]
     BadTripletLen { atom: &'static str, len: usize },
+}
+
+impl AtomError {
+    /// Is this a `BadWindow` for a window that no longer exists?
+    ///
+    /// The one legitimate race in a two-round-trip read: `screen::read` learns a
+    /// window id from `GAMESCOPE_FOCUSED_WINDOW` and then asks that window for
+    /// its `STEAM_GAME`, and the window can be destroyed in between. Every OTHER
+    /// error on that second trip (a `BadFormat`, a `Truncated`) is a shape
+    /// mismatch, and swallowing those is how #448 happened — so only this one is
+    /// treated as absence.
+    pub fn is_bad_window(&self) -> bool {
+        use x11rb::errors::ReplyError;
+        use x11rb::protocol::ErrorKind;
+        matches!(
+            self,
+            AtomError::Protocol {
+                source: ReplyError::X11Error(e),
+                ..
+            } if e.error_kind == ErrorKind::Window
+        )
+    }
 }
 
 /// Result alias for this module.
@@ -323,7 +363,7 @@ impl AtomConn {
         Ok(self
             .read_cardinals(window, name)?
             .into_iter()
-            .map(AppId)
+            .map(AppId::new)
             .collect())
     }
 
@@ -410,7 +450,9 @@ impl AtomConn {
 
     /// A window's `STEAM_GAME` tag, if it carries one.
     pub fn window_app_id(&self, window: Window) -> Result<Option<AppId>> {
-        Ok(self.read_cardinal(window, names::STEAM_GAME)?.map(AppId))
+        Ok(self
+            .read_cardinal(window, names::STEAM_GAME)?
+            .map(AppId::new))
     }
 
     /// Write `STEAM_GAME` on a window. This is the §5 REPAIR path, only for a
@@ -535,6 +577,47 @@ mod tests {
     /// The live reading recorded in `dev/gamescope/lib.sh` for a process
     /// launched into `app-steam-app9003-2970.scope`. Real compositor bytes.
     const MEASURED_TRIPLET: [u32; 3] = [8388625, 9003, 2998];
+
+    fn x11_error(kind: x11rb::protocol::ErrorKind) -> AtomError {
+        AtomError::Protocol {
+            atom: names::STEAM_GAME,
+            source: x11rb::errors::ReplyError::X11Error(x11rb::x11_utils::X11Error {
+                error_kind: kind,
+                error_code: 3,
+                sequence: 1,
+                bad_value: 0x800011,
+                minor_opcode: 0,
+                major_opcode: 20,
+                extension_name: None,
+                request_name: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn only_a_bad_window_counts_as_a_window_that_went_away() {
+        assert!(x11_error(x11rb::protocol::ErrorKind::Window).is_bad_window());
+        // Everything else on that round trip is a shape mismatch, and swallowing
+        // one is how #448 happened.
+        for other in [
+            x11rb::protocol::ErrorKind::Value,
+            x11rb::protocol::ErrorKind::Atom,
+            x11rb::protocol::ErrorKind::Access,
+        ] {
+            assert!(!x11_error(other).is_bad_window(), "{other:?}");
+        }
+        assert!(!AtomError::Truncated {
+            atom: names::STEAM_GAME,
+            bytes_after: 4
+        }
+        .is_bad_window());
+        assert!(!AtomError::BadFormat {
+            atom: names::STEAM_GAME,
+            width: 8,
+            type_atom: 6
+        }
+        .is_bad_window());
+    }
 
     fn cardinal_bytes(values: &[u32]) -> Vec<u8> {
         values.iter().flat_map(|v| v.to_ne_bytes()).collect()

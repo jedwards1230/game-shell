@@ -7,7 +7,37 @@
 # the v1 session script is for tv-shell-input.service. Enabling it into
 # default.target would start a second, compositor-less copy at user-manager boot.
 Description=tv-shell v2 core (gamescope base-layer policy, launching, IPC)
-After=graphical-session.target
+
+# ORDERING IS ON THE COMPOSITOR, NOT ON graphical-session.target.
+#
+# This used to read `After=graphical-session.target` alone, which is vacuous on
+# every relogin. That target is only ever `Wants=`-ed here, never `PartOf=`/
+# `BindsTo=`, and the session script's cleanup does not stop it — so on any
+# second start within the same user-manager lifetime it is ALREADY ACTIVE, the
+# ordering is satisfied instantly, and the core races gamescope to the X server.
+# The target's own `After=tv-shell-gamescope.service` does not help: `Upholds=`
+# carries no ordering (§4 says so explicitly), so it never ordered this unit.
+#
+# Ordering directly on the compositor unit is what actually holds, because
+# gamescope is Type=notify and its READY=1 is sent only after the environment
+# file is complete — so `After=` here means "the file the EnvironmentFile= below
+# needs is on disk".
+After=tv-shell-gamescope.service
+
+# BindsTo, not just After. The core's entire job is reading and writing atoms on
+# gamescope's root window; against a dead X server it is a process that either
+# crash-loops or, worse, connects to some other ambient $DISPLAY and reports
+# healthy. Neither is a state to leave running. BindsTo= stops it the moment the
+# compositor goes, and the session target's own BindsTo= is bringing the whole
+# session down at that point anyway — this makes the core's exit part of that
+# rather than a race against it.
+#
+# PartOf= the target as well, so a plain `systemctl --user stop
+# tv-shell-session.target` (the session script's cleanup path) takes the core
+# with it. `Upholds=` starts and restarts; it does not stop.
+BindsTo=tv-shell-gamescope.service
+PartOf=tv-shell-session.target
+
 # §11: v1 and v2 never run together. They would contend for the seat, the pads
 # and the CEC adapter, and both would claim restart authority.
 Conflicts=tv-shell-input.service
@@ -16,11 +46,25 @@ Conflicts=tv-shell-input.service
 Type=simple
 
 # The compositor's environment, published by tv-shell-gamescope.service's ready
-# handshake. The leading `-` makes a missing file non-fatal: the core connects
-# to $DISPLAY, and a developer running it against an existing X server has no
-# such file. Ordering After=graphical-session.target is what makes the file
-# present in the session case.
-EnvironmentFile=-%t/tv-shell-gamescope-environment
+# handshake.
+#
+# NO LEADING `-`. It had one, and that made the ordering bug above SILENT: with
+# the file missing the core started against whatever ambient $DISPLAY existed,
+# connected to some other X server, and reported healthy — a black screen with a
+# green `systemctl status`. That is precisely the silent-success class §3 exists
+# to kill, and a session unit is the last place to trade falsifiability for
+# convenience.
+#
+# The developer case that motivated the `-` (running the core by hand against an
+# existing X server) is served WITHOUT weakening production: run the binary
+# directly, or drop in an override that restores the tolerant form —
+#   systemctl --user edit tv-shell-core.service
+#   [Service]
+#   EnvironmentFile=
+#   EnvironmentFile=-%t/tv-shell-gamescope-environment
+# An explicit local override is visible in `systemctl cat`; a `-` in the shipped
+# unit is not.
+EnvironmentFile=%t/tv-shell-gamescope-environment
 
 # The core reads its typed config from ~/.config/tv-shell/core.toml itself and
 # resolves its socket from $TV_SHELL_CORE_SOCK or /run/user/%U/. That is a
@@ -33,8 +77,14 @@ ExecStart=/opt/tv-shell/bin/tv-shell-core
 
 # The core is stateless on start: it reads the base-layer list back as its last
 # intent rather than asserting one (§9), so a restart is cheap and safe even
-# with a game on screen. Restart quickly, but let the §9 short-session tracker
-# see a crash-loop rather than hiding one behind an infinite retry.
+# with a game on screen.
+#
+# Restart=on-failure with no StartLimit* here ON PURPOSE. §9's crash-loop
+# response (three exits under 60 s → back off, then select the v1 session) is
+# NOT IMPLEMENTED — there is no short-session tracker and nothing reads
+# [supervisor].restart_threshold. Adding a StartLimitBurst here would look like
+# that protection without being it, which is the mistake the gamescope unit's
+# comment made. See tv-shell-session.target's header for the full statement.
 Restart=on-failure
 RestartSec=2
 

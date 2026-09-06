@@ -135,7 +135,7 @@ impl ScreenState {
     /// to compare the two themselves (which is how `_APP` gets used as a rule).
     pub fn focused_app_atom_disagrees(&self) -> bool {
         match (self.focused_app_atom, self.on_screen_app()) {
-            (Some(raw), Some(app)) => raw != app.0,
+            (Some(raw), Some(app)) => raw != app.get(),
             (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         }
@@ -159,6 +159,16 @@ impl ScreenState {
             .copied()
             .filter(|f| f.pid == pid)
             .collect()
+    }
+
+    /// Has `app` got at least one window gamescope would consider for focus?
+    ///
+    /// The distinction [`crate::baselayer`] needs to tell "this switch failed"
+    /// from "this app has not drawn its first window yet": a launching app is
+    /// absent from both candidate lists until it maps, and a switch to an app
+    /// with no mapped window is not a failure, it is a wait.
+    pub fn is_mapped(&self, app: AppId) -> bool {
+        self.focusable_windows.iter().any(|f| f.app_id == app) || self.focusable_apps.contains(&app)
     }
 
     /// Build a snapshot from already-decoded parts.
@@ -305,7 +315,7 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
     let focused_app_atom = take!(c_focused_app, names::FOCUSED_APP).first().copied();
     let base_layer: Vec<AppId> = take!(c_base_layer, names::BASELAYER_APPID)
         .into_iter()
-        .map(AppId)
+        .map(AppId::new)
         .collect();
     let base_layer_windows = take!(c_base_windows, names::BASELAYER_WINDOW);
     let focusable_windows = decode_focusable_windows(
@@ -314,7 +324,7 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
     )?;
     let focusable_apps: Vec<AppId> = take!(c_focusable_apps, names::FOCUSABLE_APPS)
         .into_iter()
-        .map(AppId)
+        .map(AppId::new)
         .collect();
     let display = DisplayFeedback {
         hdr_output: flag(take!(c_hdr, names::HDR_OUTPUT_FEEDBACK)),
@@ -331,7 +341,7 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
     let needs_repair_lookup =
         focused_window.is_some_and(|w| !focusable_windows.iter().any(|f| f.window == w));
     let steam_game = match (focused_window, needs_repair_lookup) {
-        (Some(w), true) => conn.window_app_id(w).unwrap_or(None),
+        (Some(w), true) => repair_tag(w, conn.window_app_id(w))?,
         _ => None,
     };
 
@@ -348,6 +358,37 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
     }))
 }
 
+/// Decide what a `STEAM_GAME` read on the focused window means.
+///
+/// The second round trip of [`read`] can race a window's destruction: the id
+/// came from `GAMESCOPE_FOCUSED_WINDOW`, and the window can be gone by the time
+/// we ask it a question. That — and ONLY that — is genuinely "no tag".
+///
+/// This used to be `.unwrap_or(None)`, which turned a `BadFormat` or a
+/// `Truncated` into "no tag" as well. Those are shape mismatches, and `atoms.rs`
+/// rule 2 is that a shape we did not expect is an error rather than a coerced
+/// value; swallowing one reports "untagged" for a window that carries a tag,
+/// which is #448 with a different atom. It fails closed either way — it cannot
+/// manufacture an `ok` — but the cost is a diagnosis, and this is a crate whose
+/// whole thesis is that the diagnosis is the product.
+///
+/// A free function so the distinction is testable with no X server; the error
+/// cases it separates are exactly the ones an X server will not produce on
+/// demand.
+fn repair_tag(window: Window, read: Result<Option<AppId>>) -> Result<Option<AppId>> {
+    match read {
+        Ok(tag) => Ok(tag),
+        Err(e) if e.is_bad_window() => {
+            tracing::debug!(
+                window,
+                "focused window vanished before its tag could be read"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn flag(values: Vec<u32>) -> Option<bool> {
     values.first().map(|v| *v != 0)
 }
@@ -356,8 +397,8 @@ fn flag(values: Vec<u32>) -> Option<bool> {
 mod tests {
     use super::*;
 
-    const SHELL: AppId = AppId(9001);
-    const GAME: AppId = AppId(9003);
+    const SHELL: AppId = AppId::new(9001);
+    const GAME: AppId = AppId::new(9003);
     /// The live triplet from `dev/gamescope/lib.sh` (real compositor bytes).
     const GAME_WIN: Window = 8388625;
     const GAME_PID: u32 = 2998;
@@ -410,7 +451,7 @@ mod tests {
 
     #[test]
     fn agreement_is_reported_as_agreement() {
-        let s = state_with(Some(GAME_WIN), Some(GAME.0), vec![triplet()], None);
+        let s = state_with(Some(GAME_WIN), Some(GAME.get()), vec![triplet()], None);
         assert!(!s.focused_app_atom_disagrees());
     }
 
@@ -426,14 +467,14 @@ mod tests {
 
     #[test]
     fn published_id_beats_the_repair_tag() {
-        let s = state_with(Some(GAME_WIN), None, vec![triplet()], Some(AppId(1)));
+        let s = state_with(Some(GAME_WIN), None, vec![triplet()], Some(AppId::new(1)));
         assert_eq!(s.on_screen().unwrap().source, AppIdSource::Focusable);
         assert_eq!(s.on_screen_app(), Some(GAME));
     }
 
     #[test]
     fn a_focused_window_with_no_resolvable_id_is_none_not_a_guess() {
-        let s = state_with(Some(GAME_WIN), Some(GAME.0), vec![], None);
+        let s = state_with(Some(GAME_WIN), Some(GAME.get()), vec![], None);
         assert_eq!(s.on_screen(), None, "an unresolved id must not be invented");
         assert!(s.focused_app_atom_disagrees());
     }
@@ -457,6 +498,57 @@ mod tests {
         assert_eq!(s.app_id_of(999), None);
         assert_eq!(s.windows_of_pid(GAME_PID), vec![triplet()]);
         assert!(s.windows_of_pid(1234).is_empty());
+    }
+
+    fn x11_err(kind: x11rb::protocol::ErrorKind) -> AtomError {
+        AtomError::Protocol {
+            atom: names::STEAM_GAME,
+            source: x11rb::errors::ReplyError::X11Error(x11rb::x11_utils::X11Error {
+                error_kind: kind,
+                error_code: 3,
+                sequence: 1,
+                bad_value: 0x800011,
+                minor_opcode: 0,
+                major_opcode: 20,
+                extension_name: None,
+                request_name: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_window_destroyed_mid_read_is_no_tag_and_every_other_error_propagates() {
+        // The legitimate race: the window went away between the two round trips.
+        assert_eq!(
+            repair_tag(GAME_WIN, Err(x11_err(x11rb::protocol::ErrorKind::Window))).unwrap(),
+            None
+        );
+        // A tag that IS there still comes back.
+        assert_eq!(
+            repair_tag(GAME_WIN, Ok(Some(GAME))).unwrap(),
+            Some(GAME),
+            "a real tag must survive the repair path"
+        );
+        // Shape mismatches must NOT be laundered into "untagged" — that reports
+        // no id for a window that has one (#448, different atom).
+        for e in [
+            x11_err(x11rb::protocol::ErrorKind::Value),
+            x11_err(x11rb::protocol::ErrorKind::Access),
+            AtomError::BadFormat {
+                atom: names::STEAM_GAME,
+                width: 8,
+                type_atom: 6,
+            },
+            AtomError::Truncated {
+                atom: names::STEAM_GAME,
+                bytes_after: 4,
+            },
+        ] {
+            let want = e.to_string();
+            let got = repair_tag(GAME_WIN, Err(e))
+                .expect_err("a shape mismatch must not read as 'no tag'");
+            assert_eq!(got.to_string(), want);
+        }
     }
 
     #[test]

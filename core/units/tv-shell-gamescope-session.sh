@@ -11,8 +11,10 @@
 #   1. Stop any stale copy of the session target and clear failed state, so a
 #      previous session that ended badly cannot leave units in a state that
 #      makes this one fail for reasons that have nothing to do with this boot.
-#   2. Create the stats FIFO BEFORE the target starts, so gamescope's `-T` finds
-#      it already present rather than racing its creation.
+#   2. Create the stats FIFO BEFORE the target starts, so gamescope's
+#      `--stats-path` finds it already present rather than racing its creation,
+#      and render the output mode from core.toml into the env file the gamescope
+#      unit reads.
 #   3. `systemctl --user start --wait tv-shell-session.target`. The `--wait` is
 #      what makes "gamescope dies → the session exits" true: the target is
 #      BindsTo= the compositor, so the compositor's death stops the target,
@@ -29,6 +31,10 @@ TARGET=tv-shell-session.target
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATS_FIFO="$RUNTIME_DIR/tv-shell-gamescope-stats"
 ENV_FILE="$RUNTIME_DIR/tv-shell-gamescope-environment"
+MODE_FILE="$RUNTIME_DIR/tv-shell-gamescope-mode"
+# Rewrite this path to the resolved install prefix, as scripts/install.sh does
+# for the v1 units.
+CORE_BIN="${TV_SHELL_CORE_BIN:-/opt/tv-shell/bin/tv-shell-core}"
 
 export XDG_CURRENT_DESKTOP=gamescope
 export XDG_SESSION_TYPE=wayland
@@ -38,7 +44,7 @@ log() { printf 'tv-shell-session: %s\n' "$*" >&2; }
 cleanup() {
     log "session target returned; stopping and cleaning up"
     systemctl --user stop "$TARGET" >/dev/null 2>&1 || true
-    rm -f "$STATS_FIFO" "$ENV_FILE"
+    rm -f "$STATS_FIFO" "$ENV_FILE" "$MODE_FILE"
 }
 trap cleanup EXIT
 
@@ -54,10 +60,12 @@ systemctl --user reset-failed >/dev/null 2>&1 || true
 
 # 2. The stats FIFO, created before anything can open it.
 #
-# gamescope opens `-T` for writing; a FIFO that does not exist yet would make it
-# fail at startup, and a leftover regular file (from a crashed session that
-# wrote where a FIFO should be) would silently swallow the stats stream instead
-# of blocking on it. So remove and recreate unconditionally.
+# gamescope's `--stats-path` open()s an EXISTING FIFO and never creates one; a
+# missing file just makes it retry every 10 s and the stats never appear
+# (dev/gamescope/session.sh:86-89, the invocation the week-long live measurement
+# ran). A leftover regular file — from a crashed session that wrote where a FIFO
+# should be — would silently swallow the stats stream instead. So remove and
+# recreate unconditionally.
 #
 # There is no ready FIFO: the READY=1 handshake is the child script's job, since
 # it has to happen AFTER the environment is published. See the comment on
@@ -69,6 +77,23 @@ mkfifo -m 0600 "$STATS_FIFO"
 # stale copy so a unit reading it can never pick up a previous session's
 # DISPLAY — which would connect it to an X server that no longer exists.
 rm -f "$ENV_FILE"
+
+# 2b. The output mode, rendered from ~/.config/tv-shell/core.toml.
+#
+# THIS IS THE LINK THAT MAKES [display] A REAL SETTING. The gamescope unit used
+# to hard-code -W 3840 -H 2160 -r 120 while core.toml documented those keys as
+# "read by the unit's ExecStart"; they were not, so setting refresh = 60 was
+# accepted by validate() and changed nothing. `write-session-env` renders the
+# config into KEY=value lines, the unit reads them with a REQUIRED
+# EnvironmentFile= and substitutes them.
+#
+# Not `|| true`: the unit's EnvironmentFile has no leading `-`, so a missing or
+# stale file fails the compositor's start loudly rather than booting it at some
+# other mode. Failing here says WHY (a bad core.toml names its own bad key);
+# failing there would only say the file is missing. `set -e` carries it out.
+rm -f "$MODE_FILE"
+log "rendering the output mode into $MODE_FILE"
+"$CORE_BIN" write-session-env "$MODE_FILE"
 
 # 3. Start and block.
 #

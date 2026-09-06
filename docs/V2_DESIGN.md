@@ -234,7 +234,7 @@ The panel becomes the recovery and observability surface for the supervisor (uni
 - **Fix the Ansible pin first** (jedwards1230/homelab-ansible#320): the role pins a pre-workspace-model daemon and downgrades the running one on any run. The v2 core gets its own release stream and pin. Packaging (#144, #147) remains the end state for install, upgrade and rollback.
 - **gamescope pinned ≥ 3.16.28** by the deploy role; 3.16.23 is not representative (§13 Q5). The headless CI compositor pins the same version.
 - **`--expose-wayland` breaks the WSI layer for every Steam-runtime app, and the fix is per-app.** gamescope hands children `WAYLAND_DISPLAY=gamescope-0`; pressure-vessel (the Steam runtime container) preserves only `wayland-*` socket names, so it rewrites that to `wayland-0` and rewrites `GAMESCOPE_WAYLAND_DISPLAY` to an absolute socket path. The layer's `isRunningUnderGamescope()` gate can then never match, so it does not load: no HDR for any Steam-runtime app, and with dialogs enabled a black screen. Measured 2026-09-05. **The per-app fix is sufficient and was proven** — launching Steam with `WAYLAND_DISPLAY` unset worked with `--expose-wayland` still on and no session restart — so v2 keeps the flag and unsets the variable in the launch environment for that app class. Do **not** chase this with gamescope master: master's bd52d6e sets `WAYLAND_DISPLAY=""`, which pressure-vessel turns back into `wayland-0`, recreating the breakage.
-- **New config** (`config.toml.example` rows and `daemon_config.rs` structs land with the core): `[display]` width/height/refresh, HDR default, SDR nits, hotplug settle; `[session]` shell app id, Xwayland count; `[supervisor]` stall seconds, restart thresholds, short-session window/count; `[av]` AVR host/port, input code, zone-2 policy, TV MAC/broadcast, webOS host and key file.
+- **New config** (`config.toml.example` rows and `daemon_config.rs` structs land with the core): `[display]` width/height/refresh, HDR default, SDR nits, hotplug settle; `[session]` shell app id, Xwayland count, the switch/map/launch-confirm bounds; `[supervisor]` stall seconds, restart thresholds, short-session window/count; `[av]` AVR host/port, input code, zone-2 policy, TV MAC/broadcast, webOS host and key file. Landed as `config/core.toml.example` + `core/src/config.rs` (its own file, not `config.toml` — v1's root is `deny_unknown_fields`). The `[display]` mode and `session.xwayland_count` reach gamescope through an env file the session script renders with `tv-shell-core write-session-env` and the unit reads with a required `EnvironmentFile=`; a config key whose stated consumer does not exist is the repo's #416 class and a test asserts the link.
 - **Cutover criteria**: §6 table green on the pinned build, driven through the runtime atoms, including the eyes-only rows and the new bench rows; field assertions at zero and heartbeat false positives at zero for seven consecutive days of normal use; every PRD §3 journey reproduced; a Moonlight session, a Plex session and a web app each survive a shell restart underneath; the §8 site preconditions verified; v1 still boots after a v2 deploy.
 - **Rollback** is selecting the v1 session at the display manager, by hand or by the short-session hook.
 
@@ -262,6 +262,40 @@ Plugin requirements (mechanism undecided): a plugin declares an app class, a lau
 ### Fallback considered
 
 If criterion 10 fails, or if a Steam-first future makes a custom shell not worth its cost, the fallback is a **Bazzite/ChimeraOS-style `gamescope-session` with Steam Big Picture as the shell**. It buys Remote Play, Steam Input, the overlay and HDR for free, with Moonlight and Plex as non-Steam shortcuts. It costs what this design exists to keep: our shell as a peer of apps, native Plex and web apps, and daemon-owned AV control, which would move into a sidecar or a Decky-style plugin. It is a real path, not a strawman, and criterion 10 is where it is chosen. **Criterion 10's Big Picture half passed on 2026-09-05**, so this fallback is not selected; it stays on the page as the named alternative should a Steam-first future make a custom shell not worth its cost. Either way the ChimeraOS session files are reused (§4).
+
+### What §9 describes and what `core/` implements
+
+§9 is the design. As of 2026-09-06 the shipped `core/` crate and its units cover
+part of it, and the gap is recorded here rather than left to be discovered on the
+couch:
+
+| §9 row | State in `core/` |
+|---|---|
+| gamescope dies → session exits | `BindsTo=` on the target, plus the session script's `--wait`. Untested on hardware |
+| Core dies → restart, stateless, never writes "home" on boot | Implemented (`reconcile_on_start`) |
+| Stuck in an app → `intent home` | The base-layer write and its bounded verify exist; there is no intent surface on the core yet |
+| Frames stop → forced-paint heartbeat | **Not implemented.** `[supervisor].stall_secs` has no reader |
+| Shell crash-loops → short-session tracker, then select v1 | **Not implemented.** No `ExecStartPre`/`ExecStopPost`, no counter, no deployment hook; `[supervisor].restart_threshold` / `restart_window_secs` have no reader. The gamescope unit briefly carried `StartLimitIntervalSec=60`/`StartLimitBurst=3` with a comment claiming to deliver this — the limiter was inert (`Restart=no`, so there is never a second attempt to count, and the session script's `reset-failed` clears the counter on every relogin) and has been removed rather than left standing as a protection that is not there. **Rollback is manual: select the v1 session at the display manager.** |
+| Shell dies → restart under the live compositor | The `Upholds=` is in the target; the shell unit does not exist yet |
+| Compositor wedged but alive → panel restarts units | Panel changes not started |
+
+§5's **transient-unmap hysteresis** is likewise unimplemented:
+`GAMESCOPECTRL_BASELAYER_WINDOW` is read into `ScreenState` and never written,
+and nothing holds the base layer across a known transition or applies hysteresis
+before treating a fallback to the shell as an app exit.
+
+Two §5 rules the crate does implement in a shape §5 does not spell out, both
+because a single bound conflated two different waits:
+
+- A `show` verifies against **two** bounds — `switch_timeout_ms` once the target
+  has a mapped window, `map_timeout_ms` while it has none — and reports two
+  distinct errors. Under one bound a `show` issued right after a `launch` failed
+  on every working launch, which trains a caller to ignore the one error §5 says
+  must never be ignored.
+- A `launch` **confirms itself** (launcher alive, `/proc/<pid>/cgroup` naming the
+  scope) before reporting success. `Command::spawn` returning `Ok` says nothing
+  about whether the app started, so an unconfirmed launch is an error rather than
+  a success payload naming a dead pid.
 
 ## 13. Open questions
 

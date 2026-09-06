@@ -12,10 +12,10 @@
 #   environment (WAYLAND_DISPLAY, DISPLAY, GAMESCOPE_WAYLAND_DISPLAY,
 #   XAUTHORITY) to %t/tv-shell-gamescope-environment. So `READY=1` means "the
 #   environment file exists and is complete", which is exactly the precondition
-#   every unit ordered after graphical-session.target needs. A plain Type=simple
-#   would let the core start against a compositor that has no X server yet and no
-#   environment file to read, and the failure would present as "the core cannot
-#   connect to X" rather than as a startup ordering bug.
+#   every unit ordered after this one needs. A plain Type=simple would let the
+#   core start against a compositor that has no X server yet and no environment
+#   file to read, and the failure would present as "the core cannot connect to
+#   X" rather than as a startup ordering bug.
 #
 #   THERE IS DELIBERATELY NO `-R <fifo>`. gamescope's ready-fd is the mechanism
 #   the ChimeraOS units use, but here the child already provides the same
@@ -42,12 +42,6 @@ Description=gamescope compositor for the tv-shell v2 session
 Before=graphical-session.target
 Wants=graphical-session.target
 
-# A compositor that will not start is not something to retry into a black
-# screen: three attempts in a minute, then stop and let the session script's
-# --wait return so the display manager can offer v1 (§11 rollback).
-StartLimitIntervalSec=60
-StartLimitBurst=3
-
 [Service]
 Type=notify
 NotifyAccess=all
@@ -57,16 +51,22 @@ TimeoutStartSec=5
 
 # The stats FIFO is created by the session script before the target is started,
 # so it exists by the time gamescope opens it. %t is $XDG_RUNTIME_DIR.
-#
-# ⚠ UNSETTLED, and the first thing to check on a real boot: §9's stats relay
-# (tv-shell-v2-stats.service) is the intended sole reader of this FIFO and DOES
-# NOT EXIST YET. If gamescope opens `-T` for writing and blocks for a reader,
-# this unit hangs at startup exactly as an unused `-R` would. §9 says lines
-# written with no reader are dropped, which implies it does not block — but that
-# is inferred from the design doc, not measured. Drop `-T` until the relay lands
-# if a first boot hangs here.
 Environment=TV_SHELL_STATS_FIFO=%t/tv-shell-gamescope-stats
 Environment=TV_SHELL_ENV_FILE=%t/tv-shell-gamescope-environment
+
+# THE OUTPUT MODE, AND WHY IT IS NOT WRITTEN HERE.
+#
+# This file used to hard-code `-W 3840 -H 2160 -r 120` while [display] in
+# core.toml documented itself as "read by the unit's ExecStart". It was not: an
+# operator could set `refresh = 60`, watch the core's validate() accept it, and
+# change nothing. Two literals with no link between them.
+#
+# Now `tv-shell-core write-session-env` renders this file from core.toml, the
+# session script runs it BEFORE starting the target, and the substitutions below
+# are the link. NO LEADING `-`: if the file is missing the mode is unknown, and
+# starting a 4K120-pinned compositor with an unknown mode is exactly the silent
+# success §3 exists to kill. Fail loudly instead.
+EnvironmentFile=%t/tv-shell-gamescope-mode
 
 # §9: a layer failure must exit loudly rather than ask an invisible question.
 # gamescope's zenity dialogs are untagged windows nobody can see, and a client
@@ -74,13 +74,29 @@ Environment=TV_SHELL_ENV_FILE=%t/tv-shell-gamescope-environment
 Environment=GAMESCOPE_ZENITY_DISABLE=1
 
 # The mode is PINNED (§6): the EDID preferred mode on this chain is 60 Hz, so
-# letting the display choose gives 4K60. Keep these in step with [display] in
-# ~/.config/tv-shell/core.toml — the core reads that file, this unit does not.
+# letting the display choose gives 4K60.
 #
 # `--steam` selects the SteamControlled focus policy the whole §5 model depends
-# on. `--expose-wayland` stays ON: §11's per-app fix (unset WAYLAND_DISPLAY for
+# on. It has a short form, `-e`, and this unit used to pass BOTH — one flag
+# twice, with the bare `-e` reading like the xwayland-count flag it is not.
+# `--xwayland-count` is long-only and takes an argument; `-e` takes none, so a
+# reader "fixing" the mismatch by writing `-e 2` hands gamescope `2` as its child
+# command, gamescope execs it, it fails instantly, BindsTo= stops the target and
+# the television relogins forever. Long forms only here for that reason.
+#
+# `--expose-wayland` stays ON: §11's per-app fix (unset WAYLAND_DISPLAY for
 # Steam-runtime apps) is proven, and chasing the problem via gamescope master
 # instead recreates it.
+#
+# `--stats-path` (not the short `-T`) matches dev/gamescope/session.sh:144, the
+# exact invocation the week-long live measurement ran, so there is no question
+# about which flag was measured. On the stats FIFO having no reader: that is the
+# live appliance's own configuration — the kit creates the FIFO, nothing tails it
+# unless an operator does, and gamescope does not hang. The kit records why
+# (dev/gamescope/session.sh:86-89): gamescope open()s an EXISTING FIFO and, when
+# nothing is on the other end, retries every 10 s rather than blocking. §9's
+# stats relay is still the intended permanent reader; until it lands the stats
+# simply do not appear, which is a missing feature and not a startup risk.
 #
 # gamescope's PRIMARY CHILD, and the whole ready handshake. gamescope exits
 # when this command exits, so `-- /bin/true` would end the compositor
@@ -95,13 +111,23 @@ ExecStart=/usr/bin/gamescope \
     --expose-wayland \
     --hdr-enabled \
     --adaptive-sync \
-    -W 3840 -H 2160 -r 120 \
-    -e \
-    -T ${TV_SHELL_STATS_FIFO} \
+    -W ${TV_SHELL_GS_WIDTH} -H ${TV_SHELL_GS_HEIGHT} -r ${TV_SHELL_GS_REFRESH} \
+    --xwayland-count ${TV_SHELL_GS_XWAYLAND_COUNT} \
+    --stats-path ${TV_SHELL_STATS_FIFO} \
     -- /opt/tv-shell/bin/tv-shell-gamescope-child.sh
 
 # No Restart=: the compositor is BindsTo'd by the session target, so its death
 # is meant to end the session and hand control back to the display manager,
 # not to be papered over by a restart under a session whose clients have all
 # lost their surfaces.
+#
+# AND THEREFORE NO StartLimit* EITHER. This unit used to carry
+# StartLimitIntervalSec=60 / StartLimitBurst=3 with a comment promising "three
+# attempts in a minute, then offer v1". That protection did not exist: with
+# Restart=no there is never a second attempt for the limiter to count, and the
+# session script's `reset-failed` clears the counter on every relogin anyway. A
+# comment claiming a protection that is not there is worse than no protection,
+# because it stops the next person looking. §9's short-session tracker — the
+# thing that would actually catch a crash-loop and select v1 — IS NOT
+# IMPLEMENTED. See tv-shell-session.target's header.
 Restart=no

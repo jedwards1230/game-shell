@@ -50,6 +50,7 @@
 use std::os::unix::fs::FileTypeExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::atoms::AppId;
 
@@ -87,6 +88,35 @@ pub enum LaunchError {
         #[source]
         source: std::io::Error,
     },
+    /// The launcher exited before it could be confirmed. A misspelled binary, a
+    /// `--unit=` collision, a bus that went away after the preflight — all of
+    /// them land here, and all of them used to reply with a JSON success payload
+    /// naming a pid that was already dead.
+    #[error(
+        "`systemd-run --user --scope --unit={unit}` exited immediately ({status}); \
+         the app was NOT launched. Check the journal for systemd-run's own error line"
+    )]
+    ExitedImmediately { unit: String, status: String },
+    /// The process is alive but is not in the scope we asked for.
+    ///
+    /// This is the failure that matters most, because it is the one that used to
+    /// be invisible: gamescope identifies an app **only** by its cgroup scope, so
+    /// a live process outside one is a window no focus rule can ever name.
+    #[error(
+        "launched pid {pid} is not in {unit}.scope after {waited_ms} ms \
+         (bound {bound_ms} ms){detail}; gamescope resolves an app id from the cgroup \
+         scope alone, so this window would be unfocusable"
+    )]
+    NotScoped {
+        unit: String,
+        pid: u32,
+        waited_ms: u64,
+        bound_ms: u64,
+        /// What the pid's cgroup said instead, when it said anything.
+        detail: String,
+    },
+    #[error("reading the launched process's state: {0}")]
+    Confirm(#[source] std::io::Error),
 }
 
 /// A verified session environment for `systemd-run --user`.
@@ -181,7 +211,7 @@ impl ScopeEnv {
 /// `systemd-run --unit` takes; [`scope_of`] matches the suffixed form as it
 /// appears in `/proc/<pid>/cgroup`.
 pub fn scope_unit(app_id: AppId, launcher_pid: u32) -> String {
-    format!("app-steam-app{}-{}", app_id.0, launcher_pid)
+    format!("app-steam-app{}-{}", app_id.get(), launcher_pid)
 }
 
 /// The full argv for a scoped launch, as a testable value.
@@ -203,35 +233,75 @@ pub fn scope_argv(unit: &str, command: &[String]) -> Vec<String> {
 }
 
 /// A launched app: the pid that owns the scope, and the scope's name.
+///
+/// **Only constructed for a CONFIRMED launch** — see [`launch`]. Every field is
+/// a fact read back after the spawn, not a hope recorded before it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Launched {
     pub app_id: AppId,
     pub pid: u32,
     /// The unit name **with** its `.scope` suffix, as it appears in cgroup paths.
     pub scope: String,
+    /// How long the confirmation took. A number creeping toward the bound is the
+    /// early warning that this path is degrading, the same reason
+    /// [`crate::baselayer::Switched::took_ms`] is returned rather than dropped.
+    pub confirmed_ms: u64,
 }
 
-/// Launch `command` inside a transient `app-steam-app<appid>-<pid>.scope`.
+/// Launch `command` inside a transient `app-steam-app<appid>-<pid>.scope`,
+/// **and confirm it before reporting success**.
 ///
-/// The CALLER does not wait on the child: the core supervises it by unit, and
-/// blocking here would stall the IPC reactor. stdin is `/dev/null`; stdout and
-/// stderr are inherited so the child's output lands in the core's journal
-/// alongside `systemd-run`'s `Running as unit:` line.
+/// # Why a spawn is not a launch
 ///
-/// **Something must still reap it, though.** Supervision is by unit, but std
-/// does not reap a `Child` on drop and the core installs no `SIGCHLD` handler,
-/// so a spawned-and-forgotten launch stays a zombie for the core's whole
-/// lifetime — holding a pid the kernel cannot reuse and, worse for this crate,
-/// keeping [`scope_of`] answering confidently about a process that is dead. So
-/// the `Child` is moved into a detached thread whose only job is to `wait()` it
-/// and log the exit status. One short-lived thread per launch, and launches are
-/// user-paced.
+/// `Command::spawn()` returns `Ok` the instant `systemd-run` is forked. It says
+/// nothing about whether the binary exists, whether the session bus was still
+/// there, or whether the `--unit=` name collided with a scope whose processes
+/// had not been reaped. This function used to return its `Launched` payload
+/// straight off that `Ok`, with the exit status consumed only by a detached
+/// reaper thread and logged at `debug!` — so every one of those failures replied
+/// with a JSON **success** naming a dead pid and a scope that never existed.
+///
+/// That is v1's silent-success class (§3) reproduced exactly, in the module
+/// whose doc comment says the unscoped case "would appear to succeed and fail
+/// silently at the far end". So the launch confirms itself:
+///
+/// 1. The launcher has not already exited (`try_wait`).
+/// 2. `/proc/<pid>/cgroup` names the scope we asked for ([`scope_of`]) — which
+///    is the one honest post-launch confirmation available without asking the
+///    compositor, because it is *exactly the string gamescope parses*.
+///
+/// Both are polled to a bound rather than checked once: the scope shows up a few
+/// milliseconds after the spawn. A launch that cannot be confirmed inside the
+/// bound is an `Err`, never a `Launched`.
+///
+/// # What it still does not wait for
+///
+/// A confirmed launch means the process is alive in the right cgroup. It does
+/// **not** mean a window has mapped — that wait belongs to
+/// [`crate::baselayer`]'s map bound, and conflating the two is what made a
+/// `show` after a `launch` fail on every working launch.
+///
+/// # Reaping
+///
+/// std does not reap a `Child` on drop and the core installs no `SIGCHLD`
+/// handler, so a spawned-and-forgotten launch stays a zombie for the core's
+/// whole lifetime — holding a pid the kernel cannot reuse and, worse for this
+/// module, keeping [`scope_of`] answering confidently about a process that is
+/// dead. So the `Child` is moved into a detached thread whose only job is to
+/// `wait()` it and log the exit status. **That happens on every path, including
+/// the failure paths**, or a refused launch would leak the very zombie the
+/// reaper exists to prevent.
 ///
 /// Note the pid recorded is `systemd-run`'s own. That is correct and load-
 /// bearing: `systemd-run --scope` **execs** the target command, so the pid the
 /// caller holds is the app's own pid the whole way down (verified by the kit),
 /// which keeps pid-matching, family walks and `wait` working unchanged.
-pub fn launch(env: &ScopeEnv, app_id: AppId, command: &[String]) -> Result<Launched, LaunchError> {
+pub fn launch(
+    env: &ScopeEnv,
+    app_id: AppId,
+    command: &[String],
+    confirm_timeout: Duration,
+) -> Result<Launched, LaunchError> {
     if command.is_empty() {
         return Err(LaunchError::EmptyCommand);
     }
@@ -260,8 +330,18 @@ pub fn launch(env: &ScopeEnv, app_id: AppId, command: &[String]) -> Result<Launc
 
     // The real pid, read BEFORE the child moves into the reaper.
     let pid = child.id();
-    let scope = format!("{unit}.scope");
-    let reaped = scope.clone();
+    let outcome = confirm(
+        &unit,
+        pid,
+        confirm_timeout,
+        || child.try_wait(),
+        || scope_of(pid),
+        || std::thread::sleep(CONFIRM_POLL_INTERVAL),
+    );
+
+    // Reap on EVERY path. A refused launch that leaks a zombie is worse than the
+    // silent success it replaced.
+    let reaped = format!("{unit}.scope");
     std::thread::spawn(move || match child.wait() {
         Ok(status) => {
             tracing::debug!(pid, scope = %reaped, %status, "launched process reaped")
@@ -271,7 +351,86 @@ pub fn launch(env: &ScopeEnv, app_id: AppId, command: &[String]) -> Result<Launc
         }
     });
 
-    Ok(Launched { app_id, pid, scope })
+    finish(app_id, pid, &unit, outcome)
+}
+
+/// Turn a confirmation outcome into the reply.
+///
+/// One line, and split out anyway, because it is THE line: it is where an
+/// unconfirmed launch either becomes an `Err` or gets laundered into a
+/// `Launched` naming a dead pid, which is what this code used to do. Everything
+/// above it is a real spawn, so without this seam the rule would be defended
+/// only by tests of `confirm` — which say nothing about whether anyone acts on
+/// its answer.
+fn finish(
+    app_id: AppId,
+    pid: u32,
+    unit: &str,
+    confirmed: Result<u64, LaunchError>,
+) -> Result<Launched, LaunchError> {
+    Ok(Launched {
+        app_id,
+        pid,
+        scope: format!("{unit}.scope"),
+        confirmed_ms: confirmed?,
+    })
+}
+
+/// How often the confirmation loop re-reads `/proc` while waiting.
+const CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The confirmation itself, with every effect injected.
+///
+/// `exited` is `Child::try_wait`, `probe` is [`scope_of`], `wait` is the sleep.
+/// Injected so the whole decision — including "the launcher died", which cannot
+/// be provoked reliably by spawning a real process — is unit-testable with no
+/// systemd, no D-Bus and no `/proc` at all.
+///
+/// Returns how many milliseconds the confirmation took.
+#[allow(clippy::type_complexity)]
+fn confirm(
+    unit: &str,
+    pid: u32,
+    timeout: Duration,
+    mut exited: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+    mut probe: impl FnMut() -> Option<Scope>,
+    mut wait: impl FnMut(),
+) -> Result<u64, LaunchError> {
+    let started = Instant::now();
+    let want = format!("{unit}.scope");
+    let mut last_seen: Option<String> = None;
+    loop {
+        // Ordered deliberately: an exit is checked FIRST, because a launcher
+        // that has already died is a definite answer and the cgroup read for a
+        // dead pid is just an absent file that looks like "not yet".
+        if let Some(status) = exited().map_err(LaunchError::Confirm)? {
+            return Err(LaunchError::ExitedImmediately {
+                unit: unit.to_string(),
+                status: status.to_string(),
+            });
+        }
+        match probe() {
+            Some(scope) if scope.unit == want => return Ok(started.elapsed().as_millis() as u64),
+            // In an `app-steam-app*` scope, but not OURS. Two launches racing a
+            // unit name, or a pid reused. Worth naming: it is the difference
+            // between "no scope" and "someone else's app id".
+            Some(other) => last_seen = Some(other.unit),
+            None => {}
+        }
+        if started.elapsed() >= timeout {
+            return Err(LaunchError::NotScoped {
+                unit: unit.to_string(),
+                pid,
+                waited_ms: started.elapsed().as_millis() as u64,
+                bound_ms: timeout.as_millis() as u64,
+                detail: match last_seen {
+                    Some(u) => format!(", it is in {u} instead"),
+                    None => String::new(),
+                },
+            });
+        }
+        wait();
+    }
 }
 
 /// A per-process monotonic tag for the scope name's second field.
@@ -339,7 +498,7 @@ fn parse_scope_name(segment: &str) -> Option<Scope> {
         return None;
     }
     Some(Scope {
-        app_id: AppId(app.parse().ok()?),
+        app_id: AppId::new(app.parse().ok()?),
         tag: tag.parse().ok()?,
         unit: segment.to_string(),
     })
@@ -353,15 +512,23 @@ pub fn scope_of(pid: u32) -> Option<Scope> {
     parse_cgroup_scope(&body)
 }
 
+/// Is `path` a regular file with an execute bit set?
+///
+/// `is_file()` alone accepted a non-executable file of the right name, so the
+/// preflight would pass and the spawn would then fail with `EACCES` — turning a
+/// clear "no `systemd-run` on PATH" into an obscure one. `which(1)` checks the
+/// x-bit; so does this.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// Is `name` on `PATH`?
 fn which(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                let candidate = dir.join(name);
-                candidate.is_file()
-            })
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(name))))
         .unwrap_or(false)
 }
 
@@ -376,22 +543,22 @@ mod tests {
 
     #[test]
     fn unit_name_matches_the_upstream_grammar() {
-        assert_eq!(scope_unit(AppId(9003), 2970), "app-steam-app9003-2970");
-        assert_eq!(scope_unit(AppId(0), 1), "app-steam-app0-1");
+        assert_eq!(scope_unit(AppId::new(9003), 2970), "app-steam-app9003-2970");
+        assert_eq!(scope_unit(AppId::new(0), 1), "app-steam-app0-1");
     }
 
     #[test]
     fn unit_name_round_trips_through_the_parser() {
-        let unit = scope_unit(AppId(413091), 12345);
+        let unit = scope_unit(AppId::new(413091), 12345);
         let scope = parse_scope_name(&format!("{unit}.scope")).unwrap();
-        assert_eq!(scope.app_id, AppId(413091));
+        assert_eq!(scope.app_id, AppId::new(413091));
         assert_eq!(scope.tag, 12345);
     }
 
     #[test]
     fn parses_a_real_cgroup_body() {
         let scope = parse_cgroup_scope(REAL_CGROUP).unwrap();
-        assert_eq!(scope.app_id, AppId(9003));
+        assert_eq!(scope.app_id, AppId::new(9003));
         assert_eq!(scope.tag, 2970);
         assert_eq!(scope.unit, "app-steam-app9003-2970.scope");
     }
@@ -443,7 +610,7 @@ mod tests {
     fn cgroup_v1_multiline_body_still_finds_the_scope() {
         let body = "12:pids:/user.slice/app-steam-app770-99.scope\n\
                     0::/user.slice/app.slice/app-steam-app770-99.scope\n";
-        assert_eq!(parse_cgroup_scope(body).unwrap().app_id, AppId(770));
+        assert_eq!(parse_cgroup_scope(body).unwrap().app_id, AppId::new(770));
     }
 
     #[test]
@@ -547,6 +714,192 @@ mod tests {
         assert!(ScopeEnv::resolve(true, Some("/x"), None, |_| false).is_err());
     }
 
+    // -- launch confirmation (H1) --------------------------------------------
+
+    /// A `Scope` for a unit name, as `/proc/<pid>/cgroup` would yield.
+    fn scope(unit_with_suffix: &str) -> Scope {
+        parse_scope_name(unit_with_suffix).unwrap()
+    }
+
+    fn never_exits() -> impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>> {
+        || Ok(None)
+    }
+
+    #[test]
+    fn a_launch_is_confirmed_only_once_its_scope_appears() {
+        // The scope shows up a few polls in, as it does on a real box.
+        let mut polls = 0;
+        let ms = confirm(
+            "app-steam-app9003-2970",
+            4242,
+            Duration::from_millis(500),
+            never_exits(),
+            || {
+                polls += 1;
+                (polls > 3).then(|| scope("app-steam-app9003-2970.scope"))
+            },
+            || {},
+        )
+        .unwrap();
+        assert!(ms < 500, "{ms}");
+    }
+
+    #[test]
+    fn an_unconfirmed_launch_never_becomes_a_launched_payload() {
+        // The finding in one assertion: a spawn is not a launch. Every failure
+        // `confirm` can return has to come back out of the launch, not be
+        // dropped in favour of a payload naming a pid nothing verified.
+        for err in [
+            LaunchError::NotScoped {
+                unit: "app-steam-app9003-2970".into(),
+                pid: 4242,
+                waited_ms: 2000,
+                bound_ms: 2000,
+                detail: String::new(),
+            },
+            LaunchError::ExitedImmediately {
+                unit: "app-steam-app9003-2970".into(),
+                status: "exit status: 1".into(),
+            },
+            LaunchError::Confirm(std::io::Error::other("no such process")),
+        ] {
+            let want = err.to_string();
+            let got = finish(AppId::new(9003), 4242, "app-steam-app9003-2970", Err(err))
+                .expect_err("an unconfirmed launch must not produce a Launched");
+            assert_eq!(got.to_string(), want);
+        }
+        // And a confirmed one does produce it, with the scope suffix attached.
+        let ok = finish(AppId::new(9003), 4242, "app-steam-app9003-2970", Ok(17)).unwrap();
+        assert_eq!(ok.scope, "app-steam-app9003-2970.scope");
+        assert_eq!(ok.confirmed_ms, 17);
+    }
+
+    #[test]
+    fn a_launcher_that_exits_immediately_is_not_a_launch() {
+        // A misspelled binary, a --unit= collision, a bus that went away after
+        // the preflight: systemd-run exits and there is no app. This used to
+        // reply with a JSON success payload naming a dead pid.
+        use std::os::unix::process::ExitStatusExt as _;
+        let err = confirm(
+            "app-steam-app9003-2970",
+            4242,
+            Duration::from_millis(500),
+            || Ok(Some(std::process::ExitStatus::from_raw(1 << 8))),
+            || panic!("must not ask about the cgroup of a process that has exited"),
+            || {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LaunchError::ExitedImmediately { .. }),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("was NOT launched"), "{msg}");
+    }
+
+    #[test]
+    fn a_live_process_that_never_reaches_its_scope_is_not_a_launch() {
+        // The most important one: the process IS alive, so every "is it running"
+        // check passes — but gamescope resolves an app id from the cgroup scope
+        // alone, so this window could never be focused. Reporting `ok` here is
+        // the unscoped launch this module exists to make unreachable.
+        let err = confirm(
+            "app-steam-app9003-2970",
+            4242,
+            Duration::from_millis(1),
+            never_exits(),
+            || None,
+            || {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LaunchError::NotScoped { pid: 4242, .. }),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("unfocusable"), "{msg}");
+    }
+
+    #[test]
+    fn landing_in_someone_elses_scope_is_named_in_the_error() {
+        let err = confirm(
+            "app-steam-app9003-2970",
+            4242,
+            Duration::from_millis(1),
+            never_exits(),
+            || Some(scope("app-steam-app770-99.scope")),
+            || {},
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("app-steam-app770-99.scope"), "{msg}");
+    }
+
+    #[test]
+    fn confirmation_never_reports_success_for_a_near_miss() {
+        // A scope whose app id differs by one digit is a different app, and the
+        // match is on the whole unit name for exactly that reason.
+        for other in [
+            "app-steam-app9003-2971.scope",
+            "app-steam-app90030-2970.scope",
+            "app-steam-app903-2970.scope",
+        ] {
+            let r = confirm(
+                "app-steam-app9003-2970",
+                1,
+                Duration::from_millis(1),
+                never_exits(),
+                || Some(scope(other)),
+                || {},
+            );
+            assert!(r.is_err(), "{other} must not confirm");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_child_state_is_an_error_not_an_assumed_success() {
+        let err = confirm(
+            "u",
+            1,
+            Duration::from_millis(1),
+            || Err(std::io::Error::other("no such process")),
+            || Some(scope("app-steam-app9003-2970.scope")),
+            || {},
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::Confirm(_)), "{err}");
+    }
+
+    // -- PATH resolution (L3) ------------------------------------------------
+
+    #[test]
+    fn a_non_executable_file_is_not_a_binary() {
+        // Real files rather than a scratch dir: this asserts a property of the
+        // filesystem, and a test that has to create a file to state it can fail
+        // for reasons (a read-only /tmp, a sandbox) that say nothing about the
+        // code. The test binary itself is the executable; this crate's own
+        // source is the non-executable regular file.
+        let exe = std::env::current_exe().expect("the test binary exists and is executable");
+        assert!(is_executable(&exe));
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        assert!(source.is_file(), "{source:?}");
+        assert!(
+            !is_executable(&source),
+            "a readable-but-not-executable file passed the preflight, so the spawn \
+             then failed with EACCES instead of the clear 'no systemd-run on PATH'"
+        );
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !is_executable(dir),
+            "a DIRECTORY of the right name is not a binary — and directories carry \
+             the execute bit as 'searchable', so a mode check without is_file() \
+             would accept every one of them"
+        );
+        assert!(!is_executable(&dir.join("no-such-binary")));
+    }
+
     #[test]
     fn empty_command_is_refused() {
         // Built through the preflight, because there is no other way to build
@@ -556,7 +909,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            launch(&env, AppId(1), &[]).unwrap_err(),
+            launch(&env, AppId::new(1), &[], Duration::from_millis(1)).unwrap_err(),
             LaunchError::EmptyCommand
         ));
     }

@@ -13,7 +13,8 @@
 //! base-layer switch is a write plus a verify that must not interleave with
 //! another one (a verify that can observe a racing intent's window is not a
 //! verify). Nothing here serializes them — the implementation does, behind the
-//! trait: see `GamescopeCompositor`'s `intent_lock` in [`crate::compositor`].
+//! trait: `GamescopeCompositor` wraps every switch in a
+//! [`crate::baselayer::IntentGate`].
 //!
 //! Compositor work is behind the [`Compositor`] trait for one reason: it makes
 //! the whole request/reply surface testable end-to-end with no X server, the way
@@ -177,11 +178,11 @@ mod tests {
             }
         }
         fn home(&self) -> String {
-            self.show(AppId(9001))
+            self.show(AppId::new(9001))
         }
         fn launch(&self, app_id: AppId, command: &[String]) -> String {
             protocol::resp_json(&serde_json::json!({
-                "app_id": app_id.0,
+                "app_id": app_id.get(),
                 "command": command,
             }))
         }
@@ -234,8 +235,17 @@ mod tests {
         );
     }
 
+    /// **This proves the IPC layer forwards an error, and nothing more.**
+    ///
+    /// `FakeCompositor::show` hardcodes the error string, so this test cannot
+    /// tell whether a real timeout produces one — invert
+    /// `baselayer::write_and_verify`'s `Err` to an `Ok` and this still passes.
+    /// That gap is why `baselayer` grew a `BaseLayer` seam and
+    /// `a_switch_that_never_takes_is_never_ok`, which is the actual guard. This
+    /// one covers the layer above it: that `dispatch` does not turn an `error:`
+    /// reply into `ok` on the way out.
     #[tokio::test]
-    async fn a_failed_switch_is_never_reported_as_ok() {
+    async fn the_ipc_layer_forwards_a_failed_switch_as_an_error() {
         let c = fake(true);
         let r = reply(&c, "show 9003").await;
         assert!(r.starts_with("error:"), "{r}");

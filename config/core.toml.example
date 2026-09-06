@@ -29,11 +29,17 @@
 
 # --- Output mode and HDR ------------------------------------------------------
 [display]
-# NOT YET READ BY THE CORE — the mode lives on gamescope's command line, in
-# core/units/tv-shell-gamescope.service's ExecStart (-W / -H / -r). Set both and
-# keep them in step; the core parses these so the two can be checked against each
-# other and so a later PR can drive a mode change, but nothing in the core acts
-# on them today.
+# THESE ARE LIVE. The session script runs `tv-shell-core write-session-env`
+# before starting the target; that renders these keys into
+# $XDG_RUNTIME_DIR/tv-shell-gamescope-mode, and
+# core/units/tv-shell-gamescope.service reads that file and substitutes
+# ${TV_SHELL_GS_WIDTH} / _HEIGHT / _REFRESH into gamescope's command line.
+# Change a value here and the compositor starts at it.
+#
+# It was not always so: the unit hard-coded `-W 3840 -H 2160 -r 120` while these
+# keys documented themselves as "read by the unit's ExecStart". They were not —
+# setting `refresh = 60` was accepted by validate() and changed nothing at all.
+# Two literals with no link between them. The env file is the link.
 #
 # PINNED, not negotiated: the EDID preferred mode on this chain is 60 Hz
 # (V2_DESIGN §6), so letting the display choose gives 4K60, not 4K120.
@@ -87,17 +93,25 @@
 # moment Steam launches. 9001 is the id the measurement kit used.
 #shell_app_id = 9001
 
-# NOT YET READ BY THE CORE — read by the unit's ExecStart (-e). Per-app server
-# creation (GAMESCOPE_CREATE_XWAYLAND_SERVER) is a later PR; when it lands the
-# core reads this to size the pool. validate() checks it regardless, because a
-# nonsense value is worth refusing before it reaches the unit.
+# How many Xwayland servers gamescope starts (--xwayland-count): one for the
+# shell plus one per concurrently launched app (§4). Must be at least 1 — the
+# shell needs a server.
 #
-# How many Xwayland servers gamescope starts (-e / --xwayland-count): one for
-# the shell plus one per concurrently launched app (§4). Must be at least 1 —
-# the shell needs a server.
+# LIVE, by the same env-file link as [display] above (${TV_SHELL_GS_XWAYLAND_COUNT}).
+#
+# NOT `-e`. This key used to be documented as "read by the unit's ExecStart
+# (-e)". `-e` is the SHORT FORM OF `--steam` — the unit was passing it twice —
+# and `--xwayland-count` is long-only and takes an argument. A reader reconciling
+# the doc with the unit would write `-e 2`; `-e` consumes no argument, so `2`
+# becomes gamescope's child command, gamescope execs it, it fails instantly,
+# BindsTo= stops the session target and the television relogins in a loop.
+#
+# Per-app server creation (GAMESCOPE_CREATE_XWAYLAND_SERVER) is still a later
+# change; when it lands the core reads this to size the pool as well.
 #xwayland_count = 2
 
-# Bound on the base-layer read-back after a switch.
+# Bound on the base-layer read-back after a switch, FOR A WINDOW THAT IS ALREADY
+# MAPPED.
 #
 # THIS IS THE FAILURE BOUND, NOT THE EXPECTED TIME. A switch is one
 # GAMESCOPECTRL_BASELAYER_APPID write followed by a read of
@@ -106,9 +120,47 @@
 # that a slow frame, a hotplug settle or a loaded box cannot produce a false
 # failure, and short enough that a real failure surfaces inside one user
 # interaction instead of looking like a hang. A mismatch inside the bound is an
-# IPC error, a metric and a log line — never `ok` (§5). Zero is refused: it
-# would report every switch as failed before the compositor could publish it.
+# IPC error, a metric and a log line — never `ok` (§5).
+#
+# RANGE: 1..=5000. Zero would report every switch as failed before the
+# compositor could publish it. The upper bound matters just as much: an intent
+# holds the core's intent lock for its whole write-and-verify, so a large value
+# queues every later show/home behind it — including §9's "stuck in an app →
+# intent home" recovery. A knob that can disable the escape hatch is not a knob.
 #switch_timeout_ms = 250
+
+# Bound on waiting for an app that has NOT MAPPED A WINDOW YET.
+#
+# A SEPARATE, MUCH LARGER BOUND, and the reason is worth reading. §6's 14–19 ms
+# is the time to switch between windows that already exist. A freshly launched
+# app takes SECONDS to map its first window, and for all of that time the base
+# layer is correct and the compositor is behaving perfectly — there is simply
+# nothing yet to show. Verified against the switch bound, `show <id>` right after
+# `launch <id>` failed on every working launch, which trains a caller to ignore
+# `base layer did not take` — the one error that must never be ignored.
+#
+# So the two waits are distinguishable: a target with a mapped window that is
+# still not on screen fails as "base layer did not take" inside switch_timeout_ms
+# of the window appearing; a target that never maps fails as "app <id> never
+# mapped a window" after this. Both are errors; neither is ever `ok`.
+#
+# RANGE: 1..=300000, and never less than switch_timeout_ms.
+#map_timeout_ms = 30000
+
+# Bound on confirming that a launched process really reached its cgroup scope.
+#
+# A SPAWN IS NOT A LAUNCH. `systemd-run` being forked successfully says nothing
+# about whether the binary exists, whether the session bus was still there, or
+# whether the --unit= name collided. So after spawning, the core polls until the
+# launcher is confirmed alive AND /proc/<pid>/cgroup names the scope it asked for
+# — the exact string gamescope parses to resolve an app id. A launch that cannot
+# be confirmed in this window is an `error:`, never a success payload naming a
+# pid nothing verified.
+#
+# RANGE: 1..=60000. `systemd-run --scope` creates the unit before it execs, so
+# the scope is normally readable within a few milliseconds; the default is
+# headroom for a loaded box, not an expected time.
+#launch_confirm_ms = 2000
 
 # --- Supervision (§9) ---------------------------------------------------------
 # NOT YET READ BY THE CORE — every key in this table. The forced-paint heartbeat
@@ -128,6 +180,16 @@
 # a bad day. Matches the short-session tracker shape SteamOS/ChimeraOS ship and
 # the v1 daemon unit's StartLimitBurst=3 / IntervalSec=60. Must be at least 1 —
 # 0 would treat the first start as a crash-loop.
+#
+# TO BE CLEAR ABOUT WHAT DOES NOT EXIST: §9's crash-loop response — a
+# short-session tracker that backs off and then selects the v1 session — is NOT
+# IMPLEMENTED. There is no ExecStartPre/ExecStopPost anywhere in core/units/ and
+# no counter. The gamescope unit briefly carried StartLimitIntervalSec/Burst with
+# a comment claiming it; that limiter was inert (Restart=no means there is never
+# a second attempt to count, and the session script's `reset-failed` clears the
+# counter on every relogin) and has been removed rather than left standing as a
+# protection that is not there. Rollback today is manual: select the v1 session
+# at the display manager.
 #restart_threshold = 3
 
 # The window the restart threshold is counted over, in seconds.

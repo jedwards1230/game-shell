@@ -57,17 +57,19 @@ pub struct CoreConfig {
 pub struct DisplayConfig {
     /// `-W`. Output width in pixels.
     ///
-    /// **Read by the systemd unit's `ExecStart`, not by the core.** The mode
-    /// lives on gamescope's command line (`core/units/tv-shell-gamescope.service`);
-    /// the core parses the key so the two can be checked against each other and
-    /// so a later PR can drive a mode change, but nothing in this crate consumes
-    /// it today.
+    /// **Consumed by [`CoreConfig::session_env`]**, which the session script
+    /// renders into `$XDG_RUNTIME_DIR/tv-shell-gamescope-mode` before the target
+    /// starts; the gamescope unit reads that file and substitutes
+    /// `${TV_SHELL_GS_WIDTH}` into its `ExecStart`.
+    ///
+    /// It used to say "read by the unit's ExecStart" while the unit hard-coded
+    /// `-W 3840 -H 2160 -r 120`, so setting `refresh = 60` here changed nothing
+    /// and `validate()` accepted it — a config key whose stated consumer did not
+    /// exist. The env file is the link that makes the label true.
     pub width: u32,
-    /// `-H`. Output height in pixels. Read by the unit's `ExecStart`, not by the
-    /// core — see [`Self::width`].
+    /// `-H`. Output height in pixels. See [`Self::width`] for the link.
     pub height: u32,
-    /// `-r`. Refresh rate in Hz. Read by the unit's `ExecStart`, not by the core
-    /// — see [`Self::width`].
+    /// `-r`. Refresh rate in Hz. See [`Self::width`] for the link.
     pub refresh: u32,
     /// Whether HDR should be on by default. Applied as a root-atom write, never
     /// as a bare `gamescopectl <convar>` — §6: a value-less call RESETS the
@@ -124,20 +126,43 @@ pub struct SessionConfig {
     /// when it runs as an app. The shell sizes itself to the output instead of
     /// inheriting that path. 9001 is the id the measurement kit used.
     pub shell_app_id: u32,
-    /// How many Xwayland servers gamescope starts (`-e`/`--xwayland-count`).
+    /// How many Xwayland servers gamescope starts (`--xwayland-count`).
     /// One for the shell plus one per concurrently launched app (§4).
     ///
-    /// **Read by the systemd unit's `ExecStart` (`-e`), not by the core.** Per-app
-    /// server creation (`GAMESCOPE_CREATE_XWAYLAND_SERVER`) is a later PR; when
-    /// it lands the core reads this to size the pool. `validate()` still checks
-    /// it, because a nonsense value is worth refusing before it reaches the unit.
+    /// **NOT `-e`.** `-e` is the short form of `--steam`, which is why the unit
+    /// passed it twice; `--xwayland-count` is long-only and takes an argument.
+    /// The old label sent a reader straight into writing `-e 2`, where `2` is not
+    /// consumed as an argument but becomes gamescope's child command; gamescope
+    /// execs it, it fails instantly, `BindsTo=` stops the target and the
+    /// television relogins forever.
+    ///
+    /// Consumed by [`CoreConfig::session_env`] — see [`DisplayConfig::width`].
     pub xwayland_count: u32,
-    /// Bound on the base-layer read-back after a switch.
+    /// Bound on the base-layer read-back after a switch, for an app whose
+    /// window is ALREADY MAPPED.
     ///
     /// The switch itself measured 14–19 ms over 20 switches; this is the
     /// failure bound, not the expected time. See
     /// [`crate::baselayer::DEFAULT_SWITCH_TIMEOUT`].
+    ///
+    /// Bounded above as well as below. An intent holds the intent lock for its
+    /// whole write-and-verify, so `switch_timeout_ms = 99999999` would spin for
+    /// ~28 hours with every later `show`/`home` queued behind it — including
+    /// §9's "stuck in an app → `intent home`", the recovery this whole design
+    /// exists to keep reachable. A bound that can disable the escape hatch is
+    /// not a tuning knob.
     pub switch_timeout_ms: u64,
+    /// Bound on waiting for an app that has NOT mapped a window yet.
+    ///
+    /// A separate, much larger bound, because a cold app start and a compositor
+    /// switch are different waits (see [`crate::baselayer`]). Sharing one bound
+    /// made `show <id>` right after `launch <id>` fail on every working launch.
+    pub map_timeout_ms: u64,
+    /// Bound on confirming that a launched process really is in its scope.
+    ///
+    /// [`crate::launch::launch`] polls `/proc/<pid>/cgroup` until the scope
+    /// appears; this is how long it waits before calling the launch unconfirmed.
+    pub launch_confirm_ms: u64,
 }
 
 impl Default for SessionConfig {
@@ -150,9 +175,26 @@ impl Default for SessionConfig {
             // the measurement it comes from), so it cannot be changed there and
             // left stale here.
             switch_timeout_ms: crate::baselayer::DEFAULT_SWITCH_TIMEOUT.as_millis() as u64,
+            map_timeout_ms: crate::baselayer::DEFAULT_MAP_TIMEOUT.as_millis() as u64,
+            launch_confirm_ms: DEFAULT_LAUNCH_CONFIRM.as_millis() as u64,
         }
     }
 }
+
+/// How long a launch gets to appear in its cgroup scope.
+///
+/// `systemd-run --scope` creates the unit before it execs, so the scope is
+/// normally readable within a few milliseconds; two seconds is headroom for a
+/// loaded box and a busy session bus, not an expected time.
+pub const DEFAULT_LAUNCH_CONFIRM: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// Upper bound on `switch_timeout_ms`. See the field docs.
+pub const MAX_SWITCH_TIMEOUT_MS: u64 = 5_000;
+/// Upper bound on `map_timeout_ms`. Five minutes is longer than any app start
+/// this box will ever see; past it, "the app did not come up" is the answer.
+pub const MAX_MAP_TIMEOUT_MS: u64 = 300_000;
+/// Upper bound on `launch_confirm_ms`.
+pub const MAX_LAUNCH_CONFIRM_MS: u64 = 60_000;
 
 /// `[supervisor]` — stall detection and restart thresholds (§9).
 ///
@@ -189,12 +231,46 @@ impl Default for SupervisorConfig {
 impl CoreConfig {
     /// The shell's app id as an [`AppId`].
     pub fn shell_app_id(&self) -> AppId {
-        AppId(self.session.shell_app_id)
+        AppId::new(self.session.shell_app_id)
     }
 
-    /// The base-layer switch bound.
+    /// The base-layer switch bound (for an already-mapped window).
     pub fn switch_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.session.switch_timeout_ms)
+    }
+
+    /// The bound on waiting for an app's first window to map.
+    pub fn map_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.session.map_timeout_ms)
+    }
+
+    /// The bound on confirming a launch reached its scope.
+    pub fn launch_confirm_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.session.launch_confirm_ms)
+    }
+
+    /// Render the environment file the gamescope unit's `ExecStart` reads.
+    ///
+    /// **This is the link that makes `[display]` and `session.xwayland_count`
+    /// real settings.** The unit used to hard-code `-W 3840 -H 2160 -r 120`
+    /// while the config's doc comments claimed the unit read those keys, so an
+    /// operator could set `refresh = 60`, watch `validate()` accept it, and
+    /// change nothing at all.  Now the session script writes this file before the
+    /// target starts and the unit substitutes the variables into its `ExecStart`.
+    ///
+    /// Pure, so the exact bytes are asserted in a unit test rather than only on a
+    /// boot nobody can run in CI. systemd's `EnvironmentFile` parser takes
+    /// `KEY=value` lines; every value here is a bare integer, so no quoting
+    /// question arises — deliberately, since a value needing quotes is a value
+    /// whose `${VAR}` splitting rules would have to be reasoned about.
+    pub fn session_env(&self) -> String {
+        format!(
+            "{ENV_WIDTH}={}\n{ENV_HEIGHT}={}\n{ENV_REFRESH}={}\n{ENV_XWAYLAND_COUNT}={}\n",
+            self.display.width,
+            self.display.height,
+            self.display.refresh,
+            self.session.xwayland_count,
+        )
     }
 
     /// Load from the resolved path. A missing file yields all-defaults.
@@ -252,6 +328,41 @@ impl CoreConfig {
                  report every switch as failed before the compositor could publish it"
             );
         }
+        if self.session.switch_timeout_ms > MAX_SWITCH_TIMEOUT_MS {
+            anyhow::bail!(
+                "config: [session] switch_timeout_ms must be at most {MAX_SWITCH_TIMEOUT_MS} \
+                 (got {}); an intent holds the intent lock for its whole verify, so a larger \
+                 bound queues every later show/home behind it — including the `intent home` \
+                 escape hatch (V2_DESIGN §9)",
+                self.session.switch_timeout_ms
+            );
+        }
+        if self.session.map_timeout_ms == 0 || self.session.map_timeout_ms > MAX_MAP_TIMEOUT_MS {
+            anyhow::bail!(
+                "config: [session] map_timeout_ms must be between 1 and {MAX_MAP_TIMEOUT_MS} \
+                 (got {})",
+                self.session.map_timeout_ms
+            );
+        }
+        if self.session.map_timeout_ms < self.session.switch_timeout_ms {
+            anyhow::bail!(
+                "config: [session] map_timeout_ms ({}) must be at least switch_timeout_ms ({}); \
+                 a launching app is given the map bound, so a shorter one would fail a launch \
+                 sooner than an already-mapped switch",
+                self.session.map_timeout_ms,
+                self.session.switch_timeout_ms
+            );
+        }
+        if self.session.launch_confirm_ms == 0
+            || self.session.launch_confirm_ms > MAX_LAUNCH_CONFIRM_MS
+        {
+            anyhow::bail!(
+                "config: [session] launch_confirm_ms must be between 1 and \
+                 {MAX_LAUNCH_CONFIRM_MS} (got {}); zero would call every launch unconfirmed \
+                 before its scope could appear",
+                self.session.launch_confirm_ms
+            );
+        }
         if self.supervisor.stall_secs == 0 {
             anyhow::bail!("config: [supervisor] stall_secs must be non-zero");
         }
@@ -267,6 +378,19 @@ impl CoreConfig {
         Ok(())
     }
 }
+
+/// Env var names in the file [`CoreConfig::session_env`] renders.
+///
+/// `pub` because the test that defends the consumer link greps the unit file for
+/// exactly these strings — a name changed here and not in the unit is the phantom
+/// consumer this whole mechanism exists to prevent.
+pub const ENV_WIDTH: &str = "TV_SHELL_GS_WIDTH";
+/// See [`ENV_WIDTH`].
+pub const ENV_HEIGHT: &str = "TV_SHELL_GS_HEIGHT";
+/// See [`ENV_WIDTH`].
+pub const ENV_REFRESH: &str = "TV_SHELL_GS_REFRESH";
+/// See [`ENV_WIDTH`].
+pub const ENV_XWAYLAND_COUNT: &str = "TV_SHELL_GS_XWAYLAND_COUNT";
 
 /// The Steam client's app id under gamescope's `--steam` focus policy.
 pub const STEAM_CLIENT_APP_ID: u32 = 769;
@@ -358,7 +482,7 @@ restart_window_secs = 120
         assert_eq!(c.display.sdr_nits, 203);
         assert!(!c.display.hdr);
         assert_eq!(c.session.xwayland_count, 4);
-        assert_eq!(c.shell_app_id(), AppId(9002));
+        assert_eq!(c.shell_app_id(), AppId::new(9002));
         assert_eq!(c.switch_timeout().as_millis(), 500);
         assert_eq!(c.supervisor.stall_secs, 20);
     }
@@ -527,38 +651,190 @@ restart_window_secs = 120
         );
     }
 
+    #[test]
+    fn a_switch_bound_large_enough_to_wedge_the_escape_hatch_is_refused() {
+        // The reported shape: switch_timeout_ms = 99999999 spins ~28 h holding
+        // the intent lock, queueing every later show/home — including §9's
+        // "stuck in an app → intent home" recovery.
+        let c = CoreConfig::parse("[session]\nswitch_timeout_ms = 99999999\n").unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("switch_timeout_ms"), "{err}");
+        assert!(err.contains("escape hatch"), "{err}");
+        // The boundary itself is fine; one past it is not.
+        let ok = format!("[session]\nswitch_timeout_ms = {MAX_SWITCH_TIMEOUT_MS}\n");
+        CoreConfig::parse(&ok).unwrap().validate().unwrap();
+        let over = format!(
+            "[session]\nswitch_timeout_ms = {}\n",
+            MAX_SWITCH_TIMEOUT_MS + 1
+        );
+        assert!(CoreConfig::parse(&over).unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn the_map_bound_is_range_checked_and_never_shorter_than_the_switch_bound() {
+        for text in [
+            "[session]\nmap_timeout_ms = 0\n".to_string(),
+            format!("[session]\nmap_timeout_ms = {}\n", MAX_MAP_TIMEOUT_MS + 1),
+            // Shorter than the switch bound: a launching app would be failed
+            // sooner than an already-mapped switch, which inverts the whole
+            // point of having two bounds.
+            "[session]\nswitch_timeout_ms = 4000\nmap_timeout_ms = 300\n".to_string(),
+        ] {
+            let c = CoreConfig::parse(&text).unwrap();
+            assert!(c.validate().is_err(), "should refuse: {text}");
+        }
+    }
+
+    #[test]
+    fn the_launch_confirm_bound_is_range_checked() {
+        for text in [
+            "[session]\nlaunch_confirm_ms = 0\n".to_string(),
+            format!(
+                "[session]\nlaunch_confirm_ms = {}\n",
+                MAX_LAUNCH_CONFIRM_MS + 1
+            ),
+        ] {
+            assert!(
+                CoreConfig::parse(&text).unwrap().validate().is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    // -- the consumer link ---------------------------------------------------
+
+    /// The gamescope unit, read from the repo.
+    ///
+    /// Read rather than `include_str!` on purpose: the point is to check a file
+    /// that ships, and a compile-time include would be just as satisfied by a
+    /// file that had been deleted from the install tree.
+    fn gamescope_unit() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("units")
+            .join("tv-shell-gamescope.service");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    }
+
+    /// The env file the core renders is the file the unit actually reads, and
+    /// every variable in it is actually substituted.
+    ///
+    /// This is the half `every_key_is_either_consumed_or_declared_unconsumed`
+    /// could not do: that test checks a key is *classified*, so a key labelled
+    /// "read by the unit's ExecStart" passed while the unit hard-coded the value
+    /// and read nothing. Here the named consumer has to exist.
+    #[test]
+    fn the_display_keys_reach_the_unit_that_claims_to_read_them() {
+        let unit = gamescope_unit();
+        for var in [ENV_WIDTH, ENV_HEIGHT, ENV_REFRESH, ENV_XWAYLAND_COUNT] {
+            assert!(
+                unit.contains(&format!("${{{var}}}")),
+                "the unit's ExecStart does not substitute ${{{var}}}, so the config key \
+                 that claims it as a consumer changes nothing"
+            );
+        }
+        assert!(
+            unit.contains("EnvironmentFile=%t/tv-shell-gamescope-mode"),
+            "the unit must read the mode env file the session script renders"
+        );
+        // And a non-default value really reaches it.
+        let c = CoreConfig::parse("[display]\nrefresh = 60\nwidth = 1920\n").unwrap();
+        let env = c.session_env();
+        assert!(env.contains(&format!("{ENV_REFRESH}=60")), "{env}");
+        assert!(env.contains(&format!("{ENV_WIDTH}=1920")), "{env}");
+        // Height is unset in that document, so the default must still be
+        // published — a key absent from the file must not vanish from the unit.
+        assert!(env.contains(&format!("{ENV_HEIGHT}=2160")), "{env}");
+    }
+
+    #[test]
+    fn the_rendered_env_file_is_one_key_value_line_per_key() {
+        let env = CoreConfig::default().session_env();
+        let lines: Vec<_> = env.lines().collect();
+        assert_eq!(lines.len(), 4, "{env:?}");
+        for l in lines {
+            let (k, v) = l
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not KEY=value: {l:?}"));
+            assert!(!k.is_empty() && !v.is_empty(), "{l:?}");
+            // Bare integers only: anything needing quotes would drag systemd's
+            // ${VAR} splitting rules into the ExecStart.
+            assert!(v.bytes().all(|b| b.is_ascii_digit()), "{l:?}");
+        }
+        assert!(
+            env.ends_with('\n'),
+            "a trailing newline or the last line is lost"
+        );
+    }
+
+    #[test]
+    fn the_unit_never_passes_the_short_form_of_steam_twice() {
+        // H4: `-e` IS `--steam`. The unit passed both, and the config doc called
+        // `-e` the xwayland-count flag — which sends a reader into writing
+        // `-e 2`, where 2 becomes gamescope's child command.
+        let unit = gamescope_unit();
+        let exec: String = unit
+            .lines()
+            .skip_while(|l| !l.starts_with("ExecStart="))
+            .take_while(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bare_e = exec
+            .split_whitespace()
+            .filter(|t| *t == "-e" || *t == "--steam")
+            .count();
+        assert_eq!(
+            bare_e, 1,
+            "gamescope's `-e` is the short form of `--steam`; passing both is one \
+             flag twice. ExecStart was: {exec}"
+        );
+        assert!(
+            exec.contains("--xwayland-count"),
+            "the xwayland count must be the long flag, which takes an argument: {exec}"
+        );
+    }
+
     /// The keys that are parsed, validated and documented but that **no code in
     /// this crate reads yet**.
     ///
     /// This is the repo's #416 class — a setting with a rendered control and no
     /// consumer is a control that reports an effect nothing applies. The v2 core
-    /// cannot have consumers for all of these yet (some are read by the systemd
-    /// unit's `ExecStart` instead, and the rest arrive with later PRs), so the
-    /// rule here is the honest one: every such key is LABELLED as not-yet-read,
-    /// in this list, in its doc comment on the struct field, and in
-    /// `config/core.toml.example`. Adding a consumer — or adding a new key with
-    /// none — must change this list deliberately, which is the whole point.
+    /// cannot have consumers for all of these yet, so the rule here is the honest
+    /// one: every such key is LABELLED as not-yet-read, in this list, in its doc
+    /// comment on the struct field, and in `config/core.toml.example`. Adding a
+    /// consumer — or adding a new key with none — must change this list
+    /// deliberately, which is the whole point.
+    ///
+    /// **Classification alone is not enough**, which is why
+    /// `the_display_keys_reach_the_unit_that_claims_to_read_them` sits above:
+    /// this test would have passed a key whose named consumer did not exist.
     #[test]
     fn every_key_is_either_consumed_or_declared_unconsumed() {
         let unconsumed = [
-            // Read by core/units/tv-shell-gamescope.service's ExecStart.
-            "display.width",
-            "display.height",
-            "display.refresh",
-            "session.xwayland_count",
             // Read by nothing yet; land with the HDR/VRR surface (§6).
             "display.hdr",
             "display.sdr_nits",
             "display.hotplug_settle_ms",
             // Read by nothing yet; land with the forced-paint heartbeat (§9).
             "supervisor.stall_secs",
+            // §9's short-session tracker is NOT implemented. These two are its
+            // config and nothing reads them; the units say so too.
             "supervisor.restart_threshold",
             "supervisor.restart_window_secs",
         ];
-        // The consumed ones, for contrast: these have a reader in this crate
-        // today (`CoreConfig::shell_app_id` / `switch_timeout`, both used by
-        // `crate::compositor`).
-        let consumed = ["session.shell_app_id", "session.switch_timeout_ms"];
+        // The consumed ones: each has a reader today — `shell_app_id`,
+        // `switch_timeout`, `map_timeout` and `launch_confirm_timeout` in
+        // `crate::compositor`, and the rest through `session_env()`, which the
+        // session script renders for the gamescope unit.
+        let consumed = [
+            "session.shell_app_id",
+            "session.switch_timeout_ms",
+            "session.map_timeout_ms",
+            "session.launch_confirm_ms",
+            "display.width",
+            "display.height",
+            "display.refresh",
+            "session.xwayland_count",
+        ];
 
         // Exhaustive destructuring, so the lists above cannot drift from the
         // schema silently: ADDING A FIELD TO ANY OF THESE STRUCTS STOPS THIS
@@ -581,6 +857,8 @@ restart_window_secs = 120
             shell_app_id,
             xwayland_count,
             switch_timeout_ms,
+            map_timeout_ms,
+            launch_confirm_ms,
         } = session;
         let SupervisorConfig {
             stall_secs,
@@ -597,6 +875,8 @@ restart_window_secs = 120
             u64::from(shell_app_id),
             u64::from(xwayland_count),
             switch_timeout_ms,
+            map_timeout_ms,
+            launch_confirm_ms,
             stall_secs,
             u64::from(restart_threshold),
             restart_window_secs,

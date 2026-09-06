@@ -42,9 +42,9 @@ use tv_shell_core::screen::{self, AppIdSource};
 /// into `app-steam-app9003-2970.scope`: `GAMESCOPE_FOCUSABLE_WINDOWS` held
 /// `8388625, 9003, 2998`.
 const MEASURED_WINDOW: u32 = 8_388_625;
-const MEASURED_APP: AppId = AppId(9003);
+const MEASURED_APP: AppId = AppId::new(9003);
 const MEASURED_PID: u32 = 2998;
-const SHELL_APP: AppId = AppId(9001);
+const SHELL_APP: AppId = AppId::new(9001);
 
 /// Resolve the X display from `TV_SHELL_TEST_XVFB`, or **panic**.
 ///
@@ -150,7 +150,7 @@ fn focusable_window_triplets_round_trip() {
     conn.write_cardinals(
         root,
         names::FOCUSABLE_WINDOWS,
-        &[MEASURED_WINDOW, MEASURED_APP.0, MEASURED_PID],
+        &[MEASURED_WINDOW, MEASURED_APP.get(), MEASURED_PID],
     )
     .unwrap();
     assert_eq!(
@@ -188,7 +188,7 @@ fn screen_state_assembles_from_real_server_bytes() {
     conn.write_cardinals(
         root,
         names::FOCUSABLE_WINDOWS,
-        &[MEASURED_WINDOW, MEASURED_APP.0, MEASURED_PID],
+        &[MEASURED_WINDOW, MEASURED_APP.get(), MEASURED_PID],
     )
     .unwrap();
     conn.write_app_ids(root, names::FOCUSABLE_APPS, &[MEASURED_APP, SHELL_APP])
