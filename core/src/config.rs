@@ -1388,10 +1388,26 @@ restart_window_secs = 120
     }
 
     #[test]
-    fn the_installer_refuses_v1s_prefix() {
-        // The one refusal: --prefix /opt/tv-shell would put v2's binary and
-        // session script inside the tree the couch's v1 session runs from.
-        for arg in [V1_PREFIX, "/opt/tv-shell/"] {
+    fn the_installer_refuses_v1s_prefix_however_it_is_spelled() {
+        // The one refusal: a prefix at or under /opt/tv-shell would put v2's
+        // binary and session script inside the tree the couch's v1 session runs
+        // from — and as root, that overwrites a running appliance.
+        //
+        // Every spelling, because an EXACT STRING COMPARE was not enough and the
+        // gap was silent: `/opt//tv-shell` sailed past it and only failed later
+        // on permissions, which on a box that HAS /opt/tv-shell means it does not
+        // fail at all. A path UNDER the prefix (`/opt/tv-shell/nested`) is the
+        // same hazard and was equally unguarded. The script now normalises with
+        // `realpath -m` and refuses the prefix or any descendant.
+        for arg in [
+            V1_PREFIX,
+            "/opt/tv-shell/",
+            "/opt//tv-shell",
+            "/opt///tv-shell//",
+            "/opt/tv-shell/nested",
+            "/opt/tv-shell/./x",
+            "/opt/tv-shell/../tv-shell",
+        ] {
             let out = Command::new("bash")
                 .arg(repo_root().join("scripts/install-v2.sh"))
                 .args(["--no-build", "--prefix", arg])
@@ -1403,9 +1419,48 @@ restart_window_secs = 120
             );
             assert!(
                 String::from_utf8_lossy(&out.stderr).contains("refusing"),
-                "the refusal must say why: {}",
+                "{arg} must be refused BY THE GUARD, naming why — not by some later \
+                 permission error that would not happen on a box that has v1 installed: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+
+        // And a guard that refuses everything protects nothing: a normal prefix
+        // must still be accepted. `stage_install` is that case end to end, so
+        // this only has to be a prefix the guard sees and passes.
+        let s = stage_install("accept");
+        assert!(
+            s.prefix.join("bin").is_dir(),
+            "a prefix outside v1's tree must still install"
+        );
+    }
+
+    #[test]
+    fn the_installers_help_prints_the_flags_and_no_code() {
+        // `--help` is `sed -n '<range>p'` over the script's own header, so a
+        // comment edit above it silently shifts the range — which already
+        // happened once and leaked `set -euo pipefail` into the help output.
+        let out = Command::new("bash")
+            .arg(repo_root().join("scripts/install-v2.sh"))
+            .arg("--help")
+            .output()
+            .expect("running scripts/install-v2.sh --help");
+        assert!(out.status.success(), "--help must exit 0");
+        let help = String::from_utf8_lossy(&out.stdout);
+        for flag in [
+            "--prefix",
+            "--user",
+            "--session-dir",
+            "--session-exec",
+            "--unit-dir",
+            "--config-dir",
+            "--no-build",
+        ] {
+            assert!(help.contains(flag), "--help omits {flag}:\n{help}");
+        }
+        assert!(
+            !help.contains("set -euo pipefail"),
+            "--help is printing script body, so its line range has drifted:\n{help}"
+        );
     }
 }

@@ -175,7 +175,17 @@ It is a **separate script from `scripts/install.sh`, not a `--v2` flag on it**,
 for the reason in its header: §11's "beside, not instead" applies to the
 installer too, and a flag whose default is v1 is one forgotten argument away from
 installing over the running appliance. This script names no v1 prefix, no v1 unit
-and no v1 session file, and refuses `--prefix /opt/tv-shell` outright.
+and no v1 session file, and refuses a `--prefix` at or under `/opt/tv-shell`.
+
+**The refusal normalises first.** It used to be an exact string compare against a
+trailing-slash strip, and `--prefix /opt//tv-shell` walked straight past it — the
+one failure on this path that is silent and destructive rather than loud, since
+as root on the appliance it installs into v1's live tree instead of erroring. So
+does anything *under* the prefix. `realpath -m` collapses the duplicate slashes,
+resolves `.`/`..` and symlinks, and makes a relative prefix absolute (which the
+units need anyway); the guard then refuses the prefix or any descendant, and the
+test tables every spelling plus one that must still be **accepted**, so the guard
+cannot pass by refusing everything.
 
 ## Build, test & lint
 
@@ -230,6 +240,12 @@ rule in the source and confirm the suite goes red**, then revert:
   `the_v2_session_entry_collides_with_neither_v1_nor_the_prototype` must fail.
 - Add `tv-shell-panel.service` to the installer's `UNITS`.
   `the_v2_unit_names_collide_with_none_of_v1s` must fail.
+- Widen the installer's prefix guard back to an exact string compare (drop the
+  `realpath -m` normalisation and the `"$V1_PREFIX_CANON"/*` arm).
+  `the_installer_refuses_v1s_prefix_however_it_is_spelled` must fail — on
+  `/opt//tv-shell` first, which is the spelling that actually slipped through.
+- Shift the `sed` range behind the installer's `--help` by one line.
+  `the_installers_help_prints_the_flags_and_no_code` must fail.
 
 That last one is the shape worth noticing: the config's consumer test used to
 check only that a key was *classified*, so a key labelled "read by the unit's

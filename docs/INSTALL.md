@@ -68,7 +68,9 @@ It builds `tv-shell-core`, installs it and the two session scripts to
 prefix substituted, writes `/usr/share/wayland-sessions/tv-shell-v2.desktop`, and
 seeds `~/.config/tv-shell/core.toml` (v2's config file — **not** `config.toml`,
 which is v1's and would abort the v1 daemon if it carried v2 tables). It refuses
-`--prefix /opt/tv-shell` so it cannot land in v1's tree. Flags: `--prefix`,
+a `--prefix` at or under `/opt/tv-shell` (normalised first, so `/opt//tv-shell`
+and `/opt/tv-shell/anything` are refused too) so it cannot land in v1's tree.
+Flags: `--prefix`,
 `--user`, `--session-dir`, `--unit-dir`, `--config-dir`, `--no-build`; see
 `./scripts/install-v2.sh --help`.
 

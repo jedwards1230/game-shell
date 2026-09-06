@@ -28,7 +28,9 @@
 #   sudo ./scripts/install-v2.sh [--prefix DIR] [--user NAME] [options]
 #
 #   --prefix DIR        v2 install root (default: /opt/tv-shell-v2). MUST NOT be
-#                       v1's /opt/tv-shell — the script refuses.
+#                       v1's /opt/tv-shell, or anywhere under it — the script
+#                       normalises the path and refuses. Relative paths are made
+#                       absolute (the units need an absolute ExecStart).
 #   --user NAME         User whose ~/.config gets the units and core.toml, and
 #                       who owns the prefix (default: $SUDO_USER, else invoker).
 #   --session-dir DIR   Where to write the session .desktop
@@ -90,22 +92,40 @@ while [ $# -gt 0 ]; do
         --unit-dir)     UNIT_DIR="${2:?--unit-dir needs a value}"; shift 2 ;;
         --config-dir)   CONFIG_DIR="${2:?--config-dir needs a value}"; shift 2 ;;
         --no-build)     DO_BUILD=0; shift ;;
-        -h|--help)      sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)      sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)              die "unknown argument: $1 (try --help)" ;;
     esac
 done
 
-# Normalise a trailing slash so `--prefix /opt/tv-shell/` cannot slip past the
-# v1 guard below.
-PREFIX="${PREFIX%/}"
 [ -n "$PREFIX" ] || die "--prefix cannot be empty"
 
+# NORMALISE BEFORE COMPARING. A trailing-slash strip is not normalisation, and
+# the difference was a live hole: `--prefix /opt//tv-shell` compared unequal to
+# `/opt/tv-shell`, sailed past the guard, and — as root on the appliance — would
+# have installed straight into the prefix v1's running session boots from. So
+# would `--prefix /opt/tv-shell/anything`, which is under v1's tree even though
+# it is not equal to it. `realpath -m` collapses duplicate slashes, resolves
+# `.`/`..` and symlinked components, and makes a relative prefix absolute (which
+# the units need anyway — systemd rejects a relative ExecStart), all without
+# requiring the path to exist yet.
+#
+# It is REQUIRED, not best-effort: a fallback that silently compares
+# un-normalised strings is a guard that reports success without providing the
+# protection, which is the failure class this whole design exists to remove.
+command -v realpath >/dev/null 2>&1 \
+    || die "realpath (coreutils) is required to normalise --prefix safely"
+PREFIX="$(realpath -m -- "$PREFIX")" || die "could not normalise --prefix"
+V1_PREFIX_CANON="$(realpath -m -- "$V1_PREFIX")" || die "could not normalise the v1 prefix"
+
 # THE ONE REFUSAL THIS SCRIPT MAKES. §11: v2 has its own install prefix, and a v2
-# install must be incapable of disturbing v1. Installing to v1's prefix would put
-# the core binary and the v2 session script inside the tree v1's session runs
-# from, and the next v1 install.sh run would fight it.
-[ "$PREFIX" != "$V1_PREFIX" ] \
-    || die "refusing to install v2 into v1's prefix ($V1_PREFIX) — v2 needs its own (§11). Pass --prefix elsewhere."
+# install must be incapable of disturbing v1. Installing to v1's prefix — or
+# ANYWHERE UNDER IT — would put the core binary and the v2 session script inside
+# the tree v1's session runs from, and the next v1 install.sh run would fight it.
+case "$PREFIX" in
+    "$V1_PREFIX_CANON" | "$V1_PREFIX_CANON"/*)
+        die "refusing to install v2 into v1's prefix ($V1_PREFIX_CANON) or under it — v2 needs its own (§11). Pass --prefix elsewhere."
+        ;;
+esac
 
 SESSION_EXEC="${SESSION_EXEC:-$PREFIX/bin/tv-shell-gamescope-session.sh}"
 
