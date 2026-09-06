@@ -34,8 +34,8 @@ from the ChimeraOS `gamescope-session` files rather than written from scratch).
 >
 > Until this commit the units hard-coded `/opt/tv-shell` — **v1's** prefix — under
 > comments claiming `scripts/install.sh` rewrote it, as it does for the v1 units.
-> It did not; install.sh had no reference to `core/` at all. Six tests in
-> `config.rs` (`the_committed_units_name_no_absolute_install_path` and the five
+> It did not; install.sh had no reference to `core/` at all. Eight tests in
+> `config.rs` (`the_committed_units_name_no_absolute_install_path` and the seven
 > that run the real installer into a scratch tree) now make that class of claim
 > falsifiable.
 
@@ -177,6 +177,33 @@ installer too, and a flag whose default is v1 is one forgotten argument away fro
 installing over the running appliance. This script names no v1 prefix, no v1 unit
 and no v1 session file, and refuses a `--prefix` at or under `/opt/tv-shell`.
 
+### Who owns the session `.desktop`
+
+By default the installer writes
+`/usr/share/wayland-sessions/tv-shell-v2.desktop`, so a **standalone** install is
+selectable at the display manager with no second tool. On an **Ansible-managed**
+host it is run with **`--no-session`** and Ansible owns that path — one writer,
+decided rather than left to whoever ran last:
+
+- Precedent: the gamescope prototype's `.desktop` is written by
+  `homelab-ansible`'s `roles/htpc_common/tasks/gamescope-prototype.yaml`, and
+  that is the session htpc-1 boots today.
+- Only Ansible can produce the full `Exec=`: it renders the session env as a
+  `/usr/bin/env` prefix, which is the only way to set environment for a
+  greeter-launched or autologin session — there is no shell in between. The file
+  the installer writes cannot carry that, so it is strictly less capable there.
+- Only Ansible's toggle **removes** the entry. An installer-written file would
+  survive that toggle and leave a selectable session pointing at a tree someone
+  believed they had disabled.
+- Host configuration on this box goes through Ansible, not hand-install.
+
+`--no-session` **suppresses** the write and does not even create the directory —
+"do not write it" and "create it and write nothing into it" are different
+promises. `--session-dir` *redirects*, which is a different thing and does not
+solve two writers. A test asserts the flag suppresses exactly that file and
+nothing else (the units, the launcher and `core.toml` still install, or an
+Ansible-managed host would end up with a session entry pointing at nothing).
+
 **The refusal normalises first.** It used to be an exact string compare against a
 trailing-slash strip, and `--prefix /opt//tv-shell` walked straight past it — the
 one failure on this path that is silent and destructive rather than loud, since
@@ -246,6 +273,8 @@ rule in the source and confirm the suite goes red**, then revert:
   `/opt//tv-shell` first, which is the spelling that actually slipped through.
 - Shift the `sed` range behind the installer's `--help` by one line.
   `the_installers_help_prints_the_flags_and_no_code` must fail.
+- Make the installer's `--no-session` a no-op (parse it and drop it).
+  `no_session_suppresses_the_session_file_and_installs_everything_else` must fail.
 
 That last one is the shape worth noticing: the config's consumer test used to
 check only that a key was *classified*, so a key labelled "read by the unit's

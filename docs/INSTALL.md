@@ -71,8 +71,18 @@ which is v1's and would abort the v1 daemon if it carried v2 tables). It refuses
 a `--prefix` at or under `/opt/tv-shell` (normalised first, so `/opt//tv-shell`
 and `/opt/tv-shell/anything` are refused too) so it cannot land in v1's tree.
 Flags: `--prefix`,
-`--user`, `--session-dir`, `--unit-dir`, `--config-dir`, `--no-build`; see
-`./scripts/install-v2.sh --help`.
+`--user`, `--session-dir`, `--unit-dir`, `--config-dir`, `--no-build`,
+`--no-session`; see `./scripts/install-v2.sh --help`.
+
+**On a configuration-managed host, pass `--no-session`.** The installer writes
+the session `.desktop` by default so a standalone install is selectable straight
+away, but if your configuration management also writes that path you get two
+writers of one file and it flips per run. `--no-session` suppresses the write
+entirely (it does not even create the directory), leaving that file to its owner
+— which is the right side of the split when only the config-management copy can
+carry a `/usr/bin/env` prefix in `Exec=` for session environment, and only its
+toggle can remove the entry. Everything else still installs, so the launcher its
+`Exec=` points at is in place.
 
 At the display manager you then get **TV Shell v2 (gamescope)** alongside **TV
 Shell (Wayland)**. v2 is unproven on hardware — see `core/README.md`.

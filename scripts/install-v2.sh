@@ -21,6 +21,34 @@
 #   .desktop, the panel and daemon binaries, targets.json. v2 has none of those,
 #   and has one thing v1 does not (the @TV_SHELL_V2_PREFIX@ token substitution).
 #
+# SESSION FILE OWNERSHIP — WHO WRITES /usr/share/wayland-sessions/tv-shell-v2.desktop
+#
+#   By default THIS SCRIPT writes it, so a standalone (non-Ansible) install is
+#   selectable at the display manager straight after running, with no second
+#   tool required.
+#
+#   On an Ansible-managed host it is invoked with `--no-session` and ANSIBLE owns
+#   that path. Decided deliberately, because two writers of one file is a config
+#   that flip-flops per run:
+#
+#     1. Precedent on this box: the gamescope prototype's .desktop is written by
+#        homelab-ansible's roles/htpc_common/tasks/gamescope-prototype.yaml, and
+#        that is the session htpc-1 boots today. One mental model for "who writes
+#        wayland-sessions entries here".
+#     2. ONLY Ansible can produce the full Exec. The role renders a session env
+#        list into `Exec=` as a `/usr/bin/env` prefix, which is the only way to
+#        set environment for a greeter-launched or autologin session — there is
+#        no shell in between. The file this script writes cannot carry that, so
+#        it is strictly less capable on a managed host.
+#     3. Ansible gives a real off switch: its toggle REMOVES the entry. A file
+#        written here would survive that toggle and leave a selectable session
+#        pointing at a tree someone believed they had disabled.
+#     4. Standing rule for this host: host configuration goes through Ansible,
+#        not hand-install.
+#
+#   `--no-session` SUPPRESSES the write; it does not redirect it. `--session-dir`
+#   redirects, which is a different thing and does not solve two writers.
+#
 # It does NOT install system dependencies (gamescope, Rust, an X server) — see
 # docs/INSTALL.md and scripts/install-deps.sh.
 #
@@ -41,6 +69,9 @@
 #                       (default: <home>/.config/systemd/user).
 #   --config-dir DIR    Per-user config dir (default: <home>/.config/tv-shell).
 #   --no-build          Skip building tv-shell-core (reuse an existing binary).
+#   --no-session        Do not write (or create the dir for) the session
+#                       .desktop. Use on an Ansible-managed host, where Ansible
+#                       owns that file — see SESSION FILE OWNERSHIP above.
 #   -h, --help          Show this help.
 #
 # Re-runnable: rebuilds, refreshes the tree, the units and the session file, and
@@ -65,6 +96,9 @@ CONFIG_DIR=""
 TARGET_USER="${SUDO_USER:-}"
 USER_EXPLICIT=0
 DO_BUILD=1
+# Write the session .desktop by default; --no-session suppresses it entirely.
+# See SESSION FILE OWNERSHIP in the header.
+WRITE_SESSION=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_SRC_DIR="$REPO_ROOT/core/units"
@@ -92,7 +126,14 @@ while [ $# -gt 0 ]; do
         --unit-dir)     UNIT_DIR="${2:?--unit-dir needs a value}"; shift 2 ;;
         --config-dir)   CONFIG_DIR="${2:?--config-dir needs a value}"; shift 2 ;;
         --no-build)     DO_BUILD=0; shift ;;
-        -h|--help)      sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --no-session)   WRITE_SESSION=0; shift ;;
+        # Delimited by CONTENT, not by line numbers. It was `sed -n '2,47p'`, and
+        # the first edit to the header above shifted the range and printed
+        # `set -euo pipefail` as if it were help text. This prints the Usage
+        # block and stops at the first line of code, so a header edit cannot
+        # drift it. (A test asserts every flag appears and no code does.)
+        -h|--help)      awk '/^# Usage:/ {p=1} /^set -euo pipefail$/ {exit} p' \
+                            "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)              die "unknown argument: $1 (try --help)" ;;
     esac
 done
@@ -159,9 +200,13 @@ need_writable() { # need_writable <dir> <what>
         || die "cannot write to $2 directory: $1 (read-only mount, permissions, or no space? try sudo)"
 }
 need_writable "$PREFIX" "prefix"
-need_writable "$SESSION_DIR" "session"
 need_writable "$UNIT_DIR" "unit"
 need_writable "$CONFIG_DIR" "config"
+# Under --no-session the session dir is not ours, so it is not even CREATED here.
+# "Do not write it" and "create it, then write nothing into it" are different
+# promises, and on an Ansible-managed host the second leaves behind a directory
+# this script had no business making.
+[ "$WRITE_SESSION" -eq 0 ] || need_writable "$SESSION_DIR" "session"
 
 log "prefix=$PREFIX user=$TARGET_USER units=$UNIT_DIR session=$SESSION_DIR/$SESSION_FILE"
 
@@ -223,11 +268,13 @@ for u in "${UNITS[@]}"; do
         || die "$UNIT_DIR/$u names a path under v1's prefix ($V1_PREFIX/)"
 done
 
-# 4. The v2 session entry. A DIFFERENT file name from both v1's
-#    (tv-shell-wayland.desktop) and the Ansible measurement prototype's
-#    (tv-shell-gamescope.desktop) — see config/tv-shell-v2.desktop.
-log "writing session file $SESSION_DIR/$SESSION_FILE"
-cat > "$SESSION_DIR/$SESSION_FILE" <<EOF
+# 4. The v2 session entry — UNLESS --no-session. A DIFFERENT file name from both
+#    v1's (tv-shell-wayland.desktop) and the Ansible measurement prototype's
+#    (tv-shell-gamescope.desktop) — see config/tv-shell-v2.desktop, and SESSION
+#    FILE OWNERSHIP in this script's header for who writes it where.
+if [ "$WRITE_SESSION" -eq 1 ]; then
+    log "writing session file $SESSION_DIR/$SESSION_FILE"
+    cat > "$SESSION_DIR/$SESSION_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=TV Shell v2 (gamescope)
@@ -235,7 +282,10 @@ Comment=gamescope session with the tv-shell v2 core (base-layer policy, scoped l
 Exec=$SESSION_EXEC
 DesktopNames=gamescope
 EOF
-chmod 644 "$SESSION_DIR/$SESSION_FILE"
+    chmod 644 "$SESSION_DIR/$SESSION_FILE"
+else
+    log "--no-session: leaving $SESSION_DIR/$SESSION_FILE to its owner (Ansible)"
+fi
 
 # 5. Seed core.toml — v2's own config file. NOT config.toml: v1's root is
 #    deny_unknown_fields, so a shared file would abort the v1 daemon at startup
@@ -278,5 +328,11 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 log "done. v1 is untouched: its prefix ($V1_PREFIX), units and session file were not written."
-log "Select 'TV Shell v2 (gamescope)' at the display manager; 'TV Shell (Wayland)' is still the v1 rollback (§11)."
+if [ "$WRITE_SESSION" -eq 1 ]; then
+    log "Select 'TV Shell v2 (gamescope)' at the display manager; 'TV Shell (Wayland)' is still the v1 rollback (§11)."
+else
+    # Do not tell the operator to select a session this run did not create — that
+    # is the same silent-success shape the rest of this design removes.
+    log "No session entry was written (--no-session). It must exist, owned by Ansible, before v2 is selectable."
+fi
 log "Edit $CONFIG_DIR/core.toml to taste (see config/core.toml.example)."

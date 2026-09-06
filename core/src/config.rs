@@ -1168,6 +1168,11 @@ restart_window_secs = 120
     /// root user (the root-owned-install footgun), and CI runs this in a
     /// root-only container.
     fn stage_install(tag: &str) -> Staged {
+        stage_install_with(tag, &[])
+    }
+
+    /// `stage_install` plus extra installer arguments (e.g. `--no-session`).
+    fn stage_install_with(tag: &str, extra: &[&str]) -> Staged {
         // Under `target/`, NOT `std::env::temp_dir()`. /tmp is shared with every
         // other job on the box and this went intermittently `Permission denied`
         // there; a scratch tree under the build directory is private to the
@@ -1204,6 +1209,7 @@ restart_window_secs = 120
             .arg(&s.sessions)
             .arg("--config-dir")
             .arg(&s.config)
+            .args(extra)
             .output()
             .expect("running scripts/install-v2.sh");
         assert!(
@@ -1436,6 +1442,45 @@ restart_window_secs = 120
     }
 
     #[test]
+    fn no_session_suppresses_the_session_file_and_installs_everything_else() {
+        // OWNERSHIP: on an Ansible-managed host, Ansible owns
+        // /usr/share/wayland-sessions/tv-shell-v2.desktop and the installer is
+        // run with --no-session. Two writers of one file is a config that
+        // flip-flops per run, and Ansible's version is the capable one — only it
+        // can render the session env into `Exec=` as a `/usr/bin/env` prefix
+        // (there is no shell between a greeter and the session), and only its
+        // toggle can REMOVE the entry. See the script header.
+        let s = stage_install_with("nosession", &["--no-session"]);
+
+        // Suppressed, not redirected: the directory is not even created. "Do not
+        // write it" and "create it and write nothing" are different promises.
+        assert!(
+            !s.sessions.join(V2_SESSION_FILE).exists(),
+            "--no-session still wrote the session entry"
+        );
+        assert!(
+            !s.sessions.exists(),
+            "--no-session created the session directory it does not own"
+        );
+
+        // And the flag must suppress ONLY that: a flag that quietly skipped the
+        // rest would leave an Ansible-managed host with a session entry pointing
+        // at nothing.
+        assert_eq!(installed_units(&s).len(), 3, "the units must still install");
+        assert!(
+            s.prefix
+                .join("bin")
+                .join("tv-shell-gamescope-session.sh")
+                .is_file(),
+            "the launcher Ansible's Exec= points at must still install"
+        );
+        assert!(
+            s.config.join("core.toml").is_file(),
+            "core.toml must still be seeded"
+        );
+    }
+
+    #[test]
     fn the_installers_help_prints_the_flags_and_no_code() {
         // `--help` is `sed -n '<range>p'` over the script's own header, so a
         // comment edit above it silently shifts the range — which already
@@ -1455,6 +1500,7 @@ restart_window_secs = 120
             "--unit-dir",
             "--config-dir",
             "--no-build",
+            "--no-session",
         ] {
             assert!(help.contains(flag), "--help omits {flag}:\n{help}");
         }
