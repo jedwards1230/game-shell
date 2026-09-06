@@ -14,7 +14,7 @@ its relationship to `daemon/`.
 | `launch` | Scoped launching: `systemd-run --user --scope` into `app-steam-app<appid>-<pid>.scope`, the argv as a testable value, and reading a scope back out of a cgroup path. Preflight is fail-closed — there is no unscoped fallback — and a launch is **confirmed** (the launcher is still alive and `/proc/<pid>/cgroup` names the scope) before it reports success |
 | `baselayer` | `show`/`home` as one write plus one bounded verify, `IntentGate` (which serializes a write and its verify against other intents), and `reconcile` as the read-only recovery path |
 | `config` | `~/.config/tv-shell/core.toml` — a separate file from v1's `config.toml` (below), plus the socket path and the `[[app]]` class table. All-defaults on a missing file, `deny_unknown_fields` everywhere, `validate()` before any value is used |
-| `boot` | Whether a fresh session gets its first app — and the observation that stops a core restart stealing a live one (below) |
+| `boot` | Whether a fresh session gets its first app, keeping it alive across crashes, and the two observations that stop either one stealing a live session (below) |
 | `protocol` | The IPC grammar, carried over from v1 unchanged in contract (§4): newline framing, 4096-byte lines, `ok` / `unknown` / `error:<msg>` / a bare JSON document |
 | `ipc` | The Unix-socket server — `LinesCodec`, one task per connection, socket bound 0600 under a tightened umask. Compositor work sits behind a `Compositor` trait so the whole request/reply surface is testable with no X server |
 | `compositor` | The seam between the two: IPC verbs → the §5 X primitives |
@@ -143,6 +143,7 @@ failure inverted:
   merely landed outside its scope (where gamescope could never focus it).
 - **A launch environment belongs to the app CLASS, and one of its operations is a removal.** Measured 2026-09-06: a bare `/usr/bin/moonlight` in the v2 session inherits `WAYLAND_DISPLAY=gamescope-0`, selects native Wayland — which §6 records Moonlight 6.1.0 segfaulting on — and never maps a window, so the base layer is right and the screen is black. The core said so exactly ("app 9003 never mapped a window … the base layer was set, so this is the app failing to start"), which is the correct failure; needing a human to remember `env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb …` is not. `[[app]]` carries both halves, and `env_unset` is first-class because **no value substitutes for absence**: `WAYLAND_DISPLAY=""` is not unset, and pressure-vessel rewrites an empty one back to `wayland-0` (§11). `launch <appid>` with no command is the class form; an explicit command for a known id still takes the class environment, because the environment is a property of the class and not of the argv.
 - **A boot launch is "this compositor has never been used", never "the core started".** The core unit is `Restart=always`, so a restart under a live game is the designed recovery path — and relaunching there would yank the screen from something being played. `boot::decide` therefore fires only when the startup reconcile shows an EMPTY base layer *and* nothing on screen; a populated list, an app on screen, or a failed read are all "in use" and the core does nothing. Two consequences that are deliberate: a restart never resurrects an app the user quit (after a return to the shell the base layer holds the shell id), and an unreadable X state fails closed, because a failed read is no evidence rather than weak evidence. It runs after the socket is listening, so a slow app never delays the control surface §9 exists to keep reachable.
+- **Durability is a supervisor, and "the app exited" must stay distinguishable from "the core restarted".** A boot client that launches once is durable-once: this hardware has wedged and killed streaming clients repeatedly, and the television then stays black until somebody reboots it. So the boot app is supervised — relaunched with the prototype's measured fast-exit backoff (`dev/gamescope/client.sh`: 3 exits inside 10 s stretches the retry from 2 s to 60 s, logged at WARN with the count so a backoff is never silent). The two events are kept apart **structurally, not by checking flags in the right order**: `supervise` takes a `Supervised` token, and the only thing that constructs one is a confirmed launch by this core. An exit therefore arrives on a channel we hold *because we started the process*; a restart is a fresh `decide` against the running world. There is no path that turns an observation into a relaunch. Two further guards: a relaunch is refused outright if anything else is on screen (the user quit, started something else, and the old process only then died), and a CLEAN exit ends supervision under the default `on-failure` policy — v2 has a shell to land on, so relaunching over a deliberate quit would fight the user. `always` restores the prototype's unconditional behaviour.
 - **Steam owns the base-layer atom, and the core reconciles after it.** Measured
   2026-09-05: while the Steam client runs it rewrites
   `GAMESCOPECTRL_BASELAYER_APPID` on every stream start and stop and drops our id
@@ -283,6 +284,19 @@ rule in the source and confirm the suite goes red**, then revert:
   `an_explicit_command_for_a_known_class_keeps_its_environment` must fail.
 - Delete the `boot_app` arm of `CoreConfig::validate`.
   `a_boot_app_with_no_class_is_refused` must fail.
+- Delete the `on_screen` guard at the top of `boot::after_exit`, or move it below
+  the policy match. `something_else_on_screen_always_wins_over_a_relaunch` and
+  `the_supervisor_yields_to_another_app` must fail.
+- Drop the `else { Self(0) }` reset in `FastExits::record`.
+  `repeated_fast_exits_back_off_and_a_long_run_clears_them` must fail.
+- Make `ExitKind::of` treat a signalled exit (`code() == None`) as `Clean`.
+  `a_signalled_exit_is_a_failure_not_a_clean_one` must fail.
+- Delete the `BackOff` arm of `after_exit`.
+  `a_crash_loop_reaches_the_backoff_delay` must fail.
+- Make `after_exit` ignore `ExitKind` under `on-failure`.
+  `a_crash_relaunches_and_a_quit_does_not` must fail — **in under a second**, not
+  by hanging: the runner tests deliberately carry a give-up bound so a loop that
+  should stop cannot spin instead of failing.
 - Turn `write_and_verify`'s `Err(SwitchError::NotObserved { .. })` into an `Ok`.
   `baselayer::tests::a_switch_that_never_takes_is_never_ok` must fail.
 - Make `IntentGate::run` call `f()` without taking the lock.
@@ -319,6 +333,10 @@ ExecStart" passed while the unit read nothing. A named consumer has to exist.
 
 Each of these is a follow-up, and none of it is implemented in this crate today:
 
+- **§9's stall detection and short-session rollback.** The boot supervisor keeps
+  the app alive; it does not watch FRAMES. A client that is running but painting
+  nothing is still invisible to everything here, and `[supervisor]`'s keys remain
+  unconsumed.
 - **§12's other app-class fields**: an id strategy (scope / pid / class), an
   input contract (`gamepad` / `keyboard`) and an HDR expectation. `[[app]]`
   models the id, the command and the environment only — the id strategy is fixed

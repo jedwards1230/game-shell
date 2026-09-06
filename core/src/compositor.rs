@@ -169,6 +169,7 @@ pub fn launch_reply(
     app_id: AppId,
     command: &[String],
     class: Option<&crate::config::AppConfig>,
+    on_exit: Option<std::sync::mpsc::Sender<std::process::ExitStatus>>,
 ) -> String {
     let Some(env) = env else {
         // NEVER an unscoped launch. gamescope identifies an app by its cgroup
@@ -184,7 +185,14 @@ pub fn launch_reply(
         set: &resolved.set,
         unset: resolved.unset,
     };
-    match launch::launch(env, app_id, resolved.command, launch_env, confirm_timeout) {
+    match launch::launch(
+        env,
+        app_id,
+        resolved.command,
+        launch_env,
+        confirm_timeout,
+        on_exit,
+    ) {
         Ok(launched) => {
             tracing::info!(
                 app_id = %app_id,
@@ -260,7 +268,42 @@ impl Compositor for GamescopeCompositor {
             app_id,
             command,
             self.config.app_class(app_id),
+            None,
         )
+    }
+
+    fn launch_supervised(
+        &self,
+        app_id: AppId,
+    ) -> Result<std::sync::mpsc::Receiver<std::process::ExitStatus>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = launch_reply(
+            self.scope_env.as_ref(),
+            self.scope_error.as_deref(),
+            self.config.launch_confirm_timeout(),
+            app_id,
+            &[],
+            self.config.app_class(app_id),
+            Some(tx),
+        );
+        if reply.starts_with("error:") {
+            return Err(reply);
+        }
+        Ok(rx)
+    }
+
+    fn on_screen_app(&self) -> Option<AppId> {
+        match screen::read(&self.conn) {
+            Ok(state) => state.on_screen_app(),
+            // A failed read is not "nothing is on screen": the supervisor treats
+            // `None` as "the coast is clear", so answering None here would let a
+            // relaunch through on no evidence. Report the app we cannot see as
+            // *something*, which makes the supervisor yield — fail closed.
+            Err(e) => {
+                tracing::warn!("could not read what is on screen: {e}");
+                Some(crate::atoms::AppId::new(u32::MAX))
+            }
+        }
     }
 }
 
@@ -359,6 +402,7 @@ mod tests {
             AppId::new(4242),
             &[],
             None,
+            None,
         );
         assert!(reply.starts_with("error:"), "{reply}");
         assert!(!reply.contains("\"pid\""), "{reply}");
@@ -382,6 +426,7 @@ mod tests {
             AppId::new(4242),
             &[],
             None,
+            None,
         );
         assert!(reply.starts_with("error:"), "{reply}");
         assert!(!reply.contains('\n'), "{reply:?}");
@@ -400,6 +445,7 @@ mod tests {
             AppId::new(9003),
             &["moonlight".to_string()],
             None,
+            None,
         );
         assert!(reply.starts_with("error:"), "{reply}");
         assert!(reply.contains("XDG_RUNTIME_DIR"), "{reply}");
@@ -416,6 +462,7 @@ mod tests {
             Duration::from_millis(1),
             AppId::new(9003),
             &["moonlight".to_string()],
+            None,
             None,
         );
         assert!(reply.starts_with("error:"), "{reply}");
@@ -437,6 +484,7 @@ mod tests {
                 Duration::from_millis(1),
                 AppId::new(1),
                 &["x".to_string()],
+                None,
                 None,
             );
             assert!(!reply.contains('\n'), "{reply:?}");

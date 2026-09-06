@@ -204,6 +204,47 @@
 # delays the control surface an operator would use to find out why.
 #boot_app = 9003
 
+# What the boot supervisor does when the app EXITS. Durability is not just
+# "reboot -> Moonlight": on this hardware a streaming client has wedged and died
+# repeatedly, and a boot client that launches once leaves a black television
+# until a human reboots it.
+#
+#   "on-failure"  relaunch only when the app exited non-zero or on a signal.
+#                 DEFAULT.
+#   "always"      relaunch on ANY exit — dev/gamescope/client.sh's behaviour.
+#   "never"       launch once.
+#
+# Why the default is not "always", even though the prototype relaunches
+# unconditionally: the prototype WAS the session, so a quit left a black screen
+# and relaunching was the only sane answer. v2 has a shell behind the app, so a
+# clean exit has somewhere to land — and relaunching over a deliberate quit
+# fights the user, who pressed Quit and expects the shell. A crash is what
+# durability is about, and a crash is not a clean exit. Set "always" to get the
+# prototype's behaviour back.
+#boot_relaunch = "on-failure"
+
+# Fast-exit backoff, from dev/gamescope/client.sh:211-213 — constants chosen
+# against this hardware. An app that exits within boot_fast_exit_secs of launch,
+# boot_fast_exit_limit times in a row, is not going to come up (a broken runtime,
+# a QML error, a client that cannot open the display), so the retry interval
+# stretches from boot_relaunch_delay_secs to boot_backoff_secs instead of
+# hot-spinning. Every backoff is logged at WARN with the running count: a silent
+# backoff is a session that looks idle while it is actually failing.
+#boot_fast_exit_secs = 10
+#boot_fast_exit_limit = 3
+#boot_backoff_secs = 60
+#boot_relaunch_delay_secs = 2
+
+# Give up after this many consecutive fast exits. 0 = never give up (DEFAULT).
+#
+# Never is the right default for an appliance: a permanent give-up guarantees a
+# black television until a human intervenes, while a 60 s backoff costs nothing
+# and recovers by itself the moment someone fixes the runtime — the prototype's
+# own reasoning. Set a bound if you would rather fail loudly and stop; the
+# give-up is logged at ERROR and says the television will show the shell until
+# someone intervenes.
+#boot_give_up_after = 0
+
 # --- Supervision (§9) ---------------------------------------------------------
 # NOT YET READ BY THE CORE — every key in this table. The forced-paint heartbeat
 # is a later change; nothing reads these today. They are defined now so the file

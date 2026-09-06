@@ -90,6 +90,7 @@ async fn serve() -> ExitCode {
 
     // Read before `config` moves into the compositor.
     let boot_app = config.boot_app();
+    let restart_policy = boot::RestartPolicy::from_config(&config);
 
     let compositor = match GamescopeCompositor::connect(config, None) {
         Ok(c) => c,
@@ -126,9 +127,21 @@ async fn serve() -> ExitCode {
     // racing one.
     let boot_compositor = Arc::clone(&compositor);
     tokio::spawn(async move {
-        if let Err(e) =
-            tokio::task::spawn_blocking(move || boot::run(&boot_compositor, boot_decision)).await
-        {
+        let run = move || {
+            // `start` launches and shows; `supervise` then blocks for the life
+            // of the app, relaunching it on a crash (§9 durability). A skip
+            // decision returns None and nothing is supervised — which is how a
+            // core restart under a live game costs exactly one reconcile.
+            if let Some(supervised) = boot::start(&boot_compositor, boot_decision) {
+                boot::supervise(
+                    &boot_compositor,
+                    supervised,
+                    restart_policy,
+                    std::thread::sleep,
+                );
+            }
+        };
+        if let Err(e) = tokio::task::spawn_blocking(run).await {
             tracing::error!("boot client task failed: {e}");
         }
     });

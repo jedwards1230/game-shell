@@ -276,6 +276,55 @@ pub struct SessionConfig {
     /// Consumed by [`crate::boot`], which `main` runs after the IPC socket is
     /// listening.
     pub boot_app: u32,
+    /// When the boot app exits, whether to start it again.
+    ///
+    /// `on-failure` (default), `always`, or `never`. See [`RelaunchPolicy`] for
+    /// why the default is not `always` even though the prototype's supervisor
+    /// relaunches unconditionally.
+    pub boot_relaunch: RelaunchPolicy,
+    /// An exit sooner than this after launch counts as a FAST exit.
+    ///
+    /// The prototype's `FAST_EXIT_SECS`, chosen against this hardware
+    /// (`dev/gamescope/client.sh`).
+    pub boot_fast_exit_secs: u64,
+    /// How many fast exits in a row before the retry interval stretches to
+    /// [`Self::boot_backoff_secs`]. The prototype's `FAST_EXIT_LIMIT`.
+    pub boot_fast_exit_limit: u32,
+    /// The stretched retry interval once the fast-exit limit is hit.
+    /// The prototype's `BACKOFF_SECS`.
+    pub boot_backoff_secs: u64,
+    /// The ordinary retry interval, before any backoff.
+    pub boot_relaunch_delay_secs: u64,
+    /// Give up after this many consecutive fast exits. `0` = never give up.
+    ///
+    /// **Defaults to 0, deliberately.** A permanent give-up on an appliance
+    /// guarantees a black television until a human intervenes, while a 60 s
+    /// backoff costs nothing and recovers by itself the moment someone fixes the
+    /// runtime — which is exactly the prototype's reasoning ("it never stops
+    /// relaunching: a fixed runtime is picked up on the next attempt"). The key
+    /// exists so a deployment that would rather fail loudly can choose to.
+    pub boot_give_up_after: u32,
+}
+
+/// What the boot supervisor does when the app exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelaunchPolicy {
+    /// Relaunch only when the app exited NON-ZERO or on a signal. **Default.**
+    ///
+    /// The prototype relaunches unconditionally, and was right to: it *was* the
+    /// session, so a quit left a black screen. v2 has a shell behind the app, so
+    /// a clean exit has somewhere to land — and relaunching over a deliberate
+    /// quit would fight the user, who pressed Quit and expects the shell.
+    /// A crash is the case durability is actually about, and a crash is not a
+    /// clean exit.
+    #[default]
+    OnFailure,
+    /// Relaunch on ANY exit — the prototype's behaviour, for a deployment that
+    /// wants the app to be the session.
+    Always,
+    /// Never relaunch. The boot client becomes launch-once.
+    Never,
 }
 
 impl Default for SessionConfig {
@@ -293,6 +342,14 @@ impl Default for SessionConfig {
             // None. A default that started an app would make an all-defaults
             // config (a missing file) take over the television.
             boot_app: 0,
+            boot_relaunch: RelaunchPolicy::OnFailure,
+            // The prototype's measured constants (dev/gamescope/client.sh:211).
+            boot_fast_exit_secs: 10,
+            boot_fast_exit_limit: 3,
+            boot_backoff_secs: 60,
+            boot_relaunch_delay_secs: 2,
+            // Never give up — see the field docs.
+            boot_give_up_after: 0,
         }
     }
 }
@@ -1216,6 +1273,14 @@ restart_window_secs = 120
             // Read by `crate::boot` via `CoreConfig::boot_app()`, which `main`
             // acts on after the socket is listening.
             "session.boot_app",
+            // Read by `boot::RestartPolicy::from_config`, which `boot::supervise`
+            // acts on after every exit of the boot app.
+            "session.boot_relaunch",
+            "session.boot_fast_exit_secs",
+            "session.boot_fast_exit_limit",
+            "session.boot_backoff_secs",
+            "session.boot_relaunch_delay_secs",
+            "session.boot_give_up_after",
             "display.width",
             "display.height",
             "display.refresh",
@@ -1257,6 +1322,12 @@ restart_window_secs = 120
             map_timeout_ms,
             launch_confirm_ms,
             boot_app,
+            boot_relaunch,
+            boot_fast_exit_secs,
+            boot_fast_exit_limit,
+            boot_backoff_secs,
+            boot_relaunch_delay_secs,
+            boot_give_up_after,
         } = session;
         let SupervisorConfig {
             stall_secs,
@@ -1277,6 +1348,14 @@ restart_window_secs = 120
             map_timeout_ms,
             launch_confirm_ms,
             u64::from(boot_app),
+            // The supervisor's tunables. `boot_relaunch` is an enum, so it is
+            // counted via its discriminant rather than a numeric cast.
+            boot_relaunch as u64,
+            boot_fast_exit_secs,
+            u64::from(boot_fast_exit_limit),
+            boot_backoff_secs,
+            boot_relaunch_delay_secs,
+            u64::from(boot_give_up_after),
             stall_secs,
             u64::from(restart_threshold),
             restart_window_secs,
@@ -1292,13 +1371,84 @@ restart_window_secs = 120
         // dead string in the list above.
         for key in unconsumed.iter().chain(consumed.iter()) {
             let (table, name) = key.split_once('.').expect("keys are `table.name`");
-            let value = if name == "hdr" || name == "vrr" {
-                "true"
-            } else {
-                "1"
+            let value = match name {
+                "hdr" | "vrr" => "true",
+                // An enum key needs one of its own variants, not an integer.
+                "boot_relaunch" => "\"on-failure\"",
+                _ => "1",
             };
             CoreConfig::parse(&format!("[{table}]\n{name} = {value}\n"))
                 .unwrap_or_else(|e| panic!("{key} is not a real config key: {e}"));
+        }
+    }
+
+    /// **THE DEPLOYMENT QUESTION: does the core.toml already on the box still
+    /// load once new keys exist?**
+    ///
+    /// `deny_unknown_fields` cuts both ways and the answer is not symmetric, so
+    /// it is pinned here rather than reasoned about before a reboot:
+    ///
+    /// * A file MISSING new keys loads fine — every struct is `#[serde(default)]`,
+    ///   so an absent key takes its default. There is no migration step and
+    ///   nothing to run: an existing file is read as-is.
+    /// * A file carrying an UNKNOWN key is REFUSED, loudly, naming the key.
+    ///   That is the half `deny_unknown_fields` buys, and it is why a typo can
+    ///   never silently run a default.
+    ///
+    /// So the file the installer seeded on 2026-09-06 keeps working untouched:
+    /// it gains `boot_app = 0` (no boot client) and the prototype's restart
+    /// constants, and changes behaviour only when someone adds `[[app]]` and a
+    /// `boot_app` deliberately.
+    #[test]
+    fn an_existing_config_without_the_new_keys_still_loads() {
+        // Exactly what `scripts/install-v2.sh` seeds, minus everything added
+        // since: the file as it exists on the box today.
+        let old = "\
+[display]\n\
+width = 3840\n\
+height = 2160\n\
+refresh = 120\n\
+hdr = true\n\
+\n\
+[session]\n\
+shell_app_id = 9001\n\
+xwayland_count = 2\n\
+";
+        let c = CoreConfig::parse(old).expect("an older core.toml must still parse");
+        c.validate().expect("and must still validate");
+
+        // The new keys are present as defaults, and the defaults are inert.
+        assert_eq!(c.boot_app(), None, "no boot client without an explicit key");
+        assert!(c.app.is_empty(), "no app classes without explicit entries");
+        assert_eq!(c.session.boot_relaunch, RelaunchPolicy::OnFailure);
+        assert_eq!(c.session.boot_fast_exit_secs, 10);
+
+        // And the values the operator DID set survive — a default must never
+        // overwrite a written value.
+        assert_eq!(c.display.width, 3840);
+        assert_eq!(c.session.shell_app_id, 9001);
+    }
+
+    /// The other half: an unknown key is refused by name, not ignored.
+    #[test]
+    fn an_unknown_key_is_refused_and_named() {
+        let err = CoreConfig::parse("[session]\nboot_ap = 9003\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("boot_ap"),
+            "the error must name the key: {err}"
+        );
+    }
+
+    /// A `boot_relaunch` typo is refused with the accepted values in reach,
+    /// because it is the one new key whose value is a closed vocabulary.
+    #[test]
+    fn a_bad_relaunch_policy_is_refused() {
+        assert!(CoreConfig::parse("[session]\nboot_relaunch = \"sometimes\"\n").is_err());
+        for good in ["on-failure", "always", "never"] {
+            CoreConfig::parse(&format!("[session]\nboot_relaunch = \"{good}\"\n"))
+                .unwrap_or_else(|e| panic!("{good} must parse: {e}"));
         }
     }
 

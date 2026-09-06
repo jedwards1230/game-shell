@@ -345,12 +345,24 @@ pub struct Launched {
 /// bearing: `systemd-run --scope` **execs** the target command, so the pid the
 /// caller holds is the app's own pid the whole way down (verified by the kit),
 /// which keeps pid-matching, family walks and `wait` working unchanged.
+///
+/// # Reporting the exit
+///
+/// `on_exit`, when given, receives the process's `ExitStatus` from the reaper
+/// thread. It is the reaper and not a second waiter on purpose: `wait()` may be
+/// called once, and the reaper already exists to stop a spawned-and-forgotten
+/// launch becoming a zombie. A supervisor therefore learns about the exit from
+/// the one place that is entitled to know, rather than by polling liveness and
+/// guessing — and it learns the STATUS, which is what separates a crash from a
+/// user pressing Quit (see [`crate::boot::ExitKind`]). A send failure is normal
+/// and ignored: it just means nobody is supervising any more.
 pub fn launch(
     env: &ScopeEnv,
     app_id: AppId,
     command: &[String],
     launch_env: LaunchEnv<'_>,
     confirm_timeout: Duration,
+    on_exit: Option<std::sync::mpsc::Sender<std::process::ExitStatus>>,
 ) -> Result<Launched, LaunchError> {
     if command.is_empty() {
         return Err(LaunchError::EmptyCommand);
@@ -394,7 +406,12 @@ pub fn launch(
     let reaped = format!("{unit}.scope");
     std::thread::spawn(move || match child.wait() {
         Ok(status) => {
-            tracing::debug!(pid, scope = %reaped, %status, "launched process reaped")
+            tracing::debug!(pid, scope = %reaped, %status, "launched process reaped");
+            if let Some(tx) = on_exit {
+                // Ignored: a closed receiver means nobody is supervising, which
+                // is not an error — it is the ad-hoc `launch` case.
+                let _ = tx.send(status);
+            }
         }
         Err(e) => {
             tracing::debug!(pid, scope = %reaped, error = %e, "waiting on launched process failed")
@@ -1181,7 +1198,8 @@ mod tests {
                 AppId::new(1),
                 &[],
                 LaunchEnv::default(),
-                Duration::from_millis(1)
+                Duration::from_millis(1),
+                None
             )
             .unwrap_err(),
             LaunchError::EmptyCommand
