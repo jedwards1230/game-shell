@@ -64,7 +64,7 @@ Compositor: **gamescope**, DRM backend, `--steam` (SteamControlled focus policy)
 ```
 display manager (autologin, Relogin=true) ── selects one of:
   tv-shell-wayland.desktop   → v1 session (Hyprland + Quickshell + tv-shell-input)   [unchanged]
-  tv-shell-gamescope.desktop → v2 session script: stop any stale target, reset-failed,
+  tv-shell-v2.desktop        → v2 session script: stop any stale target, reset-failed,
       mkfifo ready + stats, systemctl --user start --wait tv-shell-session.target
         ├─ tv-shell-gamescope.service   Type=notify, NotifyAccess=all, TimeoutStartSec=5,
         │     Before=graphical-session.target; -R <ready fifo> → env dumped to
@@ -78,6 +78,8 @@ display manager (autologin, Relogin=true) ── selects one of:
         └─ tv-shell-cec.service         Wants=            — kernel-CEC observer sidecar (optional)
       apps: app-steam-app<id>-<pid>.scope, one per launch, on their own Xwayland server
 ```
+
+**The v2 session file is `tv-shell-v2.desktop`, not the `tv-shell-gamescope.desktop` this section first named.** That name was already taken by the Ansible-owned gamescope measurement prototype (`dev/gamescope/README.md`), which is §10's regression bench and still gets selected — so reusing it would have overwritten a live session entry. `scripts/install-v2.sh` writes the v2 one, and a test asserts the name collides with neither it nor v1's `tv-shell-wayland.desktop`.
 
 `BindsTo`/`Upholds`/`Wants` carry no ordering; ordering is `graphical-session.target`, which becomes active only after gamescope's `READY=1`, and that is sent only after the environment file exists. The session script's `--wait` is what makes "gamescope dies → the session exits" true.
 
@@ -229,12 +231,13 @@ The panel becomes the recovery and observability surface for the supervisor (uni
 
 ## 11. Deploy and migration
 
+- **The installer is `scripts/install-v2.sh`**, a separate script rather than a mode on v1's `scripts/install.sh` — the rule below applies to the installer itself, and a flag whose default is v1 is one forgotten argument away from installing over the running appliance. It defaults to the `/opt/tv-shell-v2` prefix and refuses a `--prefix` at or under `/opt/tv-shell` — normalised with `realpath -m` first, because an exact string compare let `/opt//tv-shell` through, and that is the one failure on this path that is silent and destructive rather than loud. It writes `tv-shell-v2.desktop` so a standalone install is selectable immediately, and takes `--no-session` to suppress that on a host where the deploy role owns the session entry — the split is one writer per file, with the role's copy winning on a managed host because only it can render the session env into `Exec=` as a `/usr/bin/env` prefix and only its toggle removes the entry. It installs the three v2 units with their `@TV_SHELL_V2_PREFIX@` token substituted. Eight tests in `core/src/config.rs` run it into a scratch tree and assert the installed units carry no token and no path under v1's prefix, that every spelling of v1's prefix is refused while a normal one is accepted, and that `--no-session` suppresses exactly the session entry and nothing else. What it does **not** yet give the core is a release stream or an Ansible pin (both below).
 - **Beside, not instead, at every shared layer.** v2 has its own session entry, install prefix and git clone (a `/dev/deploy` of a v2 branch must not replace v1's `shell/`), its own config file (the v1 daemon's `config.toml` root is `deny_unknown_fields`, so a new v2 table would abort v1 at startup), its own core binary and unit, and a panel unit whose managed unit names are config. Only one session runs at a time, so the socket and ports do not collide. Cutover includes "deploy v2, select v1, confirm v1 boots".
 - **Hot git deploy stays**: `/dev/deploy` → `/dev/build` → unit restart → screenshot. Screenshots move to gamescope's `gamescope_control.take_screenshot` (grim's protocol is not served), which makes the core a Wayland client of `GAMESCOPE_WAYLAND_DISPLAY`; the same client serves `gamescope-action-binding` (§7).
 - **Fix the Ansible pin first** (jedwards1230/homelab-ansible#320): the role pins a pre-workspace-model daemon and downgrades the running one on any run. The v2 core gets its own release stream and pin. Packaging (#144, #147) remains the end state for install, upgrade and rollback.
 - **gamescope pinned ≥ 3.16.28** by the deploy role; 3.16.23 is not representative (§13 Q5). The headless CI compositor pins the same version.
 - **`--expose-wayland` breaks the WSI layer for every Steam-runtime app, and the fix is per-app.** gamescope hands children `WAYLAND_DISPLAY=gamescope-0`; pressure-vessel (the Steam runtime container) preserves only `wayland-*` socket names, so it rewrites that to `wayland-0` and rewrites `GAMESCOPE_WAYLAND_DISPLAY` to an absolute socket path. The layer's `isRunningUnderGamescope()` gate can then never match, so it does not load: no HDR for any Steam-runtime app, and with dialogs enabled a black screen. Measured 2026-09-05. **The per-app fix is sufficient and was proven** — launching Steam with `WAYLAND_DISPLAY` unset worked with `--expose-wayland` still on and no session restart — so v2 keeps the flag and unsets the variable in the launch environment for that app class. Do **not** chase this with gamescope master: master's bd52d6e sets `WAYLAND_DISPLAY=""`, which pressure-vessel turns back into `wayland-0`, recreating the breakage.
-- **New config** (`config.toml.example` rows and `daemon_config.rs` structs land with the core): `[display]` width/height/refresh, HDR default, SDR nits, hotplug settle; `[session]` shell app id, Xwayland count; `[supervisor]` stall seconds, restart thresholds, short-session window/count; `[av]` AVR host/port, input code, zone-2 policy, TV MAC/broadcast, webOS host and key file.
+- **New config** (`config.toml.example` rows and `daemon_config.rs` structs land with the core): `[display]` width/height/refresh, HDR default, SDR nits, hotplug settle; `[session]` shell app id, Xwayland count, the switch/map/launch-confirm bounds; `[supervisor]` stall seconds, restart thresholds, short-session window/count; `[av]` AVR host/port, input code, zone-2 policy, TV MAC/broadcast, webOS host and key file. Landed as `config/core.toml.example` + `core/src/config.rs` (its own file, not `config.toml` — v1's root is `deny_unknown_fields`). The `[display]` mode and `session.xwayland_count` reach gamescope through an env file the session script renders with `tv-shell-core write-session-env` and the unit reads with a required `EnvironmentFile=`; a config key whose stated consumer does not exist is the repo's #416 class and a test asserts the link.
 - **Cutover criteria**: §6 table green on the pinned build, driven through the runtime atoms, including the eyes-only rows and the new bench rows; field assertions at zero and heartbeat false positives at zero for seven consecutive days of normal use; every PRD §3 journey reproduced; a Moonlight session, a Plex session and a web app each survive a shell restart underneath; the §8 site preconditions verified; v1 still boots after a v2 deploy.
 - **Rollback** is selecting the v1 session at the display manager, by hand or by the short-session hook.
 
@@ -263,6 +266,41 @@ Plugin requirements (mechanism undecided): a plugin declares an app class, a lau
 
 If criterion 10 fails, or if a Steam-first future makes a custom shell not worth its cost, the fallback is a **Bazzite/ChimeraOS-style `gamescope-session` with Steam Big Picture as the shell**. It buys Remote Play, Steam Input, the overlay and HDR for free, with Moonlight and Plex as non-Steam shortcuts. It costs what this design exists to keep: our shell as a peer of apps, native Plex and web apps, and daemon-owned AV control, which would move into a sidecar or a Decky-style plugin. It is a real path, not a strawman, and criterion 10 is where it is chosen. **Criterion 10's Big Picture half passed on 2026-09-05**, so this fallback is not selected; it stays on the page as the named alternative should a Steam-first future make a custom shell not worth its cost. Either way the ChimeraOS session files are reused (§4).
 
+### What §9 describes and what `core/` implements
+
+§9 is the design. As of 2026-09-06 the shipped `core/` crate and its units cover
+part of it, and the gap is recorded here rather than left to be discovered on the
+couch:
+
+| §9 row | State in `core/` |
+|---|---|
+| gamescope dies → session exits | `BindsTo=` on the target, plus the session script's `--wait`. Untested on hardware |
+| Core dies → restart, stateless, never writes "home" on boot | Implemented (`reconcile_on_start`) |
+| Stuck in an app → `intent home` | The base-layer write and its bounded verify exist; there is no intent surface on the core yet |
+| Frames stop → forced-paint heartbeat | **Not implemented.** `[supervisor].stall_secs` has no reader |
+| Shell crash-loops → short-session tracker, then select v1 | **Not implemented.** No `ExecStartPre`/`ExecStopPost`, no counter, no deployment hook; `[supervisor].restart_threshold` / `restart_window_secs` have no reader. The gamescope unit briefly carried `StartLimitIntervalSec=60`/`StartLimitBurst=3` with a comment claiming to deliver this — the limiter was inert (`Restart=no`, so there is never a second attempt to count, and the session script's `reset-failed` clears the counter on every relogin) and has been removed rather than left standing as a protection that is not there. **Rollback is manual: select the v1 session at the display manager.** |
+| Shell dies → restart under the live compositor | The `Upholds=` is in the target; the shell unit does not exist yet |
+| Compositor wedged but alive → panel restarts units | **Not implemented, and the target no longer pretends otherwise.** The panel was `Wants=` on the session target, so the recovery surface would have died with the thing it recovers; it now belongs to `default.target` when it lands. Until then the v2 session has no recovery surface |
+| Only one supervisor holds restart authority | **Not resolved.** The units carried `Conflicts=tv-shell-input.service`, which is bidirectional — so the Ansible CEC watchdog restarting `tv-shell-input` on a bad `cec-health` reading would have stopped the v2 session target and black-screened a live game. Exclusion is now one-directional (the session script stops and `mask --runtime`s the v1 units). That is a mitigation; §9's actual requirement — the watchdog stands down at cutover and its probe distinguishes a stopped unit from a wedged adapter — is still unfiled on the Ansible side |
+
+§5's **transient-unmap hysteresis** is likewise unimplemented:
+`GAMESCOPECTRL_BASELAYER_WINDOW` is read into `ScreenState` and never written,
+and nothing holds the base layer across a known transition or applies hysteresis
+before treating a fallback to the shell as an app exit.
+
+Two §5 rules the crate does implement in a shape §5 does not spell out, both
+because a single bound conflated two different waits:
+
+- A `show` verifies against **two** bounds — `switch_timeout_ms` once the target
+  has a mapped window, `map_timeout_ms` while it has none — and reports two
+  distinct errors. Under one bound a `show` issued right after a `launch` failed
+  on every working launch, which trains a caller to ignore the one error §5 says
+  must never be ignored.
+- A `launch` **confirms itself** (launcher alive, `/proc/<pid>/cgroup` naming the
+  scope) before reporting success. `Command::spawn` returning `Ok` says nothing
+  about whether the app started, so an unconfirmed launch is an error rather than
+  a success payload naming a dead pid.
+
 ## 13. Open questions
 
 1. **Shell runtime: Quickshell on xcb, or a plain Qt Quick application?** Whichever it is must set X11 properties on its own windows before map (a C++ helper or plugin) and split drawer, QAM and toasts into separate toplevels; Quickshell's layer-shell window is unusable here and its xcb operation is unverified. The plain `qml` runtime (Qt 6) worked as the prototype shell at 4K120. Porting cost of `shell/` versus a rewrite is the trade.
@@ -275,8 +313,8 @@ If criterion 10 fails, or if a Steam-first future makes a custom shell not worth
 8. **Privilege model.** The panel's exec tier, the short-session fallback (a root-owned display-manager file), and the pacman path: sudoers allowlist (v1) or polkit + a system D-Bus helper (SteamOS shape). PRD §4 lists display-manager setup as a non-goal; the fallback hook either lives in deployment or amends that.
 9. **Cause of the launch-coincident hotplug**: the AVR, an audio infoframe renegotiation at stream start, or the v1 CEC lifecycle. Discriminating runs: CEC off; Moonlight audio disabled. The relaunch-once policy waits on the answer.
 10. **Headless CI feasibility** on a hosted runner: lavapipe acceptance, stats emission, `GAMESCOPE_CREATE_XWAYLAND_SERVER` under headless.
-11. **VRR default**: on, off, or per-app, given the OLED near-black flicker and AVR OSD notes in the ops record.
-12. **Core name and repo layout**: whether `daemon/` evolves in place or a new crate is created beside it while v1 is kept buildable; the same for a v2 `shell/`.
+11. **VRR default**: on, off, or per-app, given the OLED near-black flicker and AVR OSD notes in the ops record. **Still open**, and now a config key (`[display].vrr`) rather than a hardcoded `--adaptive-sync` in the unit — the unit was answering this question in the direction the ops record warns against, without saying it was answering anything. The default matches the measured session (on); the ops record's concern is untested against it.
+12. **Core name and repo layout**: whether `daemon/` evolves in place or a new crate is created beside it while v1 is kept buildable; the same for a v2 `shell/`. **Answered 2026-09-06 for the core half**: a NEW crate, `core/` (`tv-shell-core`), beside `daemon/`, with v1 (`daemon/`, `host/`, `protocol/`, `panel/`) untouched and still building. Evolving `daemon/` in place was never viable at the config layer — its root is `deny_unknown_fields`, so a v2 table in `config.toml` aborts v1 at startup — so the core takes its own file, socket and units (§11). The **v2 `shell/` half is still open**, and waits on Q1's runtime decision.
 13. **Screenshot fidelity under HDR** through `gamescope_control` (`screen_buffer` type) versus a WSI-side capture.
 
 ## 14. Decision log
@@ -293,6 +331,7 @@ If criterion 10 fails, or if a Steam-first future makes a custom shell not worth
 | 2026-09-05 | Moonlight and Steam Remote Play are both first-class and permanently supported; Remote Play under gamescope is kit criterion 10 and gates the flavour (Big Picture vs Steam Link); a Steam-as-shell `gamescope-session` is the named fallback; the shell's app id is private, 769 stays Steam's | this document, `dev/gamescope/README.md` |
 | 2026-09-05 | **Kit criterion 10 measured.** Steam Remote Play runs under the prototype: Big Picture as a tagged app passes in its **SDR** form (120 fps, pad reaches the game, stream window tagged with the game's app id and deferred to). Remote Play is **SDR by a Valve-side gate** — the client declines the HDR swapchain the compositor offers — so Moonlight stays the HDR path. **Steam owns the base-layer atom** and rewrites it per stream start and stop; the core reconciles after Steam rather than contending. Steam Link is **unmeasured** (not installed). `--expose-wayland` disables the WSI layer for Steam-runtime apps; the per-app `WAYLAND_DISPLAY`-unset fix is proven and the flag stays. The decision rule (criteria 1 and 3) is untouched and still passes — gamescope remains the v2 compositor | this document, jedwards1230/tv-shell#458 |
 | 2026-09-05 | Review findings folded in: `app-steam-app` scope prefix is the upstream contract and the primary id; shell self-tags; the core is stateless and reads the base-layer list back on restart; v1 and v2 share no config file, prefix or unit name; the heartbeat is a forced-paint probe with one FIFO reader; `GAMESCOPE_FOCUSED_WINDOW` not `_APP` is the truth under an overlay; presenters collapse to `gamepad`/`keyboard` with persistent uinput devices | this document |
+| 2026-09-06 | **§13 Q12 answered for the core**: a new crate `tv-shell-core` in `core/`, beside `daemon/`, not an evolution of it — v1 (`daemon/`, `host/`, `protocol/`, `panel/`) is untouched and still builds, and the two share no config file (`core.toml`, since v1's root is `deny_unknown_fields`), socket (`tv-shell-core.sock`) or unit name. The crate lands with the typed atom layer, `ScreenState`, scope launching, base-layer show/home and the IPC server; input, CEC, the network surfaces, the heartbeat and the v2 `shell/` are not in it | this document, `core/README.md` |
 
 ## 15. References
 

@@ -1,0 +1,203 @@
+[Unit]
+# gamescope, the v2 compositor. UNTESTED ON HARDWARE — see the header in
+# tv-shell-session.target.
+#
+# Type=notify with a ready-fd handshake, following docs/V2_DESIGN.md §4 and the
+# ChimeraOS/SteamOS `gamescope-session` units this is derived from.
+#
+# THE HANDSHAKE, and why it is shaped this way:
+#
+#   The READY=1 that systemd waits for is sent by gamescope's own CHILD,
+#   tv-shell-gamescope-child.sh, after it has published the compositor
+#   environment (WAYLAND_DISPLAY, DISPLAY, GAMESCOPE_WAYLAND_DISPLAY,
+#   XAUTHORITY) to %t/tv-shell-gamescope-environment. So `READY=1` means "the
+#   environment file exists and is complete", which is exactly the precondition
+#   every unit ordered after this one needs. A plain Type=simple would let the
+#   core start against a compositor that has no X server yet and no environment
+#   file to read, and the failure would present as "the core cannot connect to
+#   X" rather than as a startup ordering bug.
+#
+#   THERE IS DELIBERATELY NO `-R <fifo>`. gamescope's ready-fd is the mechanism
+#   the ChimeraOS units use, but here the child already provides the same
+#   guarantee and provides it LATER — after the environment is published, which
+#   is the part the core actually depends on. Passing `-R` as well would leave a
+#   FIFO with a writer and no reader, and opening one blocks, so an unused ready
+#   FIFO is not free: it is a startup hang waiting for a reader that this design
+#   never creates.
+#
+#   THE DUMP CANNOT BE AN `ExecStartPost=`, TWICE OVER. First, systemd runs
+#   ExecStartPost only AFTER the service counts as started, and under Type=notify
+#   "started" means READY=1 has arrived — so an ExecStartPost that sends the
+#   notification deadlocks against itself until TimeoutStartSec fires, and with
+#   BindsTo= on the session target that kills the session on every boot. Second,
+#   an ExecStartPost shell has the UNIT's environment, not gamescope's: it would
+#   dump an empty file, `EnvironmentFile=-` would accept it silently, and the
+#   core would connect to whatever ambient $DISPLAY exists. Both failures go away
+#   when the dump runs inside gamescope's process tree, which is what the child
+#   script is.
+#
+# NotifyAccess=all because the notification comes from that child, not from the
+# main process.
+Description=gamescope compositor for the tv-shell v2 session
+Before=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+
+# THE START TIMEOUT IS A TRADE, AND IT USED TO BE ON THE WRONG SIDE OF IT.
+#
+# This was 5 s, with a comment saying a compositor not ready by then is wedged
+# rather than slow. What has to happen inside the window: take DRM master, read
+# EDID through an AVR that on a cold boot may still be waking from standby,
+# perform a 4K120 modeset, start Xwayland, and let the child dump the
+# environment. AVR-standby is a documented recurring state on this chain, and
+# overrunning here fails the start, which stops the BindsTo'd target, which ends
+# the session — i.e. a relogin loop, which cannot be broken from the couch.
+#
+# A wedged compositor sitting black for a minute is recoverable (the panel, the
+# LAN, a power cycle). A relogin loop is not. So the timeout is generous and the
+# asymmetry is the reason. 60 s is NOT measured — cold boot with the AVR asleep
+# is a cutover bench row (§11), and this number should be replaced with one.
+TimeoutStartSec=60
+
+# The stats FIFO is created by the session script before the target is started,
+# so it exists by the time gamescope opens it. %t is $XDG_RUNTIME_DIR.
+Environment=TV_SHELL_STATS_FIFO=%t/tv-shell-gamescope-stats
+Environment=TV_SHELL_ENV_FILE=%t/tv-shell-gamescope-environment
+
+# THE OUTPUT MODE, AND WHY IT IS NOT WRITTEN HERE.
+#
+# This file used to hard-code `-W 3840 -H 2160 -r 120` while [display] in
+# core.toml documented itself as "read by the unit's ExecStart". It was not: an
+# operator could set `refresh = 60`, watch the core's validate() accept it, and
+# change nothing. Two literals with no link between them.
+#
+# Now `tv-shell-core write-session-env` renders this file from core.toml, the
+# session script runs it BEFORE starting the target, and the substitutions below
+# are the link. NO LEADING `-`: if the file is missing the mode is unknown, and
+# starting a 4K120-pinned compositor with an unknown mode is exactly the silent
+# success §3 exists to kill. Fail loudly instead.
+EnvironmentFile=%t/tv-shell-gamescope-mode
+
+# §9: a layer failure must exit loudly rather than ask an invisible question.
+# gamescope's zenity dialogs are untagged windows nobody can see, and a client
+# blocked behind one hangs at 0% CPU with no log line for as long as you let it.
+Environment=GAMESCOPE_ZENITY_DISABLE=1
+
+# THE INVOCATION. Every flag below is either in `dev/gamescope/session.sh`'s
+# ARGS array — the ONLY invocation of gamescope this project has ever measured,
+# over a week of live use — or is named here with the reason it differs.
+#
+# The rule this list is written under: THE KIT MADE A THING CONFIGURABLE
+# BECAUSE IT WAS AN OPEN QUESTION. A unit that hard-codes one answer without
+# saying it is answering anything closes a design question in silence. So every
+# value that the kit gates on an env var is either config-driven here too, or
+# carries the §13 question it answers and why.
+#
+#   --backend drm       kit:157. Absent before, which let gamescope pick a
+#                       backend. In a display-manager session that is a coin
+#                       toss the couch pays for; the measured session pinned it.
+#   --steam             SteamControlled focus policy; the whole §5 model. It has
+#                       a short form, `-e`, and this unit used to pass BOTH —
+#                       one flag twice, with the bare `-e` reading like the
+#                       xwayland-count flag it is not. `--xwayland-count` is
+#                       long-only and takes an argument; `-e` takes none, so a
+#                       reader "fixing" the mismatch by writing `-e 2` hands
+#                       gamescope `2` as its child command, gamescope execs it,
+#                       it fails instantly, BindsTo= stops the target and the
+#                       television relogins forever. Long forms only, for that.
+#   --keep-alive        kit:135-136, deliberate: "the shell must survive a child
+#                       crash and the supervisor must own restarts". Absent
+#                       before. Latent today only because the primary child is a
+#                       placeholder `sleep infinity` — the moment the real shell
+#                       takes that slot, its absence INVERTS §9's "shell dies →
+#                       restart under the live compositor" into "shell dies →
+#                       compositor, session and any running game die with it".
+#   --expose-wayland    ON, and HARD-CODED on purpose. This is the one flag the
+#                       kit gates that §11 has actually DECIDED: keep the flag
+#                       and unset WAYLAND_DISPLAY per-app for Steam-runtime
+#                       clients (proven 2026-09-05), because chasing it via
+#                       gamescope master recreates the breakage. Not an open
+#                       question, so not a config key.
+#   -W/-H/-r            The mode, PINNED (§6): the EDID preferred mode on this
+#                       chain is 60 Hz, so letting the display choose gives
+#                       4K60. From [display] in core.toml — see the
+#                       EnvironmentFile note above.
+#   -w/-h               kit:143, "client (nested) size equals the output so
+#                       nothing is scaled". Absent before; the visible symptom
+#                       of omitting it is an upscaled sub-4K shell, which reads
+#                       as a font or scale bug rather than as a missing flag.
+#   $TV_SHELL_GS_HDR_ARGS
+#                       `--hdr-enabled --hdr-sdr-content-nits <n>`, or NOTHING.
+#                       Unquoted so systemd word-splits it — which is how a
+#                       sometimes-absent flag is expressed at all. The unit used
+#                       to pass `--hdr-enabled` unconditionally while
+#                       [display].hdr documented itself as read by nothing, so
+#                       `hdr = false` got HDR anyway. The nits value is §6's
+#                       eyes-only criterion and is NOT settled; 200 is the
+#                       measured value (kit:51), not a decision.
+#   $TV_SHELL_GS_VRR_ARGS
+#                       `--adaptive-sync`, or NOTHING. **§13 Q11 IS OPEN.** §6
+#                       and the ops record both record OLED near-black flicker
+#                       and AVR OSD problems with VRR on this chain and lean
+#                       off; the measured session ran it on. This unit used to
+#                       hard-code `--adaptive-sync` with no knob and no comment,
+#                       silently answering Q11 in the direction the ops record
+#                       warns against. It is now [display].vrr, defaulting to
+#                       the measured configuration. Q11 stays open.
+#   --xwayland-count    One server for the shell plus one per concurrent app
+#                       (§4). From [session].xwayland_count.
+#   --hide-cursor-delay kit:145. Absent before; the symptom is a mouse cursor
+#                       parked on a 10-foot UI forever. 3000 is the kit's value
+#                       and is cosmetic, so it is not a config key.
+#   --stats-path        Not the short `-T`, so it matches kit:144 exactly. On
+#                       the FIFO having no reader: that is the live appliance's
+#                       own configuration — the kit creates the FIFO, nothing
+#                       tails it unless an operator does, and gamescope does not
+#                       hang. The kit records why (kit:86-89): gamescope open()s
+#                       an EXISTING FIFO and, with nothing on the other end,
+#                       retries every 10 s rather than blocking. §9's stats
+#                       relay is still the intended permanent reader; until it
+#                       lands the stats simply do not appear, which is a missing
+#                       feature and not a startup risk.
+#
+# Deliberately NOT carried over from the kit: TV_SHELL_GS_EXTRA (an escape hatch
+# for interactive bench runs; a unit that word-splits arbitrary operator text
+# into its ExecStart is a worse idea than editing the unit) and the kit's
+# daemon-start logic (v2 has no v1 daemon in the session at all).
+#
+# THE CHILD PATH BELOW IS A TOKEN. `scripts/install-v2.sh` substitutes
+# @TV_SHELL_V2_PREFIX@ with its resolved --prefix when it installs this unit; see
+# the long note on tv-shell-core.service's ExecStart for why it is a token and
+# not a default literal.
+ExecStart=/usr/bin/gamescope \
+    --backend drm \
+    --steam \
+    --keep-alive \
+    --expose-wayland \
+    -W ${TV_SHELL_GS_WIDTH} -H ${TV_SHELL_GS_HEIGHT} -r ${TV_SHELL_GS_REFRESH} \
+    -w ${TV_SHELL_GS_WIDTH} -h ${TV_SHELL_GS_HEIGHT} \
+    $TV_SHELL_GS_HDR_ARGS \
+    $TV_SHELL_GS_VRR_ARGS \
+    --xwayland-count ${TV_SHELL_GS_XWAYLAND_COUNT} \
+    --hide-cursor-delay 3000 \
+    --stats-path ${TV_SHELL_STATS_FIFO} \
+    -- @TV_SHELL_V2_PREFIX@/bin/tv-shell-gamescope-child.sh
+
+# No Restart=: the compositor is BindsTo'd by the session target, so its death
+# is meant to end the session and hand control back to the display manager,
+# not to be papered over by a restart under a session whose clients have all
+# lost their surfaces.
+#
+# AND THEREFORE NO StartLimit* EITHER. This unit used to carry
+# StartLimitIntervalSec=60 / StartLimitBurst=3 with a comment promising "three
+# attempts in a minute, then offer v1". That protection did not exist: with
+# Restart=no there is never a second attempt for the limiter to count, and the
+# session script's `reset-failed` clears the counter on every relogin anyway. A
+# comment claiming a protection that is not there is worse than no protection,
+# because it stops the next person looking. §9's short-session tracker — the
+# thing that would actually catch a crash-loop and select v1 — IS NOT
+# IMPLEMENTED. See tv-shell-session.target's header.
+Restart=no

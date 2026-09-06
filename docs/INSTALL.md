@@ -53,6 +53,40 @@ never overwrites your existing `~/.config/tv-shell` files. Useful flags:
 `--no-build` (reuse an existing binary), `--features` (daemon Cargo features,
 default `cec,mcp`), `--session-dir`, `--user`. See `./scripts/install.sh --help`.
 
+### The v2 (gamescope) session — `scripts/install-v2.sh`
+
+The v2 session installs **beside** this one, never over it
+([`V2_DESIGN.md`](V2_DESIGN.md) §11): its own prefix, units, config file and
+session entry, so v1 stays selectable as the rollback.
+
+```bash
+sudo ./scripts/install-v2.sh --user "$USER"   # default prefix /opt/tv-shell-v2
+```
+
+It builds `tv-shell-core`, installs it and the two session scripts to
+`<prefix>/bin/`, writes the three v2 systemd `--user` units with their install
+prefix substituted, writes `/usr/share/wayland-sessions/tv-shell-v2.desktop`, and
+seeds `~/.config/tv-shell/core.toml` (v2's config file — **not** `config.toml`,
+which is v1's and would abort the v1 daemon if it carried v2 tables). It refuses
+a `--prefix` at or under `/opt/tv-shell` (normalised first, so `/opt//tv-shell`
+and `/opt/tv-shell/anything` are refused too) so it cannot land in v1's tree.
+Flags: `--prefix`,
+`--user`, `--session-dir`, `--unit-dir`, `--config-dir`, `--no-build`,
+`--no-session`; see `./scripts/install-v2.sh --help`.
+
+**On a configuration-managed host, pass `--no-session`.** The installer writes
+the session `.desktop` by default so a standalone install is selectable straight
+away, but if your configuration management also writes that path you get two
+writers of one file and it flips per run. `--no-session` suppresses the write
+entirely (it does not even create the directory), leaving that file to its owner
+— which is the right side of the split when only the config-management copy can
+carry a `/usr/bin/env` prefix in `Exec=` for session environment, and only its
+toggle can remove the entry. Everything else still installs, so the launcher its
+`Exec=` points at is in place.
+
+At the display manager you then get **TV Shell v2 (gamescope)** alongside **TV
+Shell (Wayland)**. v2 is unproven on hardware — see `core/README.md`.
+
 ## 3. Configure
 
 Everything machine-specific lives under `~/.config/tv-shell/` and is seeded

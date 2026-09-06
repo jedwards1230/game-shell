@@ -59,6 +59,14 @@ jobs:
               - 'daemon/**'
               - 'panel/**'
               - 'protocol/**'
+              - 'core/**'
+              # The v2 installer and its reference session entry are inputs to
+              # the core crate's install tests (they run install-v2.sh and read
+              # config/tv-shell-v2.desktop), and the installer is shellchecked by
+              # the `core` job. A change to either that did not run this area
+              # would go unchecked.
+              - 'scripts/install-v2.sh'
+              - 'config/tv-shell-v2.desktop'
               - '.github/workflows/rust.yml'
               - '.github/workflows/ci.yml'
             host:

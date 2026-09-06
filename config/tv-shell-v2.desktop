@@ -1,0 +1,23 @@
+# Wayland session entry for the tv-shell **v2** (gamescope) session, the peer of
+# tv-shell.desktop. scripts/install-v2.sh installs a copy to
+# /usr/share/wayland-sessions/tv-shell-v2.desktop with the Exec line rewritten to
+# the resolved --prefix. This committed copy uses that installer's default prefix
+# (/opt/tv-shell-v2); edit Exec to match if you wire the session up by hand.
+#
+# THE FILE NAME IS THE THIRD ONE ON PURPOSE. Two are already taken on this box:
+# tv-shell-wayland.desktop is v1's (written by scripts/install.sh), and
+# tv-shell-gamescope.desktop belongs to the Ansible-owned measurement prototype
+# (dev/gamescope/README.md), which V2_DESIGN §4 named before that prototype
+# existed. Reusing either would silently replace a session someone still selects
+# — v1 is the rollback path (§11) and the prototype is the regression bench (§10)
+# — so the v2 session takes the `v2` name its units already carry.
+#
+# DesktopNames matches what the session script imports into the user manager
+# (XDG_CURRENT_DESKTOP=gamescope), so a client keying on it takes the same path
+# whether it reads the display manager's environment or the user manager's.
+[Desktop Entry]
+Type=Application
+Name=TV Shell v2 (gamescope)
+Comment=gamescope session with the tv-shell v2 core (base-layer policy, scoped launching)
+Exec=/opt/tv-shell-v2/bin/tv-shell-gamescope-session.sh
+DesktopNames=gamescope

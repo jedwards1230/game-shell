@@ -1,0 +1,98 @@
+[Unit]
+# The v2 session target — the single thing the session script starts and waits on.
+#
+# UNTESTED ON HARDWARE. These units follow docs/V2_DESIGN.md §4 and the shape of
+# the SteamOS/ChimeraOS `gamescope-session` package, but nothing here has been
+# booted. Read them as a proposal for review, not as a verified configuration.
+#
+# The dependency shape is deliberate and is the §4 contract:
+#
+#   * `BindsTo=` gamescope: when the compositor dies the target stops, the
+#     session script's `--wait` returns, and autologin restarts the session.
+#     That is what makes "gamescope dies → the session exits" TRUE rather than
+#     leaving an orphaned target with nothing to draw on.
+#   * `Wants=` core and shell, with `Restart=always` on the units themselves.
+#     That is the §9 mitigation for "the core dies" and "the shell dies" — a
+#     restart under the live compositor, with the base-layer list re-resolving to
+#     the shell on its own. It is deliberately NOT `Upholds=`: that restarts a
+#     unit even after a clean exit and specifically defeats a manual
+#     `systemctl --user stop`, so an operator debugging over SSH could not take
+#     the core down without stopping this target and blanking the television.
+#     `Restart=always` gives the same crash recovery and still honours a stop.
+#
+#   * THE PANEL IS NOT HERE, AND THAT IS THE FIX, NOT AN OMISSION. §9 makes the
+#     panel the LAN recovery surface — the thing you reach for when the session
+#     is wedged. It was `Wants=` on this target, which means it would have died
+#     with the very thing it exists to recover, and an operator would have found
+#     the recovery surface gone at exactly the moment they needed it. When
+#     `tv-shell-v2-panel.service` lands it gets `[Install] WantedBy=default.target`
+#     and is `systemctl --user enable`d, so it outlives every session on the box.
+#     **Until then the v2 session has NO recovery surface**, which is worth
+#     saying out loud: a `Wants=` on a unit that does not exist is a silent skip,
+#     so the session would have come up believing it had one.
+#
+# WHY THE `v2-` INFIX ON THE SIDECARS AND THE SHELL:
+#
+#   §11 requires v1 and v2 to share no unit name, and v1 has already TAKEN the
+#   obvious ones. `tv-shell-panel.service` is v1's panel verbatim — the same
+#   file name in config/, installed into the same ~/.config/systemd/user/ by
+#   scripts/install.sh, with its unit name hardcoded in panel/src/config.rs. A
+#   v2 target pulling `tv-shell-panel.service` would start the V1 panel, reading
+#   v1's config and dialling v1's socket, and it would look like the v2 panel
+#   simply misbehaving. So every v2 sidecar carries the infix.
+#
+#   NONE OF THESE UNITS EXIST YET (`tv-shell-v2-shell`, `-stats`, `-cec`; the
+#   panel is a separate case, above). They are `Wants=` because a `Wants=` on a
+#   missing unit is a soft skip at load — but note that a soft skip is also
+#   invisible, so the session comes up as if they were there.
+#
+# None of Binds/Upholds/Wants carries ordering, INCLUDING the `After=` on this
+# target: ordering a target does not order the units it upholds. So each child
+# unit orders itself on `tv-shell-gamescope.service` directly — see the long
+# comment in tv-shell-core.service. `graphical-session.target` is deliberately
+# NOT the ordering anchor here: it is only ever `Wants=`-ed, nothing stops it,
+# and on any relogin within one user-manager lifetime it is already active, which
+# makes `After=graphical-session.target` satisfied instantly and therefore
+# vacuous.
+#
+# §9's CRASH-LOOP ROLLBACK IS NOT IMPLEMENTED.
+#
+#   §9's table says a crash-looping shell should be caught by a short-session
+#   tracker (ExecStartPre/ExecStopPost, 3 exits under 60 s), backed off, and then
+#   answered by a deployment hook that selects the v1 session. None of that
+#   exists: there is no ExecStartPre or ExecStopPost anywhere in this directory,
+#   no counter, and no hook. `[supervisor].restart_threshold` and
+#   `restart_window_secs` in core.toml are its configuration and nothing reads
+#   them; the core's own test lists them as unconsumed for exactly that reason.
+#
+#   The gamescope unit used to carry StartLimitIntervalSec=60/StartLimitBurst=3
+#   with a comment claiming it delivered this. It did not — that unit is
+#   Restart=no, so there is never a second attempt to count, and the session
+#   script's `reset-failed` clears the counter on every relogin regardless. It
+#   has been removed rather than left standing as a protection that is not there,
+#   because a comment like that stops the next person from looking.
+#
+#   Until the tracker lands, the rollback path is MANUAL: select the v1 session
+#   at the display manager (§11).
+Description=tv-shell v2 session (gamescope)
+
+# Stop the whole session if the compositor goes away.
+BindsTo=tv-shell-gamescope.service
+After=tv-shell-gamescope.service
+
+# The session's own children. Restart-on-death lives on each unit
+# (`Restart=always`), not here as `Upholds=` — see the [Unit] comment.
+#
+# The panel is deliberately absent: it is the recovery surface and belongs to
+# default.target, not to the session it recovers.
+Wants=tv-shell-core.service
+Wants=tv-shell-v2-shell.service tv-shell-v2-stats.service tv-shell-v2-cec.service
+
+# NO `Conflicts=` — see the long comment in tv-shell-core.service. It is
+# bidirectional, so the Ansible CEC watchdog restarting tv-shell-input on a bad
+# `cec-health` reading would have stopped this target and black-screened a live
+# game. v1 exclusion is one-directional, done by the session script (stop +
+# `mask --runtime` the v1 units, unmask on exit), which also covers v1's PANEL —
+# left running it would keep serving on the LAN while dialling a socket with no
+# daemon behind it, so the recovery surface would look broken rather than saying
+# "v2 is running".

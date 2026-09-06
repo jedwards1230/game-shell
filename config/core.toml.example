@@ -1,0 +1,217 @@
+# Per-machine configuration for the tv-shell v2 core (`tv-shell-core`).
+#
+# THIS IS A SEPARATE FILE FROM v1's config.toml, AND IT MUST STAY THAT WAY.
+# The v1 daemon's root config struct is `deny_unknown_fields`, so adding a
+# [display] or [session] table to config.toml would make the **v1 daemon abort
+# at startup** — and the symptom presents as "v1 is broken", not "someone added
+# a v2 table". v1 has to keep booting on the couch while v2 is built beside it
+# (docs/V2_DESIGN.md §11, "beside, not instead, at every shared layer"), so the
+# core reads its own file. Nothing here is ever read by v1, and nothing v1 reads
+# is ever written here. Pointing the core at config.toml fails loudly on the
+# first v1 table rather than quietly running all-defaults.
+#
+# Copy to ~/.config/tv-shell/core.toml and edit. EVERYTHING here is OPTIONAL —
+# with no core.toml at all the core boots on the defaults below, which are the
+# measured-good values for the reference chain (HTPC → AVR → 4K120 OLED). Every
+# key is shown commented out with its default.
+#
+# This file is parsed with `deny_unknown_fields` at every level, so a typo
+# (`refres = 120`) is a startup failure naming the bad key rather than a setting
+# that silently did nothing. `validate()` then rejects values that would fail
+# confusingly later, with a `config: ...` message naming the value.
+#
+# Path overrides (runtime/session only, not per-machine config):
+#   TV_SHELL_CORE_CONFIG  — the path to this file
+#   TV_SHELL_CORE_SOCK    — the IPC socket path
+#                           (default /run/user/<uid>/tv-shell-core.sock —
+#                            deliberately NOT tv-shell-input.sock, so a stray v1
+#                            client can never be answered by the v2 grammar)
+
+# --- Output mode and HDR ------------------------------------------------------
+[display]
+# THESE ARE LIVE. The session script runs `tv-shell-core write-session-env`
+# before starting the target; that renders these keys into
+# $XDG_RUNTIME_DIR/tv-shell-gamescope-mode, and
+# core/units/tv-shell-gamescope.service reads that file and substitutes
+# ${TV_SHELL_GS_WIDTH} / _HEIGHT / _REFRESH into gamescope's command line.
+# Change a value here and the compositor starts at it.
+#
+# It was not always so: the unit hard-coded `-W 3840 -H 2160 -r 120` while these
+# keys documented themselves as "read by the unit's ExecStart". They were not —
+# setting `refresh = 60` was accepted by validate() and changed nothing at all.
+# Two literals with no link between them. The env file is the link.
+#
+# PINNED, not negotiated: the EDID preferred mode on this chain is 60 Hz
+# (V2_DESIGN §6), so letting the display choose gives 4K60, not 4K120.
+#width = 3840
+#height = 2160
+#refresh = 120
+
+# Whether HDR is on.
+#
+# LIVE. `hdr = false` renders an EMPTY TV_SHELL_GS_HDR_ARGS and gamescope starts
+# without --hdr-enabled. The unit used to pass --hdr-enabled unconditionally
+# while this key documented itself as read by nothing, so `hdr = false` got you
+# HDR anyway; the measured kit gates the flag on TV_SHELL_GS_HDR for the same
+# reason this now does.
+#
+# It is a START-TIME setting, not a runtime toggle: changing it needs a session
+# restart, because the core writes no HDR atom yet. When the runtime surface
+# lands (§6) it will be a ROOT-ATOM WRITE read back via
+# GAMESCOPE_HDR_OUTPUT_FEEDBACK — and NEVER a bare `gamescopectl <convar>`. On
+# 3.16.x and master a value-less convar call RESETS the convar to its default and
+# turns HDR off with no log line at all; that is how the phase-2 "feedback 0" was
+# self-inflicted.
+#hdr = true
+
+# --hdr-sdr-content-nits: the white point SDR content (the shell itself) is
+# mapped to inside an HDR output. Passed with --hdr-enabled, as one pair.
+#
+# NOT A SETTLED NUMBER. §6 makes the black floor an eyes-only criterion and names
+# gamescope#1887 (SDR oversaturated on an HDR output) as the risk for the shell's
+# own colours. 200 is the only value ever run on this chain
+# (dev/gamescope/session.sh:51). It was 400 here — a number nobody had looked at
+# through the television — and is now the measured one. Expect to move it.
+#sdr_nits = 200
+
+# Whether VRR (--adaptive-sync) is on.
+#
+# §13 Q11 IS OPEN AND THIS KEY EXISTS SO NOTHING CLOSES IT BY ACCIDENT. §6 and
+# the ops record both note OLED near-black flicker and AVR OSD problems with VRR
+# on this exact chain and lean toward off; the week-long live measurement
+# nonetheless ran with it ON (TV_SHELL_GS_VRR defaults to 1 in the kit). The unit
+# used to hard-code --adaptive-sync with no knob and no comment, silently
+# answering an open design question in the direction the ops record warns
+# against.
+#
+# The default matches the measured configuration, because that is the one we have
+# evidence about. Turning it off is this one line and a session restart.
+#vrr = true
+
+# NOT YET READ BY THE CORE — the launch path does not gate on display feedback
+# yet; the gate lands with the HDR-aware launch path (§6).
+#
+# How long GAMESCOPE_HDR_OUTPUT_FEEDBACK must read the configured value before
+# an HDR-capable launch is allowed through.
+#
+# §6: an HDMI re-negotiation (~1 s) zeroes the HDR and VRR feedback atoms and
+# then restores them — and a Vulkan surface created INSIDE that window stays SDR
+# for the life of the client. So a launch is gated on the feedback atom reading
+# steady for this long. The one observed instance coincided with a Moonlight
+# launch to within a second and its cause is still open (§13 Q9), which is why
+# this is a settle period rather than a relaunch policy.
+#hotplug_settle_ms = 2000
+
+# --- The shell's identity and the Xwayland topology ---------------------------
+[session]
+# The shell's own gamescope app id.
+#
+# PRIVATE, AND NEVER 769. Under gamescope's --steam focus policy 769 is the
+# Steam client's own id (`window_is_steam`: forced fullscreen sizing,
+# `focus=steam` in the stats pipe) and is reserved for the Steam client when it
+# runs as an app (§5). The core REFUSES TO START on shell_app_id = 769 rather
+# than let the shell inherit that path and collide with the real client the
+# moment Steam launches. 9001 is the id the measurement kit used.
+#shell_app_id = 9001
+
+# How many Xwayland servers gamescope starts (--xwayland-count): one for the
+# shell plus one per concurrently launched app (§4). Must be at least 1 — the
+# shell needs a server.
+#
+# LIVE, by the same env-file link as [display] above (${TV_SHELL_GS_XWAYLAND_COUNT}).
+#
+# NOT `-e`. This key used to be documented as "read by the unit's ExecStart
+# (-e)". `-e` is the SHORT FORM OF `--steam` — the unit was passing it twice —
+# and `--xwayland-count` is long-only and takes an argument. A reader reconciling
+# the doc with the unit would write `-e 2`; `-e` consumes no argument, so `2`
+# becomes gamescope's child command, gamescope execs it, it fails instantly,
+# BindsTo= stops the session target and the television relogins in a loop.
+#
+# Per-app server creation (GAMESCOPE_CREATE_XWAYLAND_SERVER) is still a later
+# change; when it lands the core reads this to size the pool as well.
+#xwayland_count = 2
+
+# Bound on the base-layer read-back after a switch, FOR A WINDOW THAT IS ALREADY
+# MAPPED.
+#
+# THIS IS THE FAILURE BOUND, NOT THE EXPECTED TIME. A switch is one
+# GAMESCOPECTRL_BASELAYER_APPID write followed by a read of
+# GAMESCOPE_FOCUSED_WINDOW's app id; the switch itself measured 14–19 ms over
+# 20 of 20 switches (§6). 250 ms is an order of magnitude of headroom — enough
+# that a slow frame, a hotplug settle or a loaded box cannot produce a false
+# failure, and short enough that a real failure surfaces inside one user
+# interaction instead of looking like a hang. A mismatch inside the bound is an
+# IPC error, a metric and a log line — never `ok` (§5).
+#
+# RANGE: 1..=5000. Zero would report every switch as failed before the
+# compositor could publish it. The upper bound matters just as much: an intent
+# holds the core's intent lock for its whole write-and-verify, so a large value
+# queues every later show/home behind it — including §9's "stuck in an app →
+# intent home" recovery. A knob that can disable the escape hatch is not a knob.
+#switch_timeout_ms = 250
+
+# Bound on waiting for an app that has NOT MAPPED A WINDOW YET.
+#
+# A SEPARATE, MUCH LARGER BOUND, and the reason is worth reading. §6's 14–19 ms
+# is the time to switch between windows that already exist. A freshly launched
+# app takes SECONDS to map its first window, and for all of that time the base
+# layer is correct and the compositor is behaving perfectly — there is simply
+# nothing yet to show. Verified against the switch bound, `show <id>` right after
+# `launch <id>` failed on every working launch, which trains a caller to ignore
+# `base layer did not take` — the one error that must never be ignored.
+#
+# So the two waits are distinguishable: a target with a mapped window that is
+# still not on screen fails as "base layer did not take" inside switch_timeout_ms
+# of the window appearing; a target that never maps fails as "app <id> never
+# mapped a window" after this. Both are errors; neither is ever `ok`.
+#
+# RANGE: 1..=300000, and never less than switch_timeout_ms.
+#map_timeout_ms = 30000
+
+# Bound on confirming that a launched process really reached its cgroup scope.
+#
+# A SPAWN IS NOT A LAUNCH. `systemd-run` being forked successfully says nothing
+# about whether the binary exists, whether the session bus was still there, or
+# whether the --unit= name collided. So after spawning, the core polls until the
+# launcher is confirmed alive AND /proc/<pid>/cgroup names the scope it asked for
+# — the exact string gamescope parses to resolve an app id. A launch that cannot
+# be confirmed in this window is an `error:`, never a success payload naming a
+# pid nothing verified.
+#
+# RANGE: 1..=60000. `systemd-run --scope` creates the unit before it execs, so
+# the scope is normally readable within a few milliseconds; the default is
+# headroom for a loaded box, not an expected time.
+#launch_confirm_ms = 2000
+
+# --- Supervision (§9) ---------------------------------------------------------
+# NOT YET READ BY THE CORE — every key in this table. The forced-paint heartbeat
+# is a later change; nothing reads these today. They are defined now so the file
+# the v2 units ship against is complete rather than growing a new required key at
+# deploy time.
+[supervisor]
+# Frames must advance at least this often or the shell counts as stalled.
+#
+# Measured by a FORCED-PAINT PROBE, not by tailing the stats FIFO alone:
+# gamescope emits one `fps=` line per 300 paints, so on a static base layer
+# under VRR the FIFO is legitimately silent for as long as nothing draws, and
+# silence there is not evidence of a stall.
+#stall_secs = 10
+
+# How many restarts inside restart_window_secs count as a crash-loop rather than
+# a bad day. Matches the short-session tracker shape SteamOS/ChimeraOS ship and
+# the v1 daemon unit's StartLimitBurst=3 / IntervalSec=60. Must be at least 1 —
+# 0 would treat the first start as a crash-loop.
+#
+# TO BE CLEAR ABOUT WHAT DOES NOT EXIST: §9's crash-loop response — a
+# short-session tracker that backs off and then selects the v1 session — is NOT
+# IMPLEMENTED. There is no ExecStartPre/ExecStopPost anywhere in core/units/ and
+# no counter. The gamescope unit briefly carried StartLimitIntervalSec/Burst with
+# a comment claiming it; that limiter was inert (Restart=no means there is never
+# a second attempt to count, and the session script's `reset-failed` clears the
+# counter on every relogin) and has been removed rather than left standing as a
+# protection that is not there. Rollback today is manual: select the v1 session
+# at the display manager.
+#restart_threshold = 3
+
+# The window the restart threshold is counted over, in seconds.
+#restart_window_secs = 60

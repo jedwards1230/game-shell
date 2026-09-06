@@ -5,6 +5,8 @@
 #   - host/      tv-shell-host     — cross-platform Steam-library sidecar (axum)
 #   - protocol/  tv-shell-protocol — shared /library wire types (serde only)
 #   - panel/     tv-shell-panel    — LAN web control panel (axum + askama)
+#   - core/      tv-shell-core     — v2 core: gamescope base-layer policy (BESIDE daemon/,
+#                                  never instead of it; see docs/V2_DESIGN.md §11)
 #
 # Why a workspace (not two independent crates, not one crate w/ two bins): one
 # lockfile + shared dep versions; the `protocol` crate is the single source of
@@ -14,7 +16,7 @@
 # `-p`-scoped so neither binary compiles the other.
 [workspace]
 resolver = "2"
-members = ["daemon", "host", "protocol", "panel"]
+members = ["daemon", "host", "protocol", "panel", "core"]
 
 [workspace.package]
 edition = "2021"

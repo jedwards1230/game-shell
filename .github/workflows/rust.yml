@@ -1,13 +1,16 @@
-# Rust CI for the tv-shell input daemon (daemon/).
+# Rust CI for the tv-shell Linux Rust crates: the input daemon (daemon/), the web
+# control panel (panel/), and the v2 core (core/).
 #
 # Builds, formats, lints, and tests the daemon crate on a Linux runner — the only
 # place the evdev/uinput code compiles (it is excluded on non-Linux dev hosts).
 # Runs inside a slim official `rust` container (toolchain preinstalled, ~1.5 GB
 # vs the ~30 GB ubuntu-latest image; no system libs needed — evdev is pure Rust).
 #
-# Since the repo is a Cargo workspace (daemon/ + host/ + protocol/), every cargo
-# command is `-p tv-shell-input`-scoped so the host crate (cross-platform, CI'd
-# separately in host.yml) is never dragged into the daemon's Linux/cec build. The
+# Since the repo is a Cargo workspace (daemon/ + host/ + protocol/ + panel/ +
+# core/), every cargo command is `-p`-scoped so no crate's graph leaks into
+# another's build — the host crate (cross-platform, CI'd separately in host.yml)
+# is never dragged into the daemon's Linux/cec build, and the daemon's
+# evdev/zbus/bluer/cec graph never reaches the pure-Rust panel and core legs. The
 # workspace shares one target dir at the repo ROOT, so the build output is at
 # `../target/release/...` from `working-directory: daemon`.
 #
@@ -144,6 +147,144 @@ jobs:
             echo "| Clippy | ${{ steps.clippy.outcome }} |"
             echo "| Build (release) | ${{ steps.build.outcome }} |"
             echo "| Test | ${{ steps.test.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The v2 core (core/, `tv-shell-core`). Pure Rust like the panel — x11rb needs
+  # no libxcb/libX11 — so the BUILD needs no system libraries. The apt step below
+  # is for the TESTS (an X server to round-trip atoms against) and for
+  # shellchecking the session scripts, not for linking.
+  # `-p`-scoped like every sibling, so the daemon's Linux-only graph
+  # (evdev/zbus/bluer/cec) never reaches this build.
+  core:
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Add rustfmt + clippy
+        run: rustup component add rustfmt clippy
+
+      # Xvfb is the ONLY system dependency this job has, and it exists so the
+      # nine integration tests in core/tests/atoms_xvfb.rs actually execute. They
+      # used to run nowhere: this job is deliberately hermetic and no developer
+      # box here has Xvfb either, so a test suite that gates on TV_SHELL_TEST_XVFB
+      # was compiled everywhere and run in neither place. A test that runs
+      # nowhere is not a test. shellcheck comes from the same apt call for the
+      # session scripts below.
+      # x11-utils is here for `xdpyinfo`, which the readiness check below uses to
+      # prove the server ACCEPTS CONNECTIONS rather than merely that its socket
+      # file exists.
+      - name: System dependencies (Xvfb for the atom round-trips, shellcheck)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends xvfb x11-utils shellcheck
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: .
+          key: core
+
+      - name: Format check
+        id: fmt
+        run: cargo fmt --check -p tv-shell-core
+
+      - name: Clippy
+        id: clippy
+        run: cargo clippy -p tv-shell-core --all-targets -- -D warnings
+
+      - name: Build
+        id: build
+        run: cargo build --release -p tv-shell-core
+
+      # The default run: pure unit tests, no X server touched.
+      - name: Test
+        id: test
+        run: cargo test -p tv-shell-core
+
+      # The `#[ignore]`d atom round-trips against a real X server. Xvfb is
+      # started here rather than via `xvfb-run` so the display number is explicit
+      # and matches what the tests' own doc comment tells a developer to run.
+      #
+      # These PANIC rather than skip when TV_SHELL_TEST_XVFB is unset (see the
+      # file header), so a broken server surfaces as a failure — the step cannot
+      # pass by quietly running nothing.
+      #
+      # `--test-threads=1` IS REQUIRED, NOT TUNING. All nine tests share ONE
+      # Xvfb and four of them write ROOT-window properties, while
+      # `screen_state_assembles_from_real_server_bytes` reads whole-root state —
+      # so in parallel it races every writer, and nine simultaneous connection
+      # handshakes against one server is where it actually broke (a
+      # `failed to read whole buffer` mid-handshake, i.e. a HARNESS failure
+      # wearing a test's name). DO NOT REMOVE IT: the flakiness comes back
+      # intermittently, which is worse than a red build because it trains people
+      # to hit re-run. The tests also take a process-wide lock of their own
+      # (`X_SERVER` in core/tests/atoms_xvfb.rs) so a developer running them by
+      # hand gets the same guarantee; this flag states the constraint here too.
+      #
+      # Readiness waits on an actual CONNECTION (`xdpyinfo`), not on
+      # /tmp/.X11-unix/X99 existing: the socket file appears before Xvfb accepts
+      # connections, so the old path check let cargo start against a server that
+      # was not listening yet. And if Xvfb never comes up — or dies — this fails
+      # naming XVFB, rather than letting the failure present as a confusing
+      # client-side error inside a test.
+      - name: Test (Xvfb atom round-trips)
+        id: test_xvfb
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for _ in $(seq 1 50); do
+            if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+              echo "::error::Xvfb exited during startup — the X server is not available, so the atom round-trips cannot run."
+              exit 1
+            fi
+            if xdpyinfo -display :99 >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::Xvfb did not accept a connection on :99 within 10s — failing here rather than letting cargo report it as a test error."
+            exit 1
+          fi
+          TV_SHELL_TEST_XVFB=:99 \
+            cargo test -p tv-shell-core --test atoms_xvfb -- --ignored --test-threads=1
+        env:
+          DISPLAY: ":99"
+
+      # C2: the v2 session scripts were shellchecked by nothing. `gamescope.yml`
+      # covers dev/gamescope/ only, and these ship as part of the core.
+      #
+      # scripts/install-v2.sh joins them: it is v2's installer, it is what the
+      # install tests above execute, and no other job lints it (v1's
+      # scripts/install.sh is still shellchecked by nothing — out of scope here).
+      - name: Shellcheck the session scripts and the v2 installer
+        id: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x core/units/*.sh scripts/install-v2.sh
+          for f in core/units/*.sh scripts/install-v2.sh; do bash -n "$f"; done
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Rust CI — \`core/\`"
+            echo ""
+            echo "| Step | Result |"
+            echo "|------|--------|"
+            echo "| Format | ${{ steps.fmt.outcome }} |"
+            echo "| Clippy | ${{ steps.clippy.outcome }} |"
+            echo "| Build (release) | ${{ steps.build.outcome }} |"
+            echo "| Test | ${{ steps.test.outcome }} |"
+            echo "| Test (Xvfb) | ${{ steps.test_xvfb.outcome }} |"
+            echo "| Shellcheck | ${{ steps.shellcheck.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Separate leg for the OPTIONAL `cec` and `mcp` features (#94). Together they
