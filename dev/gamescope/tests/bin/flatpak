@@ -1,0 +1,14 @@
+#!/bin/bash
+# Fake flatpak: Steam Link is "installed" only when $FAKE_STEAMLINK=1.
+case "${1:-}" in
+    info) [ "${FAKE_STEAMLINK:-}" = 1 ] && exit 0 || exit 1 ;;
+    run)
+        echo $$ >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"   # so the suite can end this by pid, not by name
+        printf '%s\n' "$@" > "${FAKE_X:?}/steamlink.argv"
+        env | grep -E '^(WAYLAND_DISPLAY|GAMESCOPE_DISPLAY_DISABLED|GAMESCOPE_ZENITY_DISABLE|ENABLE_GAMESCOPE_WSI|DISABLE_GAMESCOPE_WSI)=' | sort > "$FAKE_X/steamlink.env"
+
+        # `exec` on purpose: this stub registered ITS pid above, so the process that
+        # actually persists has to BE that pid. Forking a child here would leave an
+        # orphaned `sleep` behind that the suite has no pid for.
+        exec sleep 300 ;;
+esac

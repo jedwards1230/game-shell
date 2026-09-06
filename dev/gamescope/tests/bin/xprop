@@ -1,0 +1,121 @@
+#!/bin/bash
+# Fake xprop replaying a gamescope Xwayland display for the kit fixture.
+# State lives in $FAKE_X (a directory):
+#   poll                 integer, +1 on every root GAMESCOPE_FOCUSABLE_WINDOWS read
+#   win/<xid>            one window: KEY=VALUE lines
+#                          appear=<poll>  window exists from this poll on
+#                          wsi=1          log "Creating Gamescope surface" to $FAKE_WSI_LOG on appear
+#                          name=...  class=...  pid=...   (any may be absent)
+#   tags/<xid>           STEAM_GAME value once tagged
+#   root.log             every root -set/-remove
+#   calls.log            every invocation (for counting)
+set -u
+: "${FAKE_X:?FAKE_X}"
+printf '%s\n' "$*" >> "$FAKE_X/calls.log"
+mkdir -p "$FAKE_X/win" "$FAKE_X/tags"
+poll=$(cat "$FAKE_X/poll" 2>/dev/null || echo 0)
+
+winval() { # a value of the form @<file> is read from that file (pids known only at run time)
+    local v; v="$(sed -n "s/^$2=//p" "$FAKE_X/win/$1" 2>/dev/null | head -1)"
+    case "$v" in @*) v="$(cat "${v#@}" 2>/dev/null)" ;; esac
+    printf '%s\n' "$v"
+}
+visible() { # appear=<poll> .. vanish=<poll> (exclusive)
+    local a z; a="$(winval "$1" appear)"; z="$(winval "$1" vanish)"
+    [ -n "$a" ] && [ "$poll" -ge "$a" ] || return 1
+    [ -z "$z" ] || [ "$poll" -lt "$z" ]
+}
+
+# print_props <xid> <PROP>... (no props -> the usual four)
+print_props() {
+    local xid="$1"; shift
+    [ $# -gt 0 ] || set -- _NET_WM_PID WM_CLASS WM_NAME STEAM_GAME
+    local p v
+    for p in "$@"; do
+        case "$p" in
+            _NET_WM_PID) v="$(winval "$xid" pid)"; [ -n "$v" ] && echo "_NET_WM_PID(CARDINAL) = $v" || echo "_NET_WM_PID:  not found." ;;
+            WM_CLASS) v="$(winval "$xid" class)"; [ -n "$v" ] && echo "WM_CLASS(STRING) = \"$v\", \"com.example.$v\"" || echo "WM_CLASS:  not found." ;;
+            WM_NAME) v="$(winval "$xid" name)"; [ -n "$v" ] && echo "WM_NAME(UTF8_STRING) = \"$v\"" || echo "WM_NAME:  not found." ;;
+            STEAM_GAME) if [ -r "$FAKE_X/tags/$xid" ]; then echo "STEAM_GAME(CARDINAL) = $(cat "$FAKE_X/tags/$xid")"; else echo "STEAM_GAME:  not found."; fi ;;
+            *) echo "$p:  not found." ;;
+        esac
+    done
+}
+
+badwindow() {
+    echo "X Error of failed request:  BadWindow (invalid Window parameter)" >&2
+    exit 1
+}
+
+# resolve the target window, then act
+target=""
+mode="${1:-}"
+case "$mode" in
+    -root)
+        shift
+        if [ "${1:-}" = "-f" ]; then shift 3; fi
+        if [ "${1:-}" = "-set" ]; then
+            echo "set $2=$3" >> "$FAKE_X/root.log"
+            [ "$2" = GAMESCOPECTRL_BASELAYER_APPID ] && printf '%s\n' "$3" | sed 's/,/, /g' > "$FAKE_X/baselayer"
+            exit 0
+        fi
+        if [ "${1:-}" = "-remove" ]; then echo "remove $2" >> "$FAKE_X/root.log"; rm -f "$FAKE_X/baselayer"; exit 0; fi
+        for p in "$@"; do
+            case "$p" in
+                GAMESCOPECTRL_BASELAYER_APPID)
+                    if [ -r "$FAKE_X/baselayer" ]; then echo "GAMESCOPECTRL_BASELAYER_APPID(CARDINAL) = $(cat "$FAKE_X/baselayer")"; else echo "GAMESCOPECTRL_BASELAYER_APPID:  not found."; fi ;;
+                GAMESCOPE_FOCUSED_APP)
+                    if [ -r "$FAKE_X/focused" ]; then echo "GAMESCOPE_FOCUSED_APP(CARDINAL) = $(cat "$FAKE_X/focused")"; else echo "GAMESCOPE_FOCUSED_APP:  not found."; fi ;;
+                GAMESCOPE_FOCUSABLE_WINDOWS)
+                    poll=$((poll + 1)); echo "$poll" > "$FAKE_X/poll"
+                    # windows that appear now and log a WSI surface
+                    for w in "$FAKE_X"/win/*; do
+                        x="$(basename "$w")"
+                        if [ "$(winval "$x" appear)" = "$poll" ] && [ "$(winval "$x" wsi)" = 1 ] && [ -n "${FAKE_WSI_LOG:-}" ]; then
+                            echo "[Gamescope WSI] Creating Gamescope surface: xid: $x" >> "$FAKE_WSI_LOG"
+                        fi
+                    done
+                    # tagged windows, plus windows gamescope lists untagged
+                    # (focusable=1: a STEAM_STREAMING_CLIENT window under --steam)
+                    vals=""
+                    for w in "$FAKE_X"/win/*; do
+                        x="$(basename "$w")"
+                        visible "$x" || continue
+                        if [ -r "$FAKE_X/tags/$x" ]; then g="$(cat "$FAKE_X/tags/$x")"
+                        elif [ "$(winval "$x" focusable)" = 1 ]; then g=0
+                        else continue; fi
+                        vals="${vals:+$vals, }$((x)), $g, $(winval "$x" pid)"
+                    done
+                    [ -n "$vals" ] && echo "GAMESCOPE_FOCUSABLE_WINDOWS(CARDINAL) = $vals" || echo "GAMESCOPE_FOCUSABLE_WINDOWS:  not found."
+                    ;;
+                GAMESCOPE_FOCUSABLE_APPS)
+                    echo "GAMESCOPE_FOCUSABLE_APPS(CARDINAL) = 9001" ;;
+                *) echo "$p:  not found." ;;
+            esac
+        done
+        exit 0
+        ;;
+    -id)
+        target="$2"; shift 2
+        visible "$target" || badwindow
+        ;;
+    -name)
+        want="$2"; shift 2
+        for w in "$FAKE_X"/win/*; do
+            x="$(basename "$w")"
+            visible "$x" || continue
+            if [ "$(winval "$x" name)" = "$want" ]; then target="$x"; break; fi
+        done
+        [ -n "$target" ] || { echo "xprop: No such window with name $want" >&2; exit 1; }
+        ;;
+    *) echo "fake xprop: unsupported $*" >&2; exit 2 ;;
+esac
+
+if [ "${1:-}" = "-f" ]; then shift 3; fi
+if [ "${1:-}" = "-set" ]; then
+    [ "$2" = "STEAM_GAME" ] || { echo "fake xprop: only STEAM_GAME" >&2; exit 2; }
+    echo "$3" > "$FAKE_X/tags/$target"
+    echo "poll=$poll tag $target STEAM_GAME=$3" >> "$FAKE_X/tag.log"
+    exit 0
+fi
+print_props "$target" "$@"

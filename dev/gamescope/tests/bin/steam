@@ -1,0 +1,11 @@
+#!/bin/bash
+# Fake Steam: records argv and becomes a process FAMILY, like the real one:
+#   launcher ($$)  ->  client (bash)  ->  streaming_client (sleep)
+# Each pid is written to $FAKE_X so the fixture's windows can reference it.
+printf '%s\n' "$@" > "${FAKE_X:?}/steam.argv"
+env | grep -E '^(WAYLAND_DISPLAY|GAMESCOPE_DISPLAY_DISABLED|GAMESCOPE_ZENITY_DISABLE|ENABLE_GAMESCOPE_WSI|DISABLE_GAMESCOPE_WSI)=' | sort > "$FAKE_X/steam.env"
+echo $$ > "$FAKE_X/steam.launcher.pid"
+echo $$ >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"   # so the suite can end this by pid, not by name
+bash -c 'echo $$ > "$FAKE_X/steam.client.pid"; echo $$ >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"
+          sleep 300 & echo $! > "$FAKE_X/steam.stream.pid"; echo $! >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"; wait' &
+wait

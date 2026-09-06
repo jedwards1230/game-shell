@@ -1,0 +1,25 @@
+#!/bin/bash
+# Fake moonlight-qt: records its argv, `list` prints the fixture names, `quit`
+# flips the fake serverinfo to idle, `stream` runs until killed.
+set -u
+echo $$ >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"   # so the suite can end this by pid, not by name
+printf '%s\n' "$@" > "${FAKE_X:-/tmp}/moonlight.argv"
+case "${1:-}" in
+    list)
+        printf '%s\n' " Desktop" " Steam Big Picture" "Factorio" "Stardew Valley"
+        ;;
+    quit)
+        sed -i 's#<currentgame>[0-9]*</currentgame>#<currentgame>0</currentgame>#; s#SUNSHINE_SERVER_BUSY#SUNSHINE_SERVER_FREE#' "$FAKE_SERVERINFO"
+        echo "quit sent" >> "${FAKE_X:-/tmp}/moonlight.log"
+        ;;
+    stream)
+        echo "streaming $2 [$3]" >> "${FAKE_X:-/tmp}/moonlight.log"
+        # `exec` on purpose: this stub registered ITS pid above, so the process
+        # that persists has to BE that pid. Forking a child here would leave an
+        # orphaned `sleep` the suite has no pid for.
+        exec sleep 300
+        ;;
+    *)
+        exec sleep 300
+        ;;
+esac

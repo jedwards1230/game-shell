@@ -62,6 +62,19 @@ find . -name '*.qml' -not -path './worktrees/*' -not -path './.git/*' \
 ./tests/qml/run.sh
 ```
 
+### gamescope kit (`dev/gamescope/` — offline shell fixture)
+
+The kit's decision logic runs against a fake X display and fake clients — no
+gamescope, no Steam, no Moonlight, no network, no display server:
+
+```bash
+shellcheck -x dev/gamescope/*.sh dev/gamescope/tests/*.sh dev/gamescope/tests/bin/*
+./dev/gamescope/tests/run.sh         # Moonlight + focus/tagging  (57 assertions)
+./dev/gamescope/tests/run-steam.sh   # Steam / Steam Link / env    (69 assertions)
+```
+
+See [dev/gamescope/tests/README.md](dev/gamescope/tests/README.md).
+
 ## Documentation
 
 Keep documentation current as part of the change — update the README and any affected docs (`docs/`, `config/*.example`) in the same PR. A new IPC command belongs in `docs/IPC_PROTOCOL.md`; a new daemon config key belongs in `config/config.toml.example`.

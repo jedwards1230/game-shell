@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake gamescope for the session.sh fixture: records argv and exits.
+printf '%s\n' "$@" > "${FAKE_X:?}/gamescope.argv"
+exit 0

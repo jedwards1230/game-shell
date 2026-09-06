@@ -89,7 +89,10 @@ if [ "$DAEMON" = "1" ] && command -v systemctl >/dev/null 2>&1 \
     fi
 fi
 
-# shellcheck disable=SC2329 # invoked via the EXIT trap below
+# Invoked via the EXIT trap below, which shellcheck can't see. It reports that
+# as SC2317 up to 0.9.x (what the CI runner ships) and as SC2329 from 0.10 on,
+# so both codes have to be named or the gate depends on the runner's version.
+# shellcheck disable=SC2317,SC2329
 cleanup() {
     log "session ending"
     if [ "$STARTED_DAEMON" = "1" ]; then

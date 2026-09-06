@@ -1,0 +1,11 @@
+#!/bin/bash
+# Fake Qt 6 qml runtime for the client.sh fixture: reports 6.11.2, else idles.
+case "${1:-}" in
+    --version) echo "Qml Runtime 6.11.2"; exit 0 ;;
+esac
+echo $$ > "${FAKE_X:-/tmp}/shell.pid"
+echo $$ >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"   # so the suite can end this by pid, not by name
+# `exec` on purpose: this stub registered ITS pid above, so the process that
+# actually persists has to BE that pid. Forking a child here would leave an
+# orphaned `sleep` behind that the suite has no pid for.
+exec sleep 300

@@ -1,0 +1,48 @@
+# gamescope kit fixture tests.
+#
+# The kit under dev/gamescope/ drives a real gamescope session on a real box, but
+# its decision logic — pid->xid tagging, the Sunshine pre-flight, the Steam
+# class-family walk, and the env(1) argument ordering the Steam verbs depend on —
+# is exercised here against a FAKE X display and fake clients. No gamescope, no
+# Steam, no Moonlight, no network, no display server: it runs on a stock runner
+# in seconds. See dev/gamescope/tests/README.md.
+#
+# Invoked by the CI orchestrator (.github/workflows/ci.yml), which decides via
+# path-based change detection whether the kit or its fixture changed, so
+# unrelated PRs never reach this workflow. ci.yml is the single required-check
+# surface.
+
+name: Gamescope Kit
+
+run-name: "Gamescope Kit — ${{ github.event_name }} on ${{ github.ref_name }} by @${{ github.actor }}"
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint the kit and its fixture
+        # The runner's packaged shellcheck (0.9.0 on ubuntu-24.04) is older than
+        # what a dev box is likely to have, and the two disagree: "function only
+        # reached via a trap" is SC2317 up to 0.9.x and SC2329 from 0.10 on. Any
+        # disable directive for that has to name BOTH codes. `--version` is
+        # printed so the next disagreement is one line into the log, not a guess.
+        run: |
+          shellcheck --version
+          shellcheck -x dev/gamescope/*.sh dev/gamescope/tests/*.sh dev/gamescope/tests/bin/*
+          for f in dev/gamescope/*.sh dev/gamescope/tests/*.sh dev/gamescope/tests/bin/*; do
+            bash -n "$f"
+          done
+
+      - name: Moonlight / focus suite
+        run: ./dev/gamescope/tests/run.sh
+
+      - name: Steam / Steam Link / env suite
+        run: ./dev/gamescope/tests/run-steam.sh
