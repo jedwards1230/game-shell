@@ -29,7 +29,11 @@
 
 # --- Output mode and HDR ------------------------------------------------------
 [display]
-# The output mode gamescope is pinned to (-W / -H / -r).
+# NOT YET READ BY THE CORE — the mode lives on gamescope's command line, in
+# core/units/tv-shell-gamescope.service's ExecStart (-W / -H / -r). Set both and
+# keep them in step; the core parses these so the two can be checked against each
+# other and so a later PR can drive a mode change, but nothing in the core acts
+# on them today.
 #
 # PINNED, not negotiated: the EDID preferred mode on this chain is 60 Hz
 # (V2_DESIGN §6), so letting the display choose gives 4K60, not 4K120.
@@ -37,19 +41,29 @@
 #height = 2160
 #refresh = 120
 
-# Whether HDR should be on by default.
+# NOT YET READ BY THE CORE — and not by the unit either. The unit passes
+# --hdr-enabled unconditionally, and the core writes no HDR atom: the atom that
+# would carry this is not even in the core's interned name list yet. This key
+# records intent and changes nothing until the HDR/VRR control surface (§6)
+# lands.
 #
-# Applied as a ROOT-ATOM WRITE (GAMESCOPE_DISPLAY_HDR_ENABLED), read back via
-# GAMESCOPE_HDR_OUTPUT_FEEDBACK — and NEVER as a bare `gamescopectl <convar>`.
-# On 3.16.x and master a value-less convar call RESETS the convar to its default
-# and turns HDR off with no log line at all; that is how the phase-2
-# "feedback 0" was self-inflicted.
+# Whether HDR should be on by default. When it becomes live it will be applied
+# as a ROOT-ATOM WRITE, read back via GAMESCOPE_HDR_OUTPUT_FEEDBACK — and NEVER
+# as a bare `gamescopectl <convar>`. On 3.16.x and master a value-less convar
+# call RESETS the convar to its default and turns HDR off with no log line at
+# all; that is how the phase-2 "feedback 0" was self-inflicted.
 #hdr = true
 
+# NOT YET READ BY THE CORE — same PR as `hdr` above; the flag is not on the
+# unit's ExecStart either.
+#
 # --hdr-sdr-content-nits: the white point SDR content (the shell itself) is
 # mapped to inside an HDR output. The black floor is an eyes-only criterion.
 #sdr_nits = 400
 
+# NOT YET READ BY THE CORE — the launch path does not gate on display feedback
+# yet; the gate lands with the HDR-aware launch path (§6).
+#
 # How long GAMESCOPE_HDR_OUTPUT_FEEDBACK must read the configured value before
 # an HDR-capable launch is allowed through.
 #
@@ -73,6 +87,11 @@
 # moment Steam launches. 9001 is the id the measurement kit used.
 #shell_app_id = 9001
 
+# NOT YET READ BY THE CORE — read by the unit's ExecStart (-e). Per-app server
+# creation (GAMESCOPE_CREATE_XWAYLAND_SERVER) is a later PR; when it lands the
+# core reads this to size the pool. validate() checks it regardless, because a
+# nonsense value is worth refusing before it reaches the unit.
+#
 # How many Xwayland servers gamescope starts (-e / --xwayland-count): one for
 # the shell plus one per concurrently launched app (§4). Must be at least 1 —
 # the shell needs a server.
@@ -92,9 +111,10 @@
 #switch_timeout_ms = 250
 
 # --- Supervision (§9) ---------------------------------------------------------
-# The core does not act on these yet — the forced-paint heartbeat is a later
-# change. They are defined now so the file the v2 units ship against is complete
-# rather than growing a new required key at deploy time.
+# NOT YET READ BY THE CORE — every key in this table. The forced-paint heartbeat
+# is a later change; nothing reads these today. They are defined now so the file
+# the v2 units ship against is complete rather than growing a new required key at
+# deploy time.
 [supervisor]
 # Frames must advance at least this often or the shell counts as stalled.
 #

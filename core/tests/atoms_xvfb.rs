@@ -75,11 +75,19 @@ fn connect() -> AtomConn {
 #[ignore = "needs a live X server: set TV_SHELL_TEST_XVFB and run with --ignored"]
 fn interning_every_name_succeeds() {
     let conn = connect();
-    // A name that failed to intern would panic in `Atoms::get`, so touching all
-    // of them is the assertion.
+    // Iterating `names::ALL` and calling `get` proves nothing on its own — `ALL`
+    // is exactly what `intern` populated, so the lookup cannot miss. The real
+    // question is what the SERVER gave back, so assert on the ids: `None` (0) is
+    // X's "no such atom", and two distinct names must never share an id.
+    let mut seen = std::collections::HashMap::new();
     for name in names::ALL {
-        let _ = conn.atoms().get(name);
+        let id = conn.atoms().get(name);
+        assert_ne!(id, 0, "{name} interned to the None atom");
+        if let Some(other) = seen.insert(id, *name) {
+            panic!("{name} and {other} both interned to atom {id}");
+        }
     }
+    assert_eq!(seen.len(), names::ALL.len());
 }
 
 #[test]

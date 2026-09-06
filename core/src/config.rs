@@ -56,17 +56,34 @@ pub struct CoreConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct DisplayConfig {
     /// `-W`. Output width in pixels.
+    ///
+    /// **Read by the systemd unit's `ExecStart`, not by the core.** The mode
+    /// lives on gamescope's command line (`core/units/tv-shell-gamescope.service`);
+    /// the core parses the key so the two can be checked against each other and
+    /// so a later PR can drive a mode change, but nothing in this crate consumes
+    /// it today.
     pub width: u32,
-    /// `-H`. Output height in pixels.
+    /// `-H`. Output height in pixels. Read by the unit's `ExecStart`, not by the
+    /// core — see [`Self::width`].
     pub height: u32,
-    /// `-r`. Refresh rate in Hz.
+    /// `-r`. Refresh rate in Hz. Read by the unit's `ExecStart`, not by the core
+    /// — see [`Self::width`].
     pub refresh: u32,
     /// Whether HDR should be on by default. Applied as a root-atom write, never
     /// as a bare `gamescopectl <convar>` — §6: a value-less call RESETS the
     /// convar to its default and turns HDR off with no log line, which is how
     /// the phase-2 "feedback 0" was self-inflicted.
+    ///
+    /// **NOT YET READ BY ANYTHING.** The unit passes `--hdr-enabled`
+    /// unconditionally, and the core does not write an HDR atom — the atom that
+    /// would carry it is not even in [`crate::atoms::names::ALL`]. It becomes
+    /// live with the HDR/VRR control surface (§6); until then this key records
+    /// intent and changes nothing.
     pub hdr: bool,
     /// `--hdr-sdr-content-nits`: the shell's white point inside an HDR output.
+    ///
+    /// **NOT YET READ BY ANYTHING** — same PR as [`Self::hdr`]. The flag is not
+    /// on the unit's `ExecStart` either.
     pub sdr_nits: u32,
     /// How long `GAMESCOPE_HDR_OUTPUT_FEEDBACK` must read the configured value
     /// before an HDR-capable launch is allowed to proceed.
@@ -75,6 +92,9 @@ pub struct DisplayConfig {
     /// and then restores them, and a Vulkan surface created inside that window
     /// stays SDR for its life. This is the settle period that gates a launch
     /// past it.
+    ///
+    /// **NOT YET READ BY ANYTHING.** [`crate::launch`] does not gate on display
+    /// feedback yet; the gate lands with the HDR-aware launch path (§6).
     pub hotplug_settle_ms: u64,
 }
 
@@ -106,6 +126,11 @@ pub struct SessionConfig {
     pub shell_app_id: u32,
     /// How many Xwayland servers gamescope starts (`-e`/`--xwayland-count`).
     /// One for the shell plus one per concurrently launched app (§4).
+    ///
+    /// **Read by the systemd unit's `ExecStart` (`-e`), not by the core.** Per-app
+    /// server creation (`GAMESCOPE_CREATE_XWAYLAND_SERVER`) is a later PR; when
+    /// it lands the core reads this to size the pool. `validate()` still checks
+    /// it, because a nonsense value is worth refusing before it reaches the unit.
     pub xwayland_count: u32,
     /// Bound on the base-layer read-back after a switch.
     ///
@@ -120,7 +145,11 @@ impl Default for SessionConfig {
         Self {
             shell_app_id: 9001,
             xwayland_count: 2,
-            switch_timeout_ms: 250,
+            // DERIVED, not a second literal: the bound has exactly one source
+            // (see [`crate::baselayer::DEFAULT_SWITCH_TIMEOUT`], which carries
+            // the measurement it comes from), so it cannot be changed there and
+            // left stale here.
+            switch_timeout_ms: crate::baselayer::DEFAULT_SWITCH_TIMEOUT.as_millis() as u64,
         }
     }
 }
@@ -425,19 +454,167 @@ restart_window_secs = 120
         assert!(DEFAULT_SOCKET_NAME.ends_with(".sock"));
     }
 
+    /// Serializes the env mutation below. Same shape as
+    /// `daemon/src/daemon_config.rs`'s `ENV_GUARD`.
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `XDG_CONFIG_HOME` pointed at a scratch dir and
+    /// `TV_SHELL_CORE_CONFIG` unset, restoring both afterwards.
+    ///
+    /// Modelled on the daemon's `with_temp_config_dir`, including its `// SAFETY:`
+    /// discipline around `set_var`/`remove_var`: those are process-global and
+    /// unsound under concurrent readers, so every mutation is behind `ENV_GUARD`
+    /// and undone before returning.
+    fn with_scratch_config_home(f: impl FnOnce(&Path)) {
+        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let base = std::env::temp_dir().join(format!("tv-core-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("tv-shell")).unwrap();
+
+        let prev_home = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_override = std::env::var_os(CONFIG_PATH_ENV);
+        // SAFETY: serialized by ENV_GUARD; both vars restored before returning.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &base);
+            std::env::remove_var(CONFIG_PATH_ENV);
+        }
+
+        f(&base);
+
+        // SAFETY: serialized by ENV_GUARD; this is the restore half.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match prev_override {
+                Some(v) => std::env::set_var(CONFIG_PATH_ENV, v),
+                None => std::env::remove_var(CONFIG_PATH_ENV),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn the_config_file_name_cannot_collide_with_v1() {
         // v1's is config.toml, and its root is deny_unknown_fields, so sharing
-        // the file would abort v1 at startup.
-        assert!(config_path_for("/tmp/cfg").ends_with("core.toml"));
-        assert!(!config_path_for("/tmp/cfg").ends_with("/config.toml"));
+        // the file would abort v1 at startup. This exercises the REAL
+        // `config_path()`, not a re-implementation of it in the test.
+        with_scratch_config_home(|base| {
+            let resolved = config_path();
+            assert_eq!(resolved, base.join("tv-shell").join("core.toml"));
+            assert!(resolved.ends_with("tv-shell/core.toml"), "{resolved:?}");
+            assert!(!resolved.ends_with("config.toml"), "{resolved:?}");
+        });
     }
 
-    fn config_path_for(xdg: &str) -> String {
-        PathBuf::from(xdg)
-            .join("tv-shell")
-            .join("core.toml")
-            .to_string_lossy()
-            .into_owned()
+    #[test]
+    fn the_path_override_is_honoured() {
+        with_scratch_config_home(|_| {
+            let want = std::env::temp_dir().join("somewhere-else.toml");
+            // SAFETY: `with_scratch_config_home` holds ENV_GUARD for the whole
+            // closure (std's Mutex is not reentrant, so this must NOT re-lock),
+            // and it restores CONFIG_PATH_ENV on the way out.
+            unsafe { std::env::set_var(CONFIG_PATH_ENV, &want) };
+            assert_eq!(config_path(), want);
+        });
+    }
+
+    #[test]
+    fn the_switch_bound_default_has_exactly_one_source() {
+        assert_eq!(
+            SessionConfig::default().switch_timeout_ms,
+            crate::baselayer::DEFAULT_SWITCH_TIMEOUT.as_millis() as u64
+        );
+    }
+
+    /// The keys that are parsed, validated and documented but that **no code in
+    /// this crate reads yet**.
+    ///
+    /// This is the repo's #416 class — a setting with a rendered control and no
+    /// consumer is a control that reports an effect nothing applies. The v2 core
+    /// cannot have consumers for all of these yet (some are read by the systemd
+    /// unit's `ExecStart` instead, and the rest arrive with later PRs), so the
+    /// rule here is the honest one: every such key is LABELLED as not-yet-read,
+    /// in this list, in its doc comment on the struct field, and in
+    /// `config/core.toml.example`. Adding a consumer — or adding a new key with
+    /// none — must change this list deliberately, which is the whole point.
+    #[test]
+    fn every_key_is_either_consumed_or_declared_unconsumed() {
+        let unconsumed = [
+            // Read by core/units/tv-shell-gamescope.service's ExecStart.
+            "display.width",
+            "display.height",
+            "display.refresh",
+            "session.xwayland_count",
+            // Read by nothing yet; land with the HDR/VRR surface (§6).
+            "display.hdr",
+            "display.sdr_nits",
+            "display.hotplug_settle_ms",
+            // Read by nothing yet; land with the forced-paint heartbeat (§9).
+            "supervisor.stall_secs",
+            "supervisor.restart_threshold",
+            "supervisor.restart_window_secs",
+        ];
+        // The consumed ones, for contrast: these have a reader in this crate
+        // today (`CoreConfig::shell_app_id` / `switch_timeout`, both used by
+        // `crate::compositor`).
+        let consumed = ["session.shell_app_id", "session.switch_timeout_ms"];
+
+        // Exhaustive destructuring, so the lists above cannot drift from the
+        // schema silently: ADDING A FIELD TO ANY OF THESE STRUCTS STOPS THIS
+        // TEST COMPILING until the new key is classified. (A count alone would
+        // not — it would pass for a key nobody had thought about.)
+        let CoreConfig {
+            display,
+            session,
+            supervisor,
+        } = CoreConfig::default();
+        let DisplayConfig {
+            width,
+            height,
+            refresh,
+            hdr,
+            sdr_nits,
+            hotplug_settle_ms,
+        } = display;
+        let SessionConfig {
+            shell_app_id,
+            xwayland_count,
+            switch_timeout_ms,
+        } = session;
+        let SupervisorConfig {
+            stall_secs,
+            restart_threshold,
+            restart_window_secs,
+        } = supervisor;
+        let field_count = [
+            u64::from(width),
+            u64::from(height),
+            u64::from(refresh),
+            u64::from(hdr),
+            u64::from(sdr_nits),
+            hotplug_settle_ms,
+            u64::from(shell_app_id),
+            u64::from(xwayland_count),
+            switch_timeout_ms,
+            stall_secs,
+            u64::from(restart_threshold),
+            restart_window_secs,
+        ]
+        .len();
+
+        assert_eq!(
+            unconsumed.len() + consumed.len(),
+            field_count,
+            "every config key must be classified as consumed or not-yet-consumed"
+        );
+        // And each listed name must really parse, so a rename cannot leave a
+        // dead string in the list above.
+        for key in unconsumed.iter().chain(consumed.iter()) {
+            let (table, name) = key.split_once('.').expect("keys are `table.name`");
+            let value = if name == "hdr" { "true" } else { "1" };
+            CoreConfig::parse(&format!("[{table}]\n{name} = {value}\n"))
+                .unwrap_or_else(|e| panic!("{key} is not a real config key: {e}"));
+        }
     }
 }

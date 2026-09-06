@@ -19,6 +19,23 @@
 #     must NOT be able to fail the session, since it is what an operator reaches
 #     for when the session is already broken.
 #
+# WHY THE `v2-` INFIX ON THE SIDECARS AND THE SHELL:
+#
+#   §11 requires v1 and v2 to share no unit name, and v1 has already TAKEN the
+#   obvious ones. `tv-shell-panel.service` is v1's panel verbatim — the same
+#   file name in config/, installed into the same ~/.config/systemd/user/ by
+#   scripts/install.sh, with its unit name hardcoded in panel/src/config.rs. A
+#   v2 target pulling `tv-shell-panel.service` would start the V1 panel, reading
+#   v1's config and dialling v1's socket, and it would look like the v2 panel
+#   simply misbehaving. So every v2 sidecar carries the infix.
+#
+#   NONE OF THESE FOUR UNITS EXIST YET (`tv-shell-v2-shell`, `-stats`, `-panel`,
+#   `-cec`). That is why they are all `Wants=` for now: a `Wants=` on a missing
+#   unit is a soft skip at load, while an `Upholds=` on a missing unit is a LOAD
+#   ERROR that fails the whole target. `tv-shell-v2-shell.service` becomes
+#   `Upholds=` — its §9 "shell dies → restart under the live compositor" role —
+#   the moment that unit lands.
+#
 # None of Binds/Upholds/Wants carries ordering. Ordering is `graphical-session.target`,
 # which becomes active only after gamescope has sent READY=1 — and gamescope
 # sends that only once its environment file exists, so every unit ordered after
@@ -29,11 +46,14 @@ Description=tv-shell v2 session (gamescope)
 BindsTo=tv-shell-gamescope.service
 After=tv-shell-gamescope.service
 
-# Restart-forever children.
-Upholds=tv-shell-core.service tv-shell-shell.service
+# Restart-forever children. Only the core exists today; the shell unit joins it
+# here (as `Upholds=`) when it lands — see the [Unit] comment above.
+Upholds=tv-shell-core.service
 
-# Best-effort sidecars. A failure here must never take the session down.
-Wants=tv-shell-stats.service tv-shell-panel.service tv-shell-cec.service
+# Best-effort sidecars, plus the not-yet-written shell. A failure here must
+# never take the session down, and a unit that does not exist yet is a soft skip
+# rather than a load error.
+Wants=tv-shell-v2-shell.service tv-shell-v2-stats.service tv-shell-v2-panel.service tv-shell-v2-cec.service
 
 # Never co-exist with the v1 session: they contend for the seat, the pads and
 # the CEC adapter. v1 remains selectable at the display manager (§11 rollback);

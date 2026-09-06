@@ -7,6 +7,12 @@
 //! (measured 14–19 ms, 20 of 20). **A mismatch is a typed error, a metric and a
 //! log line, never `ok`.**
 //!
+//! Of those three, this PR ships **the typed error** ([`SwitchError`]) and **the
+//! log line** (the `tracing::error!` in [`crate::compositor`]). The metric
+//! arrives with the observability surface — `/metrics`, MQTT and the rest of §4's
+//! carried-over transports — in a later PR; there is no metrics registry in this
+//! crate to emit into yet.
+//!
 //! That last clause is the whole point of this module. v1 returned `ok` for a
 //! dropped launch (#376), an escape that could not leave fullscreen (#436), an
 //! unparked window (#448), a stopped heartbeat (#402) and a compositor wedged
@@ -74,6 +80,10 @@ pub struct Switched {
 /// inside one user interaction rather than looking like a hang. Configurable via
 /// `[session].switch_timeout_ms` because the margin is a guess about hardware we
 /// have measured exactly one of.
+///
+/// This is the SINGLE source of that number: [`crate::config::SessionConfig`]'s
+/// default derives `switch_timeout_ms` from it rather than repeating the
+/// literal, so the bound cannot be changed here and left stale there.
 pub const DEFAULT_SWITCH_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How often the verify loop re-reads while waiting.
@@ -112,6 +122,12 @@ pub fn home(
 }
 
 /// The single write, then the bounded read-back.
+///
+/// **Callers must serialize this against other intents.** The write and the
+/// verify are one indivisible operation: run two concurrently and one can verify
+/// a transient frame the other has already replaced, and report `ok` for a state
+/// that no longer holds. `GamescopeCompositor` holds its `intent_lock` across
+/// the whole call for that reason.
 fn write_and_verify(
     conn: &AtomConn,
     list: &[AppId],
@@ -209,7 +225,7 @@ pub fn list_for(app_id: AppId, shell_app_id: AppId) -> Vec<AppId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::{AppIdSource, DisplayFeedback};
+    use crate::screen::{AppIdSource, ScreenParts};
 
     const SHELL: AppId = AppId(9001);
     const GAME: AppId = AppId(9003);
@@ -268,17 +284,11 @@ mod tests {
                 }]
             })
             .unwrap_or_default();
-        ScreenState::assemble(
-            focused.or(on.map(|(w, _)| w)),
-            None,
-            vec![],
-            vec![],
-            focusable,
-            vec![],
-            DisplayFeedback::default(),
-            None,
-            None,
-        )
+        ScreenState::assemble(ScreenParts {
+            focused_window: focused.or(on.map(|(w, _)| w)),
+            focusable_windows: focusable,
+            ..Default::default()
+        })
     }
 
     #[test]

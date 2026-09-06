@@ -11,8 +11,8 @@
 #   1. Stop any stale copy of the session target and clear failed state, so a
 #      previous session that ended badly cannot leave units in a state that
 #      makes this one fail for reasons that have nothing to do with this boot.
-#   2. Create the ready and stats FIFOs BEFORE the target starts, so gamescope's
-#      `-R`/`-T` find them already present rather than racing their creation.
+#   2. Create the stats FIFO BEFORE the target starts, so gamescope's `-T` finds
+#      it already present rather than racing its creation.
 #   3. `systemctl --user start --wait tv-shell-session.target`. The `--wait` is
 #      what makes "gamescope dies → the session exits" true: the target is
 #      BindsTo= the compositor, so the compositor's death stops the target,
@@ -27,7 +27,6 @@ set -euo pipefail
 
 TARGET=tv-shell-session.target
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-READY_FIFO="$RUNTIME_DIR/tv-shell-gamescope-ready"
 STATS_FIFO="$RUNTIME_DIR/tv-shell-gamescope-stats"
 ENV_FILE="$RUNTIME_DIR/tv-shell-gamescope-environment"
 
@@ -39,7 +38,7 @@ log() { printf 'tv-shell-session: %s\n' "$*" >&2; }
 cleanup() {
     log "session target returned; stopping and cleaning up"
     systemctl --user stop "$TARGET" >/dev/null 2>&1 || true
-    rm -f "$READY_FIFO" "$STATS_FIFO" "$ENV_FILE"
+    rm -f "$STATS_FIFO" "$ENV_FILE"
 }
 trap cleanup EXIT
 
@@ -53,17 +52,20 @@ log "clearing any stale session state"
 systemctl --user stop "$TARGET" >/dev/null 2>&1 || true
 systemctl --user reset-failed >/dev/null 2>&1 || true
 
-# 2. The FIFOs, created before anything can open them.
+# 2. The stats FIFO, created before anything can open it.
 #
-# gamescope opens `-R` for writing and `-T` for writing; a FIFO that does not
-# exist yet would make it fail at startup, and a leftover regular file (from a
-# crashed session that wrote where a FIFO should be) would silently swallow the
-# handshake instead of blocking on it. So remove and recreate unconditionally.
-rm -f "$READY_FIFO" "$STATS_FIFO"
-mkfifo -m 0600 "$READY_FIFO"
+# gamescope opens `-T` for writing; a FIFO that does not exist yet would make it
+# fail at startup, and a leftover regular file (from a crashed session that
+# wrote where a FIFO should be) would silently swallow the stats stream instead
+# of blocking on it. So remove and recreate unconditionally.
+#
+# There is no ready FIFO: the READY=1 handshake is the child script's job, since
+# it has to happen AFTER the environment is published. See the comment on
+# tv-shell-gamescope.service's ExecStart.
+rm -f "$STATS_FIFO"
 mkfifo -m 0600 "$STATS_FIFO"
 
-# The environment file is written by gamescope's ExecStartPost. Remove any
+# The environment file is written by gamescope's child script. Remove any
 # stale copy so a unit reading it can never pick up a previous session's
 # DISPLAY — which would connect it to an X server that no longer exists.
 rm -f "$ENV_FILE"

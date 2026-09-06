@@ -27,8 +27,10 @@
 //!   is the broken case above: it would appear to succeed and fail silently at
 //!   the far end, with the app unreachable. [`ScopeEnv::detect`] refuses instead.
 //! * **`DBUS_SESSION_BUS_ADDRESS` is derived from `XDG_RUNTIME_DIR` only when
-//!   that socket actually exists.** Exporting a bus address that points at
-//!   nothing turns a clear "no session bus" error into a confusing D-Bus timeout.
+//!   `<runtime_dir>/bus` is really a SOCKET** (`[ -S ... ]` in the shell
+//!   version, a file-type check here). Exporting a bus address that points at
+//!   nothing — or at a leftover regular file — turns a clear "no session bus"
+//!   error into a confusing D-Bus timeout.
 //! * **The unit is named after the pid that becomes the app.** The shell version
 //!   uses `$BASHPID`, not `$$`, because `$(...)` forks a subshell whose `$$` is
 //!   the parent's pid; naming the scope after the wrong pid would make two
@@ -45,6 +47,7 @@
 //!   it would suppress is useful anyway — it records the scope name in the
 //!   client's own log, independently of us.
 
+use std::os::unix::fs::FileTypeExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -88,14 +91,18 @@ pub enum LaunchError {
 
 /// A verified session environment for `systemd-run --user`.
 ///
-/// Constructed only by [`ScopeEnv::detect`], so holding one is proof the
-/// preflight passed — a launch cannot skip it by construction.
+/// Constructed only by [`ScopeEnv::detect`] / [`ScopeEnv::resolve`], so holding
+/// one is proof the preflight passed — a launch cannot skip it by construction.
+/// The fields are **private for exactly that reason**: a `pub` field would let a
+/// caller assemble one by literal and bypass the preflight, which is the
+/// unscoped launch this module exists to make unreachable. Read them through
+/// [`Self::runtime_dir`] / [`Self::dbus_address`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeEnv {
     /// `XDG_RUNTIME_DIR`.
-    pub runtime_dir: String,
+    runtime_dir: String,
     /// The session bus address to hand the child, whether inherited or derived.
-    pub dbus_address: String,
+    dbus_address: String,
 }
 
 impl ScopeEnv {
@@ -105,20 +112,41 @@ impl ScopeEnv {
             which(SYSTEMD_RUN),
             std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
             std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().as_deref(),
-            |p| Path::new(p).exists(),
+            // The shell version tests `[ -S ... ]`, and so does this. A plain
+            // existence check would accept a leftover regular file or a
+            // directory at `<runtime_dir>/bus` and then hand the child a bus
+            // address pointing at something that cannot be dialled — a confusing
+            // D-Bus timeout in place of the clear "no session bus" the error
+            // text promises.
+            |p| {
+                std::fs::metadata(Path::new(p))
+                    .map(|m| m.file_type().is_socket())
+                    .unwrap_or(false)
+            },
         )
+    }
+
+    /// `XDG_RUNTIME_DIR`, as verified by the preflight.
+    pub fn runtime_dir(&self) -> &str {
+        &self.runtime_dir
+    }
+
+    /// The session bus address handed to launched children.
+    pub fn dbus_address(&self) -> &str {
+        &self.dbus_address
     }
 
     /// The pure half of the preflight — no environment, no filesystem.
     ///
-    /// `bus_socket_exists` answers "is `<runtime_dir>/bus` there?"; in production
-    /// that is a stat, in tests it is a closure, which is what makes every branch
-    /// of the fail-closed policy testable without a session bus.
+    /// `bus_is_socket` answers "is `<runtime_dir>/bus` a SOCKET?"; in production
+    /// that is a stat plus a file-type check, in tests it is a closure, which is
+    /// what makes every branch of the fail-closed policy testable without a
+    /// session bus.
     pub fn resolve(
         has_systemd_run: bool,
         runtime_dir: Option<&str>,
         dbus_address: Option<&str>,
-        bus_socket_exists: impl Fn(&str) -> bool,
+        bus_is_socket: impl Fn(&str) -> bool,
     ) -> Result<Self, LaunchError> {
         if !has_systemd_run {
             return Err(LaunchError::NoSystemdRun);
@@ -133,7 +161,7 @@ impl ScopeEnv {
             Some(a) if !a.is_empty() => a.to_string(),
             _ => {
                 let candidate = format!("{runtime_dir}/bus");
-                if bus_socket_exists(&candidate) {
+                if bus_is_socket(&candidate) {
                     format!("unix:path={candidate}")
                 } else {
                     return Err(LaunchError::NoSessionBus(runtime_dir));
@@ -185,10 +213,19 @@ pub struct Launched {
 
 /// Launch `command` inside a transient `app-steam-app<appid>-<pid>.scope`.
 ///
-/// The child is spawned and NOT waited on: the core supervises it by unit, and
+/// The CALLER does not wait on the child: the core supervises it by unit, and
 /// blocking here would stall the IPC reactor. stdin is `/dev/null`; stdout and
 /// stderr are inherited so the child's output lands in the core's journal
 /// alongside `systemd-run`'s `Running as unit:` line.
+///
+/// **Something must still reap it, though.** Supervision is by unit, but std
+/// does not reap a `Child` on drop and the core installs no `SIGCHLD` handler,
+/// so a spawned-and-forgotten launch stays a zombie for the core's whole
+/// lifetime — holding a pid the kernel cannot reuse and, worse for this crate,
+/// keeping [`scope_of`] answering confidently about a process that is dead. So
+/// the `Child` is moved into a detached thread whose only job is to `wait()` it
+/// and log the exit status. One short-lived thread per launch, and launches are
+/// user-paced.
 ///
 /// Note the pid recorded is `systemd-run`'s own. That is correct and load-
 /// bearing: `systemd-run --scope` **execs** the target command, so the pid the
@@ -210,7 +247,7 @@ pub fn launch(env: &ScopeEnv, app_id: AppId, command: &[String]) -> Result<Launc
     let unit = scope_unit(app_id, launcher_pid);
     let argv = scope_argv(&unit, command);
 
-    let child = Command::new(&argv[0])
+    let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .env("XDG_RUNTIME_DIR", &env.runtime_dir)
         .env("DBUS_SESSION_BUS_ADDRESS", &env.dbus_address)
@@ -221,19 +258,36 @@ pub fn launch(env: &ScopeEnv, app_id: AppId, command: &[String]) -> Result<Launc
             source,
         })?;
 
-    Ok(Launched {
-        app_id,
-        pid: child.id(),
-        scope: format!("{unit}.scope"),
-    })
+    // The real pid, read BEFORE the child moves into the reaper.
+    let pid = child.id();
+    let scope = format!("{unit}.scope");
+    let reaped = scope.clone();
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) => {
+            tracing::debug!(pid, scope = %reaped, %status, "launched process reaped")
+        }
+        Err(e) => {
+            tracing::debug!(pid, scope = %reaped, error = %e, "waiting on launched process failed")
+        }
+    });
+
+    Ok(Launched { app_id, pid, scope })
 }
 
 /// A per-process monotonic tag for the scope name's second field.
 ///
 /// gamescope reads it as an opaque `%d` and never resolves it to a process, so
 /// its only job is to make the unit name unique per launch — the property the
-/// shell version got from `$BASHPID`. Seeding from our own pid keeps two cores
-/// (a restart mid-flight, a dev copy) from minting the same name.
+/// shell version got from `$BASHPID`.
+///
+/// **The guarantee is exactly "unique within this process".** Seeding from our
+/// own pid makes a collision between two cores (a restart mid-flight, a dev
+/// copy) unlikely, not impossible: `pid * 1000 + seq` collides for pids exactly
+/// 1,000,000 apart, which is inside Linux's default `pid_max`. Widening the tag
+/// would buy fake precision, because the property that actually matters is
+/// already enforced downstream — systemd refuses a `--unit=` name that is
+/// already live, so a cross-process collision fails LOUDLY at `systemd-run`
+/// rather than quietly sharing a scope with someone else's app.
 fn next_launch_tag() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -453,7 +507,7 @@ mod tests {
             true
         })
         .unwrap();
-        assert_eq!(env.dbus_address, "unix:path=/run/user/1000/bus");
+        assert_eq!(env.dbus_address(), "unix:path=/run/user/1000/bus");
     }
 
     #[test]
@@ -474,13 +528,13 @@ mod tests {
             |_| panic!("must not probe the filesystem when the address is inherited"),
         )
         .unwrap();
-        assert_eq!(env.dbus_address, "unix:path=/elsewhere/bus");
+        assert_eq!(env.dbus_address(), "unix:path=/elsewhere/bus");
     }
 
     #[test]
     fn preflight_ignores_an_empty_bus_address() {
         let env = ScopeEnv::resolve(true, Some("/run/user/1000"), Some(""), |_| true).unwrap();
-        assert_eq!(env.dbus_address, "unix:path=/run/user/1000/bus");
+        assert_eq!(env.dbus_address(), "unix:path=/run/user/1000/bus");
     }
 
     #[test]
@@ -495,10 +549,12 @@ mod tests {
 
     #[test]
     fn empty_command_is_refused() {
-        let env = ScopeEnv {
-            runtime_dir: "/run/user/1000".into(),
-            dbus_address: "unix:path=/x".into(),
-        };
+        // Built through the preflight, because there is no other way to build
+        // one: the fields are private so a launch cannot skip it.
+        let env = ScopeEnv::resolve(true, Some("/run/user/1000"), Some("unix:path=/x"), |_| {
+            false
+        })
+        .unwrap();
         assert!(matches!(
             launch(&env, AppId(1), &[]).unwrap_err(),
             LaunchError::EmptyCommand

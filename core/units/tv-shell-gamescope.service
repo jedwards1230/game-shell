@@ -7,19 +7,37 @@
 #
 # THE HANDSHAKE, and why it is shaped this way:
 #
-#   gamescope's `-R <fd-or-fifo>` writes one line to that path once the
-#   compositor is up. `ExecStartPost` blocks reading it, then dumps the
-#   compositor's environment (WAYLAND_DISPLAY, DISPLAY, GAMESCOPE_WAYLAND_DISPLAY,
-#   XAUTHORITY) to %t/tv-shell-gamescope-environment and only THEN sends
-#   `--ready`. So `READY=1` means "the environment file exists and is complete",
-#   which is exactly the precondition every unit ordered after
-#   graphical-session.target needs. A plain Type=simple would let the core start
-#   against a compositor that has no X server yet and no environment file to
-#   read, and the failure would present as "the core cannot connect to X" rather
-#   than as a startup ordering bug.
+#   The READY=1 that systemd waits for is sent by gamescope's own CHILD,
+#   tv-shell-gamescope-child.sh, after it has published the compositor
+#   environment (WAYLAND_DISPLAY, DISPLAY, GAMESCOPE_WAYLAND_DISPLAY,
+#   XAUTHORITY) to %t/tv-shell-gamescope-environment. So `READY=1` means "the
+#   environment file exists and is complete", which is exactly the precondition
+#   every unit ordered after graphical-session.target needs. A plain Type=simple
+#   would let the core start against a compositor that has no X server yet and no
+#   environment file to read, and the failure would present as "the core cannot
+#   connect to X" rather than as a startup ordering bug.
 #
-# NotifyAccess=all because the notification comes from ExecStartPost, not from
-# the main process.
+#   THERE IS DELIBERATELY NO `-R <fifo>`. gamescope's ready-fd is the mechanism
+#   the ChimeraOS units use, but here the child already provides the same
+#   guarantee and provides it LATER — after the environment is published, which
+#   is the part the core actually depends on. Passing `-R` as well would leave a
+#   FIFO with a writer and no reader, and opening one blocks, so an unused ready
+#   FIFO is not free: it is a startup hang waiting for a reader that this design
+#   never creates.
+#
+#   THE DUMP CANNOT BE AN `ExecStartPost=`, TWICE OVER. First, systemd runs
+#   ExecStartPost only AFTER the service counts as started, and under Type=notify
+#   "started" means READY=1 has arrived — so an ExecStartPost that sends the
+#   notification deadlocks against itself until TimeoutStartSec fires, and with
+#   BindsTo= on the session target that kills the session on every boot. Second,
+#   an ExecStartPost shell has the UNIT's environment, not gamescope's: it would
+#   dump an empty file, `EnvironmentFile=-` would accept it silently, and the
+#   core would connect to whatever ambient $DISPLAY exists. Both failures go away
+#   when the dump runs inside gamescope's process tree, which is what the child
+#   script is.
+#
+# NotifyAccess=all because the notification comes from that child, not from the
+# main process.
 Description=gamescope compositor for the tv-shell v2 session
 Before=graphical-session.target
 Wants=graphical-session.target
@@ -37,9 +55,16 @@ NotifyAccess=all
 # seconds is wedged, not slow.
 TimeoutStartSec=5
 
-# The FIFOs are created by the session script before the target is started, so
-# they exist by the time gamescope opens them. %t is $XDG_RUNTIME_DIR.
-Environment=TV_SHELL_READY_FIFO=%t/tv-shell-gamescope-ready
+# The stats FIFO is created by the session script before the target is started,
+# so it exists by the time gamescope opens it. %t is $XDG_RUNTIME_DIR.
+#
+# ⚠ UNSETTLED, and the first thing to check on a real boot: §9's stats relay
+# (tv-shell-v2-stats.service) is the intended sole reader of this FIFO and DOES
+# NOT EXIST YET. If gamescope opens `-T` for writing and blocks for a reader,
+# this unit hangs at startup exactly as an unused `-R` would. §9 says lines
+# written with no reader are dropped, which implies it does not block — but that
+# is inferred from the design doc, not measured. Drop `-T` until the relay lands
+# if a first boot hangs here.
 Environment=TV_SHELL_STATS_FIFO=%t/tv-shell-gamescope-stats
 Environment=TV_SHELL_ENV_FILE=%t/tv-shell-gamescope-environment
 
@@ -56,6 +81,15 @@ Environment=GAMESCOPE_ZENITY_DISABLE=1
 # on. `--expose-wayland` stays ON: §11's per-app fix (unset WAYLAND_DISPLAY for
 # Steam-runtime apps) is proven, and chasing the problem via gamescope master
 # instead recreates it.
+#
+# gamescope's PRIMARY CHILD, and the whole ready handshake. gamescope exits
+# when this command exits, so `-- /bin/true` would end the compositor
+# immediately. The script dumps the environment from inside gamescope's process
+# tree, then sends READY=1, then holds the slot open (see its header — the hold
+# is an honest placeholder for §4's real session child, not finished work).
+#
+# Rewrite this path to the resolved install prefix, as scripts/install.sh does
+# for the v1 units.
 ExecStart=/usr/bin/gamescope \
     --steam \
     --expose-wayland \
@@ -63,21 +97,8 @@ ExecStart=/usr/bin/gamescope \
     --adaptive-sync \
     -W 3840 -H 2160 -r 120 \
     -e \
-    -R ${TV_SHELL_READY_FIFO} \
     -T ${TV_SHELL_STATS_FIFO} \
-    -- /bin/true
-
-# Block on the ready FIFO, publish the environment, then notify. Written as a
-# single `/bin/sh -c` because the read and the dump have to happen in that order
-# in one shell; `-` prefixes so a partial dump cannot wedge the whole start.
-ExecStartPost=/bin/sh -c '\
-    read -r _line < "${TV_SHELL_READY_FIFO}"; \
-    : > "${TV_SHELL_ENV_FILE}"; \
-    for v in WAYLAND_DISPLAY DISPLAY GAMESCOPE_WAYLAND_DISPLAY XAUTHORITY; do \
-        eval "val=\\$$v"; \
-        [ -n "$val" ] && printf "%s=%s\\n" "$v" "$val" >> "${TV_SHELL_ENV_FILE}"; \
-    done; \
-    systemd-notify --ready'
+    -- /opt/tv-shell/bin/tv-shell-gamescope-child.sh
 
 # No Restart=: the compositor is BindsTo'd by the session target, so its death
 # is meant to end the session and hand control back to the display manager,

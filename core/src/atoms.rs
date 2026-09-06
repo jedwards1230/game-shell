@@ -15,12 +15,15 @@
 //!    connection or protocol failure. This is the direct lesson of v1's
 //!    "silent success" class inverted: absence must be *representable*, so it is
 //!    never confused with failure and never papered over.
-//! 2. **Every property is `CARDINAL`/32-bit.** gamescope writes all of these as
-//!    `XA_CARDINAL` arrays of 32-bit values (`steamcompmgr.cpp`), including the
-//!    booleans, which are `0`/`1`. A read that finds a different format or
-//!    width is a typed error, not a coerced value — a shape we did not expect is
-//!    exactly the #448 failure (unit fixtures asserting the shape the code
-//!    wanted rather than the bytes the compositor sends).
+//! 2. **Every property is a 32-bit id array.** gamescope writes these as 32-bit
+//!    arrays (`steamcompmgr.cpp`), including the booleans, which are `0`/`1`.
+//!    The **width is the invariant**; the accepted types are `CARDINAL` and
+//!    `WINDOW` (see [`decode_cardinals`] for why both). A read that finds any
+//!    other width or type is a typed error, not a coerced value — a shape we did
+//!    not expect is exactly the #448 failure (unit fixtures asserting the shape
+//!    the code wanted rather than the bytes the compositor sends). A reply that
+//!    is only *part* of the property is the same class of failure and is
+//!    likewise an error ([`AtomError::Truncated`]).
 //! 3. **Atoms are interned once**, at connect, so a read is one round trip and
 //!    a name typo fails at startup rather than at the first switch.
 
@@ -73,14 +76,29 @@ pub enum AtomError {
         #[source]
         source: x11rb::errors::ConnectionError,
     },
-    /// The property exists but is not the 32-bit CARDINAL array every one of
-    /// these atoms is documented (and measured) to be. Never coerced — see rule
-    /// 2 in the module docs.
-    #[error("{atom} has unexpected format: {width}-bit, type atom {type_atom} (expected 32-bit CARDINAL)")]
+    /// The property exists but is not the 32-bit id array every one of these
+    /// atoms is documented (and measured) to be. Never coerced — see rule 2 in
+    /// the module docs.
+    #[error(
+        "{atom} has unexpected format: {width}-bit, type atom {type_atom} \
+         (expected a 32-bit CARDINAL or WINDOW array)"
+    )]
     BadFormat {
         atom: &'static str,
         width: u8,
         type_atom: Atom,
+    },
+    /// The server had more of this property than the reply carried.
+    ///
+    /// Every read here asks for `long_length = u32::MAX`, so this is practically
+    /// unreachable — but "practically unreachable" is how silent truncation gets
+    /// shipped, and this is the one module whose whole thesis is that a
+    /// truncated read must be an error rather than a shorter-but-plausible
+    /// answer. Named explicitly so a future partial read fails loudly.
+    #[error("{atom} was truncated: {bytes_after} bytes remained unread after the reply")]
+    Truncated {
+        atom: &'static str,
+        bytes_after: u32,
     },
     /// A `(xid, appid, pid)` triplet array whose length is not a multiple of 3.
     #[error(
@@ -208,7 +226,9 @@ impl Atoms {
     /// The interned id for a name from [`names`].
     ///
     /// Panics only on a name that is not in [`names::ALL`], which is a
-    /// programming error this crate's `all_names_are_interned` test rules out.
+    /// programming error this crate's `every_name_is_in_all_so_get_can_never_panic`
+    /// test rules out (it fails if a `pub const` in [`names`] is missing from
+    /// `ALL`, which is the only way that panic becomes reachable).
     pub fn get(&self, name: &'static str) -> Atom {
         *self
             .0
@@ -251,7 +271,11 @@ impl AtomConn {
 
     // -- reads ---------------------------------------------------------------
 
-    /// Read a 32-bit CARDINAL array. Absent property ⇒ `Ok(vec![])`.
+    /// Read a 32-bit id array (`CARDINAL` or `WINDOW`). Absent ⇒ `Ok(vec![])`.
+    ///
+    /// `long_length = u32::MAX` asks for the whole property in one reply, which
+    /// is what makes [`AtomError::Truncated`] unreachable in practice rather
+    /// than merely unlikely.
     pub fn read_cardinals(&self, window: Window, name: &'static str) -> Result<Vec<u32>> {
         let cookie = self
             .conn
@@ -267,7 +291,13 @@ impl AtomConn {
         let reply = cookie
             .reply()
             .map_err(|source| AtomError::Protocol { atom: name, source })?;
-        decode_cardinals(name, reply.format, reply.type_, &reply.value)
+        decode_cardinals(
+            name,
+            reply.format,
+            reply.type_,
+            reply.bytes_after,
+            &reply.value,
+        )
     }
 
     /// Read a single 32-bit CARDINAL. Absent ⇒ `Ok(None)`.
@@ -423,27 +453,52 @@ impl AtomConn {
     }
 }
 
-/// Decode a `get_property` reply body into 32-bit CARDINALs.
+/// Decode a `get_property` reply body into 32-bit values.
 ///
 /// Split out from the connection so it is unit-testable against real reply
 /// bytes with no X server. Absent is `format == 0` (X's own encoding for "no
-/// such property"), which maps to an empty vector, never an error.
+/// such property"), which maps to an empty vector, never an error. A non-zero
+/// `bytes_after` — the server holding more of the property than the reply
+/// carried — is [`AtomError::Truncated`], never a short answer.
+///
+/// # Why `WINDOW` is accepted alongside `CARDINAL`
+///
+/// The **width is the invariant here; the type is not measured per-atom yet.**
+/// Everything this crate has actually observed is 32-bit, and every value in
+/// these properties is a 32-bit id either way — `XA_WINDOW` and `XA_CARDINAL`
+/// differ in what the id *means*, not in how it is encoded. But
+/// `GAMESCOPE_FOCUSED_WINDOW` and `GAMESCOPECTRL_BASELAYER_WINDOW` hold window
+/// ids, and `WINDOW` is an entirely plausible type for a compositor to publish
+/// them as. Rejecting it would make every [`crate::screen::read`] hard-fail on a
+/// perfectly healthy compositor — a strictness that turns into an outage
+/// instead of a diagnosis.
+///
+/// So this accepts both 32-bit id types and still rejects every other type and
+/// every width but 32. What settles it properly is the §10 headless-gamescope
+/// job: that is where the real per-atom types get measured, and this list gets
+/// narrowed (or widened) against bytes rather than against reasoning.
 pub fn decode_cardinals(
     atom: &'static str,
     format: u8,
     type_: Atom,
+    bytes_after: u32,
     value: &[u8],
 ) -> Result<Vec<u32>> {
     if format == 0 {
         // No such property. Rule 1: absent is a value.
         return Ok(Vec::new());
     }
-    if format != 32 || type_ != u32::from(AtomEnum::CARDINAL) {
+    let accepted_type =
+        type_ == u32::from(AtomEnum::CARDINAL) || type_ == u32::from(AtomEnum::WINDOW);
+    if format != 32 || !accepted_type {
         return Err(AtomError::BadFormat {
             atom,
             width: format,
             type_atom: type_,
         });
+    }
+    if bytes_after != 0 {
+        return Err(AtomError::Truncated { atom, bytes_after });
     }
     Ok(value
         .chunks_exact(4)
@@ -496,9 +551,40 @@ mod tests {
     }
 
     #[test]
+    fn every_name_is_in_all_so_get_can_never_panic() {
+        // The failure this test exists to catch is adding a `pub const` to
+        // `names` and forgetting to add it to `names::ALL`: `Atoms::intern`
+        // would never intern it and `Atoms::get` would panic at the first read.
+        // Listing the constants explicitly here is the point — a new name has to
+        // be written down twice, and the second time is this assertion.
+        let declared = [
+            names::BASELAYER_APPID,
+            names::BASELAYER_WINDOW,
+            names::FOCUSED_WINDOW,
+            names::FOCUSED_APP,
+            names::FOCUSABLE_WINDOWS,
+            names::FOCUSABLE_APPS,
+            names::HDR_OUTPUT_FEEDBACK,
+            names::VRR_FEEDBACK,
+            names::DISPLAY_SUPPORTS_HDR,
+            names::XWAYLAND_SERVER_ID,
+            names::STEAM_GAME,
+            names::STEAM_OVERLAY,
+            names::STEAM_INPUT_FOCUS,
+            names::STEAM_NOTIFICATION,
+        ];
+        let declared: std::collections::HashSet<&str> = declared.into_iter().collect();
+        let interned: std::collections::HashSet<&str> = names::ALL.iter().copied().collect();
+        assert_eq!(
+            declared, interned,
+            "every atom name must be in names::ALL, and ALL must hold nothing else"
+        );
+    }
+
+    #[test]
     fn absent_property_decodes_to_empty_not_error() {
         // X encodes "no such property" as format 0 with an empty value.
-        let got = decode_cardinals(names::VRR_FEEDBACK, 0, 0, &[]).unwrap();
+        let got = decode_cardinals(names::VRR_FEEDBACK, 0, 0, 0, &[]).unwrap();
         assert!(got.is_empty(), "a missing atom must be an absent value");
     }
 
@@ -509,10 +595,28 @@ mod tests {
             names::BASELAYER_APPID,
             32,
             u32::from(AtomEnum::CARDINAL),
+            0,
             &cardinal_bytes(&values),
         )
         .unwrap();
         assert_eq!(got, values);
+    }
+
+    #[test]
+    fn a_window_typed_property_is_accepted_like_a_cardinal_one() {
+        // GAMESCOPE_FOCUSED_WINDOW holds window ids, and WINDOW is a plausible
+        // type for a compositor to publish them as. Both are 32-bit ids; the
+        // width is the invariant. Rejecting WINDOW would hard-fail every
+        // screen::read on a healthy compositor.
+        let got = decode_cardinals(
+            names::FOCUSED_WINDOW,
+            32,
+            u32::from(AtomEnum::WINDOW),
+            0,
+            &cardinal_bytes(&[8_388_625]),
+        )
+        .unwrap();
+        assert_eq!(got, vec![8_388_625]);
     }
 
     #[test]
@@ -521,6 +625,7 @@ mod tests {
             names::FOCUSED_WINDOW,
             16,
             u32::from(AtomEnum::CARDINAL),
+            0,
             &[0, 0],
         )
         .unwrap_err();
@@ -532,14 +637,47 @@ mod tests {
 
     #[test]
     fn wrong_type_is_an_error_not_a_coercion() {
+        // Still exactly two accepted types: anything else is refused.
+        for bad in [AtomEnum::STRING, AtomEnum::ATOM, AtomEnum::PIXMAP] {
+            let err = decode_cardinals(
+                names::FOCUSED_WINDOW,
+                32,
+                u32::from(bad),
+                0,
+                &cardinal_bytes(&[1]),
+            )
+            .unwrap_err();
+            assert!(matches!(err, AtomError::BadFormat { .. }), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_reply_is_an_error_not_a_short_answer() {
+        // bytes_after != 0 means the server has more of this property than the
+        // reply carried. Returning the prefix would be silent truncation inside
+        // the one module whose thesis is that truncation must be an error.
         let err = decode_cardinals(
-            names::FOCUSED_WINDOW,
+            names::FOCUSABLE_WINDOWS,
             32,
-            u32::from(AtomEnum::STRING),
-            &cardinal_bytes(&[1]),
+            u32::from(AtomEnum::CARDINAL),
+            12,
+            &cardinal_bytes(&[8_388_625, 9003, 2998]),
         )
         .unwrap_err();
-        assert!(matches!(err, AtomError::BadFormat { .. }), "{err}");
+        assert!(
+            matches!(
+                err,
+                AtomError::Truncated {
+                    bytes_after: 12,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("GAMESCOPE_FOCUSABLE_WINDOWS"),
+            "{err}"
+        );
     }
 
     #[test]

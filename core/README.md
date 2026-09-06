@@ -9,7 +9,7 @@ its relationship to `daemon/`.
 
 | Module | Owns |
 |---|---|
-| `atoms` | The typed X root-atom layer — gamescope's published state (§5). The **only** place in the crate that speaks X: everything above it sees typed values, never `u32` blobs and never atom names. A missing atom is `Ok(None)`, never an error; every property is `CARDINAL`/32-bit and an unexpected shape is a typed error, not a coerced value; names are interned once at connect so a rename upstream fails at startup, not at the first switch |
+| `atoms` | The typed X root-atom layer — gamescope's published state (§5). The **only** place in the crate that speaks X: everything above it sees typed values, never `u32` blobs and never atom names. A missing atom is `Ok(None)`, never an error; every property is a 32-bit id array (`CARDINAL` or `WINDOW` — the width is the invariant, the per-atom type is not measured yet) and an unexpected shape or a truncated reply is a typed error, not a coerced value; names are interned once at connect so a rename upstream fails at startup, not at the first switch |
 | `screen` | `ScreenState` — one snapshot of what is on screen, replacing `hypr-active`/`hypr-clients`/`hypr-monitors`. Read in one round trip; `_APP` is not exposed as an app id at all (below) |
 | `launch` | Scoped launching: `systemd-run --user --scope` into `app-steam-app<appid>-<pid>.scope`, the argv as a testable value, and reading a scope back out of a cgroup path. Preflight is fail-closed — there is no unscoped fallback |
 | `baselayer` | `show`/`home` as one write plus one bounded verify, and `reconcile` as the read-only recovery path |
@@ -21,7 +21,14 @@ its relationship to `daemon/`.
 `units/` holds the v2 session units (§4's `tv-shell-session.target` shape, taken
 from the ChimeraOS `gamescope-session` files rather than written from scratch).
 They are **untested on hardware** — nothing has booted this session yet, and the
-cutover criteria in §11 are all unmet.
+cutover criteria in §11 are all unmet. Two things about them are worth knowing
+before reading: every v2 sidecar carries a **`v2-` infix** (`tv-shell-v2-panel`,
+not `tv-shell-panel` — §11 forbids a shared unit name and v1 already owns the
+plain one), and gamescope's primary child is
+`units/tv-shell-gamescope-child.sh`, which publishes the compositor environment
+from **inside** gamescope's process tree and then sends `READY=1`. Its
+`sleep infinity` tail is an explicit placeholder for §4's real session child,
+not finished work.
 
 ## Why a new crate, not an evolution of `daemon/`
 

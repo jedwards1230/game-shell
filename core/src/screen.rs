@@ -164,21 +164,29 @@ impl ScreenState {
     /// Build a snapshot from already-decoded parts.
     ///
     /// Public so tests (and, later, the headless-CI harness) can construct a
-    /// state from real captured bytes without an X server. The `steam_game`
-    /// argument is the focused window's own `STEAM_GAME`, used only as the
-    /// repair fallback when gamescope published no triplet for that window.
-    #[allow(clippy::too_many_arguments)]
-    pub fn assemble(
-        focused_window: Option<Window>,
-        focused_app_atom: Option<u32>,
-        base_layer: Vec<AppId>,
-        base_layer_windows: Vec<Window>,
-        focusable_windows: Vec<FocusableWindow>,
-        focusable_apps: Vec<AppId>,
-        display: DisplayFeedback,
-        xwayland_server_id: Option<u32>,
-        steam_game: Option<AppId>,
-    ) -> Self {
+    /// state from real captured bytes without an X server.
+    ///
+    /// Takes [`ScreenParts`] rather than a positional argument list, and that is
+    /// this type's central safety property expressed structurally. The two
+    /// leading parts are the focused **window** and the `_APP` atom — and
+    /// `Window` IS `u32`, so a positional signature let a caller swap them and
+    /// still compile, resolving `on_screen` against the `_APP` value. That is
+    /// precisely the bug this module exists to make unreachable (see the module
+    /// docs), so it may not be a matter of getting the argument order right.
+    /// Named fields make the swap not typecheck as a mistake at all: you have to
+    /// write `focused_app_atom:` to put a value there.
+    pub fn assemble(parts: ScreenParts) -> Self {
+        let ScreenParts {
+            focused_window,
+            focused_app_atom,
+            base_layer,
+            base_layer_windows,
+            focusable_windows,
+            focusable_apps,
+            display,
+            xwayland_server_id,
+            steam_game,
+        } = parts;
         // Resolution order is §5's: gamescope's own published id first (it is
         // what the compositor actually acts on), the window's STEAM_GAME tag
         // only as the repair fallback.
@@ -206,6 +214,35 @@ impl ScreenState {
             focused_app_atom,
         }
     }
+}
+
+/// The decoded parts [`ScreenState::assemble`] is built from, as named fields.
+///
+/// One struct instead of nine positional arguments, because two of those
+/// arguments are `Option<Window>` and `Option<u32>` over the same underlying
+/// `u32`: positionally they are interchangeable to the compiler and catastrophic
+/// to the semantics. See [`ScreenState::assemble`].
+#[derive(Debug, Clone, Default)]
+pub struct ScreenParts {
+    /// `GAMESCOPE_FOCUSED_WINDOW` — **the** base window.
+    pub focused_window: Option<Window>,
+    /// `GAMESCOPE_FOCUSED_APP`, raw. Diagnostic only; never a decision input.
+    pub focused_app_atom: Option<u32>,
+    /// `GAMESCOPECTRL_BASELAYER_APPID`, as it currently reads back.
+    pub base_layer: Vec<AppId>,
+    /// `GAMESCOPECTRL_BASELAYER_WINDOW`.
+    pub base_layer_windows: Vec<Window>,
+    /// `GAMESCOPE_FOCUSABLE_WINDOWS`, as `(xid, appid, pid)` triplets.
+    pub focusable_windows: Vec<FocusableWindow>,
+    /// `GAMESCOPE_FOCUSABLE_APPS`.
+    pub focusable_apps: Vec<AppId>,
+    /// HDR/VRR feedback (§6).
+    pub display: DisplayFeedback,
+    /// `GAMESCOPE_XWAYLAND_SERVER_ID` of the server this was read from.
+    pub xwayland_server_id: Option<u32>,
+    /// The focused window's own `STEAM_GAME`, used ONLY as the repair fallback
+    /// when gamescope published no triplet for that window (§5).
+    pub steam_game: Option<AppId>,
 }
 
 /// Read one `ScreenState` from the compositor.
@@ -253,7 +290,13 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
                 atom: $name,
                 source,
             })?;
-            decode_cardinals($name, reply.format, reply.type_, &reply.value)?
+            decode_cardinals(
+                $name,
+                reply.format,
+                reply.type_,
+                reply.bytes_after,
+                &reply.value,
+            )?
         }};
     }
     let focused_window = take!(c_focused_window, names::FOCUSED_WINDOW)
@@ -292,7 +335,7 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
         _ => None,
     };
 
-    Ok(ScreenState::assemble(
+    Ok(ScreenState::assemble(ScreenParts {
         focused_window,
         focused_app_atom,
         base_layer,
@@ -302,7 +345,7 @@ pub fn read(conn: &AtomConn) -> Result<ScreenState> {
         display,
         xwayland_server_id,
         steam_game,
-    ))
+    }))
 }
 
 fn flag(values: Vec<u32>) -> Option<bool> {
@@ -333,17 +376,16 @@ mod tests {
         focusable: Vec<FocusableWindow>,
         steam_game: Option<AppId>,
     ) -> ScreenState {
-        ScreenState::assemble(
-            focused,
-            focused_app,
-            vec![GAME, SHELL],
-            vec![],
-            focusable,
-            vec![GAME, SHELL],
-            DisplayFeedback::default(),
-            Some(0),
+        ScreenState::assemble(ScreenParts {
+            focused_window: focused,
+            focused_app_atom: focused_app,
+            base_layer: vec![GAME, SHELL],
+            focusable_windows: focusable,
+            focusable_apps: vec![GAME, SHELL],
+            xwayland_server_id: Some(0),
             steam_game,
-        )
+            ..Default::default()
+        })
     }
 
     #[test]

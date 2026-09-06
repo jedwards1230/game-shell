@@ -15,8 +15,6 @@
 //!   an embedded newline would split one reply into two lines and desync a
 //!   line-reading client.
 
-use std::fmt;
-
 /// Maximum accepted line length, matching v1's `LinesCodec::new_with_max_length`.
 pub const MAX_LINE: usize = 4096;
 
@@ -141,26 +139,12 @@ pub fn sanitize_ipc(s: &str) -> String {
         .collect()
 }
 
-/// An event line. Kept as an enum whose `Display` **is** the wire format, as in
-/// v1, so the format lives in exactly one place.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
-    /// The base layer changed to this app id.
-    BaseLayer(String),
-    /// A base-layer switch was asked for and the compositor did not publish it.
-    /// An event, not just an error reply, because §10 requires the failure to be
-    /// observable by something other than the client that provoked it.
-    SwitchFailed(String),
-}
-
-impl fmt::Display for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Event::BaseLayer(id) => write!(f, "baselayer:{id}"),
-            Event::SwitchFailed(msg) => write!(f, "baselayer:failed:{}", sanitize_ipc(msg)),
-        }
-    }
-}
+// NOTE: there is deliberately no `Event` type here yet. An event line only means
+// something once something BROADCASTS it, and this PR ships no event stream and
+// no metrics surface (both are explicitly later work — see the crate docs). A
+// type nothing constructs is dead code dressed as a contract, and the repo
+// deletes dead code rather than parking it. The wire format is written down in
+// §4/§10 and comes back with the transport that carries it.
 
 #[cfg(test)]
 mod tests {
@@ -271,18 +255,6 @@ mod tests {
             assert!(r.starts_with("error:"), "{r}");
             assert_eq!(r.lines().count(), 1, "{r}");
         }
-    }
-
-    #[test]
-    fn event_display_is_the_wire_format() {
-        assert_eq!(
-            Event::BaseLayer("9003".into()).to_string(),
-            "baselayer:9003"
-        );
-        assert_eq!(
-            Event::SwitchFailed("did not\ntake".into()).to_string(),
-            "baselayer:failed:did not take"
-        );
     }
 
     #[test]

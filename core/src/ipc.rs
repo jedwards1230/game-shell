@@ -9,6 +9,12 @@
 //! v1 and v2 share no socket, prefix or unit name), which
 //! [`crate::config::socket_path`] guarantees.
 //!
+//! One task per connection means intents can arrive CONCURRENTLY, and a
+//! base-layer switch is a write plus a verify that must not interleave with
+//! another one (a verify that can observe a racing intent's window is not a
+//! verify). Nothing here serializes them — the implementation does, behind the
+//! trait: see `GamescopeCompositor`'s `intent_lock` in [`crate::compositor`].
+//!
 //! Compositor work is behind the [`Compositor`] trait for one reason: it makes
 //! the whole request/reply surface testable end-to-end with no X server, the way
 //! v1's `fake_runtime` makes its IPC testable with no evdev. Every X call blocks,
@@ -74,9 +80,14 @@ fn bind(sock_path: &str) -> Result<UnixListener> {
     // 0o600 atomically at bind; the explicit set_permissions below is then a
     // belt-and-braces assertion, since a umask can only clear bits.
     //
-    // SAFETY: `umask` is a plain process-global setter that cannot fail; it is
-    // restored immediately, before any other thread can create a file that
-    // would care. The daemon does exactly this.
+    // SAFETY: `umask` is a plain process-global setter that cannot fail. It is
+    // process-global, though, and NOTHING here excludes other threads — tokio's
+    // workers are already running by the time `serve` is called, so a file
+    // another thread creates inside this window really does inherit 0o177. Two
+    // reasons that is acceptable rather than merely tolerated: the window is a
+    // single `bind()` call wide, and it fails CLOSED — the only effect is
+    // over-restrictive permissions on an unrelated file, never over-permissive
+    // ones, so it cannot leak anything. The v1 daemon does exactly this.
     let prev_umask = unsafe { libc::umask(0o177) };
     let bind_result = UnixListener::bind(sock_path);
     unsafe {

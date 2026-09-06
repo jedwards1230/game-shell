@@ -6,7 +6,15 @@ name = "tv-shell-core"
 # `core-v*` tag series exists.
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.75"
+# DECLARED, NOT ENFORCED. No CI leg builds this crate on a pinned old toolchain
+# — `rust.yml` uses `rust:1-bookworm`, i.e. latest stable — which is how the rest
+# of the workspace behaves too, so treat this as a documented FLOOR rather than a
+# measured minimum. 1.85 is the highest `rust-version` in this crate's own
+# dependency graph (`toml` 1.x and its `toml_*`/`indexmap`/`hashbrown` tree all
+# declare 1.85), so anything lower was already false: the previous 1.75 could not
+# have built this dependency set at all. It matches the ≥1.85 floor CONTRIBUTING
+# already records for the host and panel crates.
+rust-version = "1.85"
 license = "GPL-3.0"
 description = "tv-shell v2 core: gamescope base-layer policy, scope launching, and the screen-state read that replaces the v1 Hyprland queries"
 

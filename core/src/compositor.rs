@@ -4,7 +4,7 @@
 //! each verb into the §5 primitive it is: `show`/`home` are one base-layer write
 //! plus one bounded verify; `launch` is one scoped `systemd-run`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::atoms::{AppId, AtomConn};
 use crate::baselayer;
@@ -28,6 +28,23 @@ pub struct GamescopeCompositor {
     scope_env: Option<ScopeEnv>,
     /// The preflight failure, kept verbatim so the IPC reply says what to fix.
     scope_error: Option<String>,
+    /// Serializes one whole intent — the write AND its verify — against other
+    /// intents.
+    ///
+    /// **"One write, then verify" is only a real primitive if it is atomic.**
+    /// The IPC server runs one task per connection with nothing shared between
+    /// them, so a `show A` and a concurrent `home` would otherwise interleave:
+    /// A's write, home's write, then A's verify catching a transient frame in
+    /// which A was still on screen — and returning `ok` for a state another
+    /// intent had already replaced. That is a success report that is not true,
+    /// which is the exact class [`crate::baselayer`] exists to eliminate; a
+    /// verify that can observe someone else's window is not a verify.
+    ///
+    /// A `std::sync::Mutex`, not a tokio one, on purpose: every compositor call
+    /// is blocking X I/O dispatched through `spawn_blocking`, so this lock is
+    /// never held across an `.await` and a blocking mutex is the correct
+    /// primitive.
+    intent_lock: Mutex<()>,
 }
 
 impl GamescopeCompositor {
@@ -50,7 +67,20 @@ impl GamescopeCompositor {
             config,
             scope_env,
             scope_error,
+            intent_lock: Mutex::new(()),
         })
+    }
+
+    /// Take the intent lock, recovering from a poisoned one.
+    ///
+    /// A poisoned lock means some earlier intent panicked mid-switch. The data
+    /// it guards is `()` — there is no invariant to have been corrupted — so
+    /// refusing every subsequent switch would turn one panic into a permanently
+    /// unswitchable screen. Same recovery idiom as `daemon/src/daemon_config.rs`.
+    fn lock_intent(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.intent_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Read the base-layer list back as the core's last intent.
@@ -79,6 +109,8 @@ impl Compositor for GamescopeCompositor {
     }
 
     fn show(&self, app_id: AppId) -> String {
+        // Held across the write AND the verify — see `intent_lock`.
+        let _intent = self.lock_intent();
         let shell = self.config.shell_app_id();
         match baselayer::show(&self.conn, app_id, shell, self.config.switch_timeout()) {
             Ok(switched) => {
@@ -94,6 +126,8 @@ impl Compositor for GamescopeCompositor {
     }
 
     fn home(&self) -> String {
+        // Held across the write AND the verify — see `intent_lock`.
+        let _intent = self.lock_intent();
         let shell = self.config.shell_app_id();
         match baselayer::home(&self.conn, shell, self.config.switch_timeout()) {
             Ok(switched) => {
