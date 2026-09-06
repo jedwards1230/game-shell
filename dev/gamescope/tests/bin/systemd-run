@@ -1,0 +1,28 @@
+#!/bin/bash
+# Fake systemd-run for the scope-launch fixtures. It exists so a fixture can
+# assert that every app verb creates a scope, and that the unit name matches
+# the format gamescope parses — `app-steam-app%u-%d.scope` — without ever
+# talking to the developer's real user manager.
+#
+# Two records, both appended so a run with several launches keeps all of them:
+#   $FAKE_X/systemd-run.argv    the whole argv, one line per launch, tab-joined
+#   $FAKE_X/scopes.log          just the --unit value, one line per launch
+#
+# It then EXECs the command, exactly as the real `systemd-run --scope` does, so
+# the pid the kit captured with `$!` stays the pid of the app itself and every
+# pid-keyed assertion downstream still holds.
+set -u
+printf '%s\n' "$(IFS=$'\t'; echo "$*")" >> "${FAKE_X:?}/systemd-run.argv"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --unit=*) printf '%s\n' "${1#--unit=}" >> "$FAKE_X/scopes.log"; shift ;;
+        --unit) printf '%s\n' "${2:-}" >> "$FAKE_X/scopes.log"; shift 2 ;;
+        --) shift; break ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+
+[ $# -ge 1 ] || { echo "fake systemd-run: no command" >&2; exit 2; }
+exec "$@"

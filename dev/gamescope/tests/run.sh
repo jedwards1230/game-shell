@@ -18,6 +18,13 @@ export PATH="$HERE/bin:$PATH"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tv-shell-gs-fixture.XXXXXX")"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 export TV_SHELL_GS_LOG_DIR="$WORK/clients"; mkdir -p "$TV_SHELL_GS_LOG_DIR"
+# Every app verb now launches its client inside a systemd scope, and
+# `systemd-run --user` needs a session bus. Both variables point into the
+# scratch dir: bin/systemd-run is a stub, but gs_scope_ready checks the
+# environment before calling it, and a fixture must not inherit (or depend on)
+# the developer's live user manager.
+export XDG_RUNTIME_DIR="$WORK/run"; mkdir -p "$XDG_RUNTIME_DIR"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 # --- cleanup ---------------------------------------------------------------
 # Runs on a normal exit AND on INT/TERM, so an interrupted run leaves neither
 # the scratch dir nor a stray `sleep 300` behind.
@@ -170,6 +177,7 @@ check "names the running app" grep -q "with ' Steam Big Picture' (app id 1068023
 check "offers resume with the exact name" grep -q "stream stream-host ' Steam Big Picture'" <<< "$out"
 check "offers --quit" grep -q -- "--quit stream stream-host ' Desktop'" <<< "$out"
 check "moonlight never spawned" [ ! -e "$FAKE_X/moonlight.argv" ]
+check "no scope created" [ ! -e "$FAKE_X/scopes.log" ]
 check "no base-layer change" [ ! -s "$FAKE_X/root.log" ]
 
 echo "== G. launch.sh moonlight: host already running the requested app -> resume, tag, base layer"
@@ -193,6 +201,12 @@ check "moonlight args intact" grep -q -x -- '--hdr' "$FAKE_X/moonlight.argv"
 check "base layer 9003,9001 set before tagging" [ "$(head -1 "$FAKE_X/root.log")" = "set GAMESCOPECTRL_BASELAYER_APPID=9003,9001" ]
 check "stream window tagged" grep -q "tag 0x800031 STEAM_GAME=9003" "$FAKE_X/tag.log"
 check "GUI window tagged" grep -q "tag 0x80002f STEAM_GAME=9003" "$FAKE_X/tag.log"
+# The scope is the app id gamescope actually reads; the tags above are repair.
+check "launched in one scope" [ "$(wc -l < "$FAKE_X/scopes.log")" = 1 ]
+check "scope named for app 9003, in gamescope's sscanf format" grep -qE '^app-steam-app9003-[0-9]+$' "$FAKE_X/scopes.log"
+check "scope's pid field is the pid the kit reported" grep -qE "^app-steam-app9003-$(grep -oE 'moonlight \(xcb\) pid [0-9]+' <<< "$out" | awk '{print $NF}')\$" "$FAKE_X/scopes.log"
+# -e, because grep would read a pattern starting with `--` as an option.
+check "systemd-run got --user --scope --collect" grep -qF -e $'--user\t--scope\t--collect' "$FAKE_X/systemd-run.argv"
 reap
 
 echo "== H. launch.sh moonlight --quit: ends the host's app first, then streams"
@@ -233,9 +247,10 @@ fresh K; export TV_SHELL_GS_ENV_FILE="$FAKE_X/env"
 win 0x400011 appear=2 name=tv-shell-proto "pid=@$FAKE_X/shell.pid"
 out="$(timeout 6 "$KIT/client.sh" 2>&1)"
 dump "$out"
-check "shell tagged by pid" grep -q "tagged 'tv-shell-proto' (pid $(cat "$FAKE_X/shell.pid")) as app 9001 and set it as base layer" <<< "$out"
+check "shell tagged by pid" grep -q "tagged 'tv-shell-proto' (pid $(cat "$FAKE_X/shell.pid")) as app 9001 (base layer 9001, set at launch)" <<< "$out"
 check "STEAM_GAME set on its window" grep -q "tag 0x400011 STEAM_GAME=9001" "$FAKE_X/tag.log"
 check "base layer 9001" grep -q "set GAMESCOPECTRL_BASELAYER_APPID=9001" "$FAKE_X/root.log"
+check "shell launched in a scope named for app 9001" grep -qE '^app-steam-app9001-[0-9]+$' "$FAKE_X/scopes.log"
 # The measurement rig's default must not move when a second client mode exists.
 check "default primary child is proto" grep -q "primary child: proto" <<< "$out"
 check "no moonlight spawned by default" [ ! -e "$FAKE_X/moonlight.argv" ]
@@ -276,8 +291,10 @@ EOF
 chmod +x "$FAKE_X/moonlight-wrap"
 win 0x800040 appear=2 name=Moonlight class=moonlight "pid=@$FAKE_X/moonlight.pid"
 # The stream window: a SECOND window of the same pid, minutes later in real
-# life. It is the reason the moonlight watch runs for the life of the client
-# instead of stopping at the first window like the proto shell's does.
+# life. It used to be the reason the moonlight watch ran for the life of the
+# client. It no longer needs a tag at all — it is a window of a process inside
+# the app's scope, which is what gamescope reads — so the repair pass stops at
+# the first window and this one is deliberately never reached.
 win 0x800041 appear=6 "name=stream-host - Moonlight" class=moonlight "pid=@$FAKE_X/moonlight.pid" wsi=1
 out="$(TV_SHELL_GS_CLIENT=moonlight TV_SHELL_GS_MOONLIGHT="$FAKE_X/moonlight-wrap" \
     TV_SHELL_GS_TAG_TIMEOUT=5 TV_SHELL_GS_XID_PROBE=0 timeout 7 "$KIT/client.sh" 2>&1)"
@@ -287,9 +304,40 @@ check "moonlight spawned" [ -e "$FAKE_X/moonlight.argv" ]
 check "no proto shell spawned" [ ! -e "$FAKE_X/shell.pid" ]
 check "no qml runtime resolved" not grep -q "qml runtime:" <<< "$out"
 check "base layer 9003" grep -q "set GAMESCOPECTRL_BASELAYER_APPID=9003" "$FAKE_X/root.log"
-check "GUI window tagged 9003" grep -q "tag 0x800040 STEAM_GAME=9003" "$FAKE_X/tag.log"
-check "later stream window tagged too" grep -q "tag 0x800041 STEAM_GAME=9003" "$FAKE_X/tag.log"
+check "launched in a scope named for app 9003" grep -qE '^app-steam-app9003-[0-9]+$' "$FAKE_X/scopes.log"
+check "GUI window tagged 9003 (repair pass)" grep -q "tag 0x800040 STEAM_GAME=9003" "$FAKE_X/tag.log"
+check "repair pass stopped at the first window" [ "$(wc -l < "$FAKE_X/tag.log")" = 1 ]
+check "no day-long watcher announced" not grep -q "watching its windows for" <<< "$out"
 check "nothing tagged as the proto shell" not grep -q "STEAM_GAME=9001" "$FAKE_X/tag.log"
+reap
+
+echo "== Q. no session bus -> a clear refusal, not a silent unscoped launch"
+fresh Q; export TV_SHELL_GS_ENV_FILE="$FAKE_X/env"
+out="$(env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR PATH="$PATH" HOME="$HOME" \
+    FAKE_X="$FAKE_X" TV_SHELL_GS_ENV_FILE="$FAKE_X/env" TV_SHELL_GS_LOG_DIR="$TV_SHELL_GS_LOG_DIR" \
+    DISPLAY=:9 timeout 6 "$KIT/client.sh" 2>&1)"; rc=$?
+dump "$out"
+check "exit 2" [ "$rc" = 2 ]
+check "names the missing variable" grep -q "XDG_RUNTIME_DIR is unset" <<< "$out"
+check "says why it matters" grep -q "cannot create a systemd scope" <<< "$out"
+check "nothing spawned" [ ! -e "$FAKE_X/shell.pid" ]
+check "no scope created" [ ! -e "$FAKE_X/scopes.log" ]
+
+echo "== R. every launched verb gets a scope whose app id is the verb's app id"
+fresh R
+win 0x900011 appear=1 name=xmessage class=xmessage
+out="$("$KIT/launch.sh" xmessage hello 2>&1)"; rc=$?
+dump "$out"
+check "exit 0" [ "$rc" = 0 ]
+check "xmessage scoped as app 9002" grep -qE '^app-steam-app9002-[0-9]+$' "$FAKE_X/scopes.log"
+reap
+fresh R2
+win 0x910011 appear=1 name=probe class=probe
+out="$("$KIT/launch.sh" x11 9007 --name probe --class probe sleep 30 2>&1)"; rc=$?
+dump "$out"
+check "exit 0" [ "$rc" = 0 ]
+check "x11 verb scoped as the app id it was given" grep -qE '^app-steam-app9007-[0-9]+$' "$FAKE_X/scopes.log"
+check "the scope's app id is not a hardcoded one" not grep -qE '^app-steam-app900[1-5]-' "$FAKE_X/scopes.log"
 reap
 
 echo "== O. client.sh refuses an unknown TV_SHELL_GS_CLIENT instead of guessing"
