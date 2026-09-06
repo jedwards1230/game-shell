@@ -119,6 +119,25 @@ pub fn decide(boot_app: Option<AppId>, observed: Option<Observed<'_>>) -> BootDe
     BootDecision::Launch(boot_app)
 }
 
+/// The id a [`Compositor`] reports when it could not read the screen at all.
+///
+/// The supervisor treats `None` as "the coast is clear", so an implementation
+/// answering `None` on a failed read would let a relaunch through on no
+/// evidence. It answers with this instead, which is not any real app and so
+/// always yields — fail closed. A named constant rather than a bare `u32::MAX`
+/// at two sites, so they cannot drift and so a log line can say "unreadable"
+/// instead of an id nobody will find in a config file at 1 a.m.
+pub const SCREEN_UNREADABLE: AppId = AppId::new(u32::MAX);
+
+/// Render an on-screen id for a log line, naming the unreadable sentinel.
+pub fn describe_on_screen(on_screen: Option<AppId>) -> String {
+    match on_screen {
+        Some(id) if id == SCREEN_UNREADABLE => "unreadable (the screen could not be read)".into(),
+        Some(id) => id.to_string(),
+        None => "nothing".into(),
+    }
+}
+
 /// What the reconcile saw, as the two facts [`decide`] needs.
 #[derive(Debug, Clone, Copy)]
 pub struct Observed<'a> {
@@ -254,7 +273,8 @@ pub fn supervise(
             }
             NextAction::Yield { to } => {
                 tracing::info!(
-                    app_id = %app_id, ran_ms, on_screen = ?to, reason = action.reason(),
+                    app_id = %app_id, ran_ms, on_screen = %describe_on_screen(to),
+                    reason = action.reason(),
                     "boot client: yielding; supervision ends",
                 );
                 return;
@@ -311,7 +331,8 @@ pub fn supervise(
                         }
                         NextAction::Yield { to } => {
                             tracing::info!(
-                                app_id = %app_id, on_screen = ?to, reason = action.reason(),
+                                app_id = %app_id, on_screen = %describe_on_screen(to),
+                                reason = action.reason(),
                                 "boot client: relaunch failed and something else has the screen",
                             );
                             return;
@@ -466,7 +487,9 @@ impl NextAction {
             Self::Stop {
                 why: StopReason::UserQuit,
             } => {
-                "the app exited cleanly, so this was a quit, not a crash; the shell has the screen"
+                "the app exited cleanly, so this was a quit and not a crash. Whatever is behind \
+                 it owns the screen now — and if nothing else draws on this compositor that is an \
+                 EMPTY one, i.e. a black television: set boot_relaunch = \"always\""
             }
             Self::Stop {
                 why: StopReason::PolicyNever,
@@ -651,6 +674,66 @@ mod tests {
         ] {
             assert!(!a.reason().is_empty(), "{a:?}");
         }
+    }
+
+    /// THE PREMISE CORRECTION, pinned.
+    ///
+    /// `on-failure` was justified by "v2 has a shell behind the app". It does
+    /// not: §13 Q1 is open and `tv-shell-gamescope-child.sh` is still
+    /// `exec sleep infinity`, so on a deployment without a shell a clean quit
+    /// lands on an EMPTY compositor — a black television. The reasoning was
+    /// sound and its input was six months early.
+    ///
+    /// The `UserQuit` reason is what an operator reads at 1 a.m. staring at a
+    /// black screen, so it must not assert the shell that is missing; it must
+    /// name the consequence and the override. Asserted here because a comment
+    /// nothing checks is how the premise got stale in the first place.
+    #[test]
+    fn the_quit_reason_does_not_claim_a_shell_that_may_not_exist() {
+        let reason = NextAction::Stop {
+            why: StopReason::UserQuit,
+        }
+        .reason();
+        assert!(
+            !reason.contains("the shell has the screen"),
+            "the reason asserts a shell v2 does not have yet: {reason}"
+        );
+        assert!(
+            reason.contains("black television"),
+            "the reason must name the consequence of a quit with nothing behind it: {reason}"
+        );
+        assert!(
+            reason.contains("boot_relaunch"),
+            "and must name the override that fixes it: {reason}"
+        );
+    }
+
+    /// The unreadable-screen sentinel reads as words, not as a fake app id.
+    #[test]
+    fn an_unreadable_screen_is_described_not_numbered() {
+        let described = describe_on_screen(Some(SCREEN_UNREADABLE));
+        assert!(described.contains("unreadable"), "{described}");
+        assert!(
+            !described.contains(&u32::MAX.to_string()),
+            "a log line must not print the sentinel as an id: {described}"
+        );
+        assert_eq!(describe_on_screen(Some(BOOT)), "9003");
+        assert_eq!(describe_on_screen(None), "nothing");
+
+        // And the sentinel must still FAIL CLOSED: it is not the supervised app,
+        // so it yields.
+        assert_eq!(
+            after_exit(
+                policy(),
+                FastExits(0),
+                ExitKind::Failed,
+                Some(SCREEN_UNREADABLE),
+                BOOT
+            ),
+            NextAction::Yield {
+                to: Some(SCREEN_UNREADABLE)
+            }
+        );
     }
 
     // -- the restart decision -------------------------------------------------

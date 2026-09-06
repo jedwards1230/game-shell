@@ -216,12 +216,25 @@
 #
 # Why the default is not "always", even though the prototype relaunches
 # unconditionally: the prototype WAS the session, so a quit left a black screen
-# and relaunching was the only sane answer. v2 has a shell behind the app, so a
-# clean exit has somewhere to land — and relaunching over a deliberate quit
-# fights the user, who pressed Quit and expects the shell. A crash is what
-# durability is about, and a crash is not a clean exit. Set "always" to get the
-# prototype's behaviour back.
-#boot_relaunch = "on-failure"
+# and relaunching was the only sane answer. The default here assumes a SHELL
+# behind the app, so a clean exit has somewhere to land — and relaunching over a
+# deliberate quit fights the user, who pressed Quit and expects the shell. A
+# crash is what durability is about, and a crash is not a clean exit.
+#
+# ⚠ IF YOU HAVE NO SHELL YET, SET "always". THAT IS EVERY v2 DEPLOYMENT TODAY.
+#
+# v2 has no shell: V2_DESIGN §13 Q1 (the shell's runtime) is still open,
+# core/units/tv-shell-gamescope-child.sh is still `exec sleep infinity`, and the
+# boot client below is the ONLY thing that ever puts a window on this
+# compositor. So with "on-failure" and no shell, a clean quit ends supervision
+# and lands on an EMPTY compositor — a black television, recoverable only from
+# another machine.
+#
+# The default stays "on-failure" because it is right for the design and because
+# a default that changed meaning between releases would silently change
+# behaviour for anyone upgrading across the boundary. The deployment that is
+# early carries the override:
+#boot_relaunch = "always"
 
 # Fast-exit backoff, from dev/gamescope/client.sh:211-213 — constants chosen
 # against this hardware. An app that exits within boot_fast_exit_secs of launch,

@@ -301,7 +301,7 @@ impl Compositor for GamescopeCompositor {
             // *something*, which makes the supervisor yield — fail closed.
             Err(e) => {
                 tracing::warn!("could not read what is on screen: {e}");
-                Some(crate::atoms::AppId::new(u32::MAX))
+                Some(crate::boot::SCREEN_UNREADABLE)
             }
         }
     }

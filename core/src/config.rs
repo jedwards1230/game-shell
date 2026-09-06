@@ -312,12 +312,29 @@ pub struct SessionConfig {
 pub enum RelaunchPolicy {
     /// Relaunch only when the app exited NON-ZERO or on a signal. **Default.**
     ///
-    /// The prototype relaunches unconditionally, and was right to: it *was* the
-    /// session, so a quit left a black screen. v2 has a shell behind the app, so
-    /// a clean exit has somewhere to land — and relaunching over a deliberate
-    /// quit would fight the user, who pressed Quit and expects the shell.
-    /// A crash is the case durability is actually about, and a crash is not a
+    /// The prototype relaunches unconditionally and was right to: it *was* the
+    /// session, so a quit left a black screen. This default assumes a SHELL
+    /// behind the app, so a clean exit has somewhere to land and relaunching
+    /// over a deliberate quit would fight the user, who pressed Quit and expects
+    /// the shell. A crash is what durability is about, and a crash is not a
     /// clean exit.
+    ///
+    /// # ⚠ THE ASSUMPTION IS NOT TRUE YET
+    ///
+    /// **v2 has no shell.** §13 Q1 (the shell's runtime) is open,
+    /// `core/units/tv-shell-gamescope-child.sh` is still `exec sleep infinity`,
+    /// and [`crate::boot`] is the only thing that ever puts a window on that
+    /// compositor. So on a deployment without a shell a clean quit lands on an
+    /// EMPTY COMPOSITOR — a black television with no way back except a second
+    /// machine — which is the worst outcome this design has.
+    ///
+    /// **Until a shell exists, such a deployment should set
+    /// `boot_relaunch = "always"`.** That is a per-deployment override rather
+    /// than a different default on purpose: a default that changes meaning
+    /// between releases would silently change behaviour for anyone upgrading
+    /// across the boundary, with no config change to explain it — which is the
+    /// class of silent change this crate keeps removing. The default is correct
+    /// for the design; the deployment that is early carries the override.
     #[default]
     OnFailure,
     /// Relaunch on ANY exit — the prototype's behaviour, for a deployment that
