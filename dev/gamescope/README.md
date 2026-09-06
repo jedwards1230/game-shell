@@ -212,26 +212,28 @@ black screen). A Moonlight that cannot start at all hits the same fast-exit back
 prototype shell does — three exits inside 10 s stretches the retry to 60 s — so a broken
 install cannot hot-spin.
 
-Unlike the shell's one-shot tag, the window watch in this mode runs in the background for
-the life of the client. Moonlight's stream window is a **second** X11 window of the same
-pid that only exists once a stream starts, which here means whenever someone picks a game,
-minutes after launch; a one-shot watch would tag the grid and stop, leaving the stream
-window with no `STEAM_GAME` and therefore unselectable by gamescope's SteamControlled
-policy. `TV_SHELL_GS_TAG_TIMEOUT` (86400 s) bounds it.
+This mode used to run a **day-long background window watch**, because Moonlight's stream
+window is a *second* X11 window of the same pid that only exists once a stream starts —
+whenever someone picks a game, minutes after launch — and a one-shot tag would catch the
+grid and stop, leaving the stream window unselectable. Scope launching retires that
+whole problem: the stream window belongs to the same process, in the same
+`app-steam-app9003-<pid>.scope`, so gamescope resolves it with no tag and nothing to
+arrive late. What runs now is one bounded repair pass over the first window, capped by
+`TV_SHELL_GS_TAG_TIMEOUT` (30 s).
 
 ## Files
 
 | File | Role |
 |---|---|
 | `session.sh` | The session. Starts `tv-shell-input.service` (**not** in `TV_SHELL_GS_CLIENT=moonlight` mode — see above), creates the stats FIFO, execs gamescope with `--steam --expose-wayland --keep-alive -W/-H/-r --hdr-enabled --adaptive-sync`, logs to journal tag `tv-shell-gamescope` |
-| `client.sh` | gamescope's primary child. Runs `proto-shell.qml` on X11 with a Qt 6 runtime and tags it `STEAM_GAME=9001` — or, with `TV_SHELL_GS_CLIENT=moonlight`, Moonlight tagged `STEAM_GAME=9003`. Either way it makes the client the base layer, writes `/tmp/tv-shell-gamescope.env` for the SSH-side tools, and relaunches it on exit (with backoff once it crash-loops) |
-| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides), `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below; `--family` follows the pid tree, `--class` repeats, `--keep-existing` never overwrites a tag the client set itself), and `gs_watch_baselayer`, the base-layer atom logger, and `gs_moonlight_x11_env`, the one definition of the xcb/SDL/WSI environment Moonlight is launched with (shared by `launch.sh moonlight` and `client.sh`'s moonlight mode so they cannot drift) |
+| `client.sh` | gamescope's primary child. Runs `proto-shell.qml` on X11 with a Qt 6 runtime inside `app-steam-app9001-<pid>.scope` — or, with `TV_SHELL_GS_CLIENT=moonlight`, Moonlight inside `app-steam-app9003-<pid>.scope`. Either way it sets the base layer before launching, makes one bounded `STEAM_GAME` repair pass, writes `/tmp/tv-shell-gamescope.env` for the SSH-side tools, and relaunches the client on exit (with backoff once it crash-loops) |
+| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: `gs_scope_ready`/`gs_scope_run`/`gs_scope_check`, the scope launcher gamescope identifies apps by (above), the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides), `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below; `--family` follows the pid tree, `--class` repeats, `--keep-existing` never overwrites a tag the client set itself), and `gs_watch_baselayer`, the base-layer atom logger, and `gs_moonlight_x11_env`, the one definition of the xcb/SDL/WSI environment Moonlight is launched with (shared by `launch.sh moonlight` and `client.sh`'s moonlight mode so they cannot drift) |
 | `proto-shell.qml` | The prototype shell: shows window size, keyboard focus, last key, a moving dot, and a black-to-white strip |
 | `proto-overlay.qml` | Overlay test client, semi-transparent side panel |
 | `focus.sh` | `list` / `tag` / `tag-pid` / `watch-baselayer` / `app` / `window` / `clear` over gamescope's root X11 atoms. `tag-pid <pid> <id>` tags every window of a pid as it appears (`--timeout`, `--class`, `--family`, `--keep-existing`, `--log`, `--name`, `--expect`, `--done-name`); `watch-baselayer [secs]` logs every change of `GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp |
-| `launch.sh` | `overlay` / `x11` / `apps <host>` / `moonlight [--quit]` (X11, every window of its pid tagged `STEAM_GAME=9003`; `--wayland` for the xdg-shell experiment) / `steam [--gamepadui] [--watch-baselayer]` (the full Steam client, its whole process family tagged `STEAM_GAME=9004` as windows appear, for 10 min in a detached watcher) / `steamlink` (the standalone Steam Link client, `STEAM_GAME=9005`) / `xmessage` into the running session from SSH |
+| `launch.sh` | Every app verb launches inside its own `app-steam-app<id>-<pid>.scope`; the tagging each verb still does is repair. `overlay` (the one unscoped verb — an overlay is not an app) / `x11` / `apps <host>` / `moonlight [--quit]` (X11, app 9003; `--wayland` for the xdg-shell experiment) / `steam [--gamepadui] [--watch-baselayer]` (the full Steam client, its whole process family tagged `STEAM_GAME=9004` as windows appear, for 10 min in a detached watcher) / `steamlink` (the standalone Steam Link client, `STEAM_GAME=9005`) / `xmessage` into the running session from SSH |
 | `measure.sh` | Reads DRM connector properties, debugfs bit depth, the active mode, gamescope's own info (`gamescopectl`, `backend_info`, `help`) and the root feedback atoms, and prints verdicts. Every DRM read is scoped to one connector (the first connected + enabled one, or `TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1` to choose on a two-output box) and to the CRTC driving it. Under `sudo` the gamescope-side reads run as the session user |
-| `tests/` | Offline fixture suites for the kit's shell logic — a fake X display (`tests/bin/xprop`) plus fake `steam`/`moonlight`/`flatpak`/`curl`/`qml6`/`gamescope`/`systemctl`. `tests/run.sh` (Moonlight + tagging + client selection, 81 assertions) and `tests/run-steam.sh` (Steam/Steam Link/env, 69 assertions) run on any Linux box with no hardware and no network; CI runs both. See `tests/README.md` |
+| `tests/` | Offline fixture suites for the kit's shell logic — a fake X display (`tests/bin/xprop`) plus fake `steam`/`moonlight`/`flatpak`/`curl`/`qml6`/`gamescope`/`systemctl`/`systemd-run`. `tests/run.sh` (scope launching + Moonlight + tagging + client selection, 99 assertions) and `tests/run-steam.sh` (Steam/Steam Link/env, 72 assertions) run on any Linux box with no hardware and no network; CI runs both. **They cannot catch a change in gamescope's behaviour** — all 126 passed on the day a point release broke the kit completely; the live bench is the only gate on a version bump. See `tests/README.md` |
 
 ## Running a measurement
 
@@ -283,19 +285,74 @@ reader before starting another. Lines are `fps=<float>` and `focus=<appid>` at a
 `measure.sh` samples it for 4 s, which takes the stream over from any other reader for
 that window.
 
+## How an app is identified: its cgroup scope
+
+**Every app the kit launches runs inside its own systemd scope,
+`app-steam-app<id>-<pid>.scope`, and that is how gamescope knows which app it
+is.** gamescope's only cgroup parser is
+`sscanf(cgroup, "app-steam-app%u-%d.scope", &appid, &pid)` in
+`src/Utils/Process.cpp`, evaluated at window creation from the pid the X server
+reports for the client (XRes) — not from anything the window carries. The
+`app-steam-app` prefix is Steam's own name for a launched app's scope and is an
+upstream contract, not ours to rename. `docs/V2_DESIGN.md` §5 states the rule
+the same way: **scope first, tag as repair, never by name.**
+
+This is not a refinement. Post-hoc `STEAM_GAME` tagging on its own **stopped
+working** when gamescope was pinned from 3.16.23 to 3.16.28
+(`jedwards1230/homelab-ansible#321`). Measured on the bench, 2026-09-06:
+
+| launch | `GAMESCOPE_FOCUSABLE_WINDOWS` |
+|---|---|
+| the session's own Moonlight, post-hoc tag attempted | *empty* |
+| control: plain launch, no scope | *empty* |
+| inside `app-steam-app9003-2970.scope` | `8388625, 9003, 2998` |
+
+The scoped launch worked with **no tagging at all** — `STEAM_GAME` was never
+set — and the display went to `fps=120.000000 / focus=9003`. cgroups confirmed
+it: the working pid sat in the scope, the two failing ones in a plain
+`session-N.scope`. The unscoped case is also a chicken-and-egg for the kit
+itself, because `gs_tag_pid` *discovers* candidate windows through that same
+empty atom.
+
+`lib.sh` owns the mechanism: `gs_scope_ready` checks that `systemd-run` and a
+session bus (`XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS`, both carried in
+`/tmp/tv-shell-gamescope.env` for SSH callers) are there and **refuses loudly**
+rather than falling back to an unscoped launch; `gs_scope_run <appid> <cmd...>`
+execs the command under `systemd-run --user --scope --collect
+--unit=app-steam-app<appid>-<pid>`. Because both `systemd-run --scope` and
+`gs_scope_run` exec, the pid a caller captures with `$!` is the app's own pid
+the whole way down, so pid-keyed tagging, `--family` tree walks and the
+supervisor's `wait` are unchanged. A cgroup is inherited, so a process family
+(Steam → steamwebhelper → the `streaming_client` a Remote Play stream spawns)
+and a client's later windows are all identified without a single tag.
+
+Since the app id is fixed by the scope name **at launch**, the base-layer
+preference is now written *before* the process exists: there is no window in
+which the app is on screen under the wrong base layer, and nothing racing a tag
+that may never land.
+
+The one deliberate exception is `launch.sh overlay`: an overlay is not an app,
+it is a layer over one, and giving it an app id would make it a focus
+candidate. It keeps `STEAM_OVERLAY` + `STEAM_INPUT_FOCUS`.
+
 `launch.sh moonlight` runs Moonlight on X11 (`QT_QPA_PLATFORM=xcb`, `SDL_VIDEODRIVER=x11`,
-`ENABLE_GAMESCOPE_WSI=1`), sets the base-layer preference to `9003,9001`, then tags
-**every X window of Moonlight's pid** `STEAM_GAME=9003` as it appears, so gamescope
-switches to the stream the moment its window exists and `focus.sh app 9001` brings the
-shell back. Tagging is by pid, not by title, because **the stream is not the window
+`ENABLE_GAMESCOPE_WSI=1`) in `app-steam-app9003-<pid>.scope`, sets the base-layer
+preference to `9003,9001` before launching, and then makes one **repair** pass tagging
+the windows of Moonlight's pid `STEAM_GAME=9003`; `focus.sh app 9001` brings the shell
+back. The repair pass is by pid, not by title, because **the stream is not the window
 named "Moonlight"**: that is the Qt main window, which `moonlight stream` unmaps once the
 session starts. The stream window is a second X window (`WM_NAME "<host> - Moonlight"`,
 `WM_CLASS "moonlight"`, `_NET_WM_PID` = Moonlight's pid) created after the session
-handshake, 5-20 s in. Tagging only the first one leaves the stream out of
-`GAMESCOPE_FOCUSABLE_APPS` and the TV on the shell for the whole run, which is exactly
-what the first phase-3 attempt did. `gs_tag_pid` (lib.sh) re-scans once a second for
-up to 60 s and stops once a window named `* - Moonlight` is tagged; each window is
-tagged once and printed as `tagged 0x... "<name>" STEAM_GAME=9003 (t+12s)`.
+handshake, 5-20 s in — and it belongs to the same process in the same scope, so
+gamescope resolves it to 9003 the moment it exists, tagged or not. That is what retired
+`client.sh`'s day-long background tag watcher: with the scope doing the identifying,
+a watcher waiting all day for a window that needs no tag is a process that looks busy
+and is not. `gs_tag_pid` (lib.sh) re-scans once a second for up to 60 s and stops once a
+window named `* - Moonlight` is tagged; each window is tagged once and printed as
+`tagged 0x... "<name>" STEAM_GAME=9003 (t+12s)`. Its remaining job is the
+`STEAM_GAME` override for a window whose scope did **not** resolve — a pid namespace
+(Plex under `bwrap`), or a browser that handed off to an already-running instance — and
+the kit's window-by-window report of what actually appeared.
 
 There is no window-enumeration call to lean on: xprop is the only X client here and
 gamescope publishes no `_NET_CLIENT_LIST` (`GAMESCOPE_FOCUSABLE_WINDOWS` lists only

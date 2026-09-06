@@ -80,7 +80,154 @@ gs_moonlight_x11_env() {
 }
 
 # ---------------------------------------------------------------------------
-# Tagging windows by pid.
+# Launching an app inside its own systemd scope.
+#
+# gamescope's PRIMARY app identifier is the cgroup scope the client process
+# sits in. Its only cgroup parser is
+#
+#     sscanf(cgroup, "app-steam-app%u-%d.scope", &appid, &pid)
+#
+# (`src/Utils/Process.cpp`), evaluated at window creation from the pid the X
+# server reports for the client (XRes), not from anything the window carries.
+# The `app-steam-app` prefix is an upstream contract — Steam's own name for a
+# launched app's scope — and is not ours to rename. `docs/V2_DESIGN.md` §5
+# states the same rule: **scope first, tag as repair, never by name.**
+#
+# This matters because post-hoc tagging alone STOPPED WORKING. Measured on the
+# bench 2026-09-06, gamescope 3.16.28 (pinned up from 3.16.23 that day,
+# jedwards1230/homelab-ansible#321):
+#
+#   launch                                    GAMESCOPE_FOCUSABLE_WINDOWS
+#   ---------------------------------------   ---------------------------
+#   plain launch, post-hoc tag attempted      (empty)
+#   plain launch, control                     (empty)
+#   inside app-steam-app9003-2970.scope       8388625, 9003, 2998
+#
+# The scoped launch worked with NO tagging at all — `STEAM_GAME` was never
+# set — and the display went to `fps=120.000000 / focus=9003`. The unscoped
+# ones produced no focus candidate, which is also a chicken-and-egg for the
+# kit: `gs_tag_pid` DISCOVERS candidate windows through
+# `GAMESCOPE_FOCUSABLE_WINDOWS`, so with that atom empty it can never find a
+# window to tag. Tagging remains as the documented repair path for a window
+# whose scope did not resolve (a pid namespace — Plex under `bwrap` — or a
+# browser that handed off to an already-running instance), never as the
+# primary mechanism.
+
+# gs_scope_ready -> 0 when a scope can be created, 1 with a clear error on
+# stderr otherwise. `systemd-run --user` talks to the caller's session bus, so
+# XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS must both be present — over SSH
+# neither usually is. DBUS_SESSION_BUS_ADDRESS is derived from the runtime dir
+# only when that socket actually exists; there is deliberately NO fallback to
+# an unscoped launch, because an unscoped launch is the broken case above and
+# would fail silently at the far end.
+#
+# Call this in the FOREGROUND before backgrounding gs_scope_run: the derived
+# DBUS_SESSION_BUS_ADDRESS export has to survive into the child, and an error
+# has to reach the operator instead of a subshell that vanishes.
+gs_scope_ready() {
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        echo "gs_scope_ready: no systemd-run on PATH; gamescope identifies an app by its cgroup scope, so a scope-less launch cannot be focused" >&2
+        return 1
+    fi
+    if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+        echo "gs_scope_ready: XDG_RUNTIME_DIR is unset, so 'systemd-run --user' has no session bus to talk to" >&2
+        echo "  source the session env file first (/tmp/tv-shell-gamescope.env), which carries both it and DBUS_SESSION_BUS_ADDRESS" >&2
+        return 1
+    fi
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+        else
+            echo "gs_scope_ready: DBUS_SESSION_BUS_ADDRESS is unset and $XDG_RUNTIME_DIR/bus is not a socket; 'systemd-run --user' has no session bus" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# gs_scope_unit <outvar> <appid> <launcher-pid> -> assigns the unit name,
+# WITHOUT the `.scope` suffix, which is the form `systemd-run --unit` takes.
+# It assigns rather than prints so the one place the name is formatted can be
+# called without a command substitution: `$(...)` forks a subshell, and
+# $BASHPID inside that subshell is the SUBSHELL's pid, not the pid that is
+# about to become the app.
+gs_scope_unit() {
+    printf -v "${1:?gs_scope_unit: outvar}" 'app-steam-app%s-%s' \
+        "${2:?gs_scope_unit: appid}" "${3:?gs_scope_unit: launcher pid}"
+}
+
+# gs_scope_run <appid> <cmd...> -> EXEC <cmd> inside a transient
+# `app-steam-app<appid>-<pid>.scope`, so gamescope resolves every window the
+# command (or any child of it — a process family inherits the cgroup) creates
+# to <appid> with no tagging at all.
+#
+# It execs on purpose. `systemd-run --scope` also execs, so the pid the caller
+# captures with `$!` is the app's own pid the whole way down (verified): so
+# `gs_tag_pid`'s pid matching, `--family` tree walks and a supervisor's `wait`
+# all keep working unchanged. Backgrounding and redirection are the caller's
+# job:
+#
+#     gs_scope_ready || exit 2
+#     gs_scope_run 9003 nohup moonlight "$@" > "$LOG" 2>&1 &
+#     PID=$!
+#
+# The unit is named after $BASHPID — the pid of the backgrounded subshell,
+# which is the pid the app itself ends up with — so it is unique per launch and
+# a supervisor relaunching its child can never collide with a scope whose
+# processes have not been reaped yet. `--collect` also removes a scope that
+# ended up failed, which nothing else would.
+gs_scope_run() {
+    local appid="${1:?gs_scope_run: appid}" unit
+    shift
+    [ $# -ge 1 ] || { echo "gs_scope_run: no command" >&2; return 2; }
+    gs_scope_ready || return 1
+    gs_scope_unit unit "$appid" "$BASHPID"
+    # No --quiet: `man systemd-run` says it "may not be combined with ...
+    # --scope". This systemd (261) tolerates the pair, but relying on
+    # undocumented tolerance is exactly the mistake this commit exists to fix —
+    # the kit leaned on gamescope tolerating post-hoc tagging while the
+    # documented contract was scope-first, and a point release ended that. The
+    # `Running as unit: <name>` line it would have suppressed is useful anyway:
+    # it records the scope name in the client log independently of us.
+    exec systemd-run --user --scope --collect --unit="$unit" -- "$@"
+}
+
+# gs_scope_of <pid> -> the `app-steam-app<id>-<pid>.scope` unit the pid is in,
+# or "" when it is in none (an unscoped launch, or a kernel too old for
+# cgroup v2). Informational: it is what gamescope reads, so it is the one
+# honest post-launch confirmation the kit can make without asking gamescope.
+gs_scope_of() {
+    sed -n 's,.*/\(app-steam-app[0-9]*-[0-9]*\.scope\)$,\1,p' "/proc/$1/cgroup" 2>/dev/null | head -1
+}
+
+# gs_scope_check <pid> <appid> -> report the scope <pid> actually ended up in.
+# Returns 1 (and warns) only when the process is still alive and is NOT in a
+# scope for <appid>: a launcher that has already exited (Steam's does) tells us
+# nothing either way, and saying so is more honest than a warning that reads
+# like a failure.
+gs_scope_check() {
+    local got
+    got="$(gs_scope_of "$1")"
+    case "$got" in
+        app-steam-app"$2"-*)
+            echo "scope: $got — gamescope resolves this app's windows to $2 with no tagging"
+            return 0
+            ;;
+    esac
+    if ! kill -0 "$1" 2>/dev/null; then
+        echo "scope: pid $1 already exited; its scope holds whatever it spawned"
+        return 0
+    fi
+    if [ -z "$got" ]; then
+        echo "WARN: pid $1 is in no app-steam-app*.scope; gamescope cannot identify it by cgroup and the STEAM_GAME repair below is all there is" >&2
+    else
+        echo "WARN: pid $1 is in $got, which is not app $2" >&2
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Tagging windows by pid — the REPAIR path (see gs_scope_run above).
 #
 # gamescope's SteamControlled focus policy only considers X11 windows that
 # carry STEAM_GAME. Tagging "the window named X" (`xprop -name`) reaches ONE

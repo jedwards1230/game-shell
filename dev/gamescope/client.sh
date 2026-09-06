@@ -3,7 +3,8 @@
 #
 # Runs INSIDE gamescope: DISPLAY (Xwayland), WAYLAND_DISPLAY and
 # GAMESCOPE_WAYLAND_DISPLAY are set by gamescope. It launches ONE primary
-# client as an X11 client, tags it so gamescope's focus policy will show it,
+# client as an X11 client INSIDE ITS OWN app-steam-app<id>-<pid>.scope — which
+# is how gamescope's focus policy identifies an app (lib.sh gs_scope_run) —
 # makes it the base layer, and then supervises it forever so the session stays
 # up (gamescope also has --keep-alive).
 #
@@ -37,8 +38,10 @@ MOONLIGHT_LOG="$LOG_DIR/moonlight.log"
 # Empty means the GUI grid; `stream <host> <app>` boots straight into a stream.
 # shellcheck disable=SC2206 # word-splitting is the documented contract
 MOONLIGHT_ARGS=(${TV_SHELL_GS_MOONLIGHT_ARGS:-})
-# How long the moonlight window watch runs (see tag_moonlight).
-TAG_TIMEOUT="${TV_SHELL_GS_TAG_TIMEOUT:-86400}"
+# How long the one-shot repair pass waits for Moonlight's first window (see
+# tag_moonlight). Seconds, not the day it used to be: the pass no longer has to
+# outlive the client waiting for a stream window the scope already identifies.
+TAG_TIMEOUT="${TV_SHELL_GS_TAG_TIMEOUT:-30}"
 
 log() { printf 'tv-shell-gamescope[client]: %s\n' "$*"; }
 
@@ -47,6 +50,11 @@ log() { printf 'tv-shell-gamescope[client]: %s\n' "$*"; }
     printf 'export WAYLAND_DISPLAY=%q\n' "${WAYLAND_DISPLAY:-}"
     printf 'export GAMESCOPE_WAYLAND_DISPLAY=%q\n' "${GAMESCOPE_WAYLAND_DISPLAY:-}"
     printf 'export XDG_RUNTIME_DIR=%q\n' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    # launch.sh arrives over SSH with no session bus of its own, and
+    # `systemd-run --user` (how every app gets its identifying cgroup scope)
+    # needs one. Carry the session's.
+    printf 'export DBUS_SESSION_BUS_ADDRESS=%q\n' \
+        "${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus}"
     printf 'export XAUTHORITY=%q\n' "${XAUTHORITY:-}"
     printf 'export TV_SHELL_GS_SHELL_APPID=%q\n' "$SHELL_APPID"
     printf 'export TV_SHELL_GS_CLIENT=%q\n' "$CLIENT"
@@ -60,6 +68,15 @@ case "$CLIENT" in
         exit 2
         ;;
 esac
+
+# The primary child is launched inside its own app-steam-app<id>-<pid>.scope,
+# which is how gamescope identifies an app (lib.sh gs_scope_run). Checked once,
+# up front and fatally: without a session bus there is no scope, and without a
+# scope the client renders into a session that will never make it the focus.
+if ! gs_scope_ready; then
+    log "FATAL: cannot create a systemd scope for the primary child (see the error above)"
+    exit 2
+fi
 
 # --- proto: the prototype QML shell -----------------------------------------
 
@@ -83,30 +100,30 @@ setup_proto() {
     log "qml runtime: $QML_BIN ($(gs_qml_version "$QML_BIN"))"
 }
 
-# Tag the shell window with a game id so SteamControlled focus will consider
-# it, then make it the base layer. The window maps asynchronously, so this
-# polls (gs_tag_pid, lib.sh). A relaunched shell is a NEW X11 window, so this
-# must run after every launch or focus.sh / launch.sh cannot select the shell
-# again after its first crash. Tagging is by pid, not by title alone: the
-# title is only a lookup hint, and a window carrying it is tagged only when its
-# _NET_WM_PID is THIS shell's pid, so a previous instance's window that is
-# still being torn down can never be the one that gets tagged.
+# The REPAIR pass for the shell's own window: the scope already gives it app
+# id $SHELL_APPID, so this only writes the STEAM_GAME override and reports what
+# appeared. It stays bounded and one-shot. A window carrying the title is
+# touched only when its _NET_WM_PID is THIS shell's pid, so a previous
+# instance's window still being torn down can never be the one that gets
+# tagged.
 tag_shell() {
     [ "$QT_QPA_PLATFORM" = "xcb" ] || return 0
     local out
     if out="$(TV_SHELL_GS_POLL_SECS="${TV_SHELL_GS_POLL_SECS:-0.5}" \
             gs_tag_pid "$CLIENT_PID" "$SHELL_APPID" --timeout 10 --expect 1 --name "$SHELL_TITLE" 2>&1)"; then
-        "$KIT/focus.sh" app "$SHELL_APPID" || true
-        log "tagged '$SHELL_TITLE' (pid $CLIENT_PID) as app $SHELL_APPID and set it as base layer: $out"
+        log "tagged '$SHELL_TITLE' (pid $CLIENT_PID) as app $SHELL_APPID (base layer $SHELL_APPID, set at launch): $out"
         return 0
     fi
-    log "WARN: no window of the shell (pid $CLIENT_PID) appeared within 10s; focus.sh cannot select it: $out"
+    log "WARN: no window of the shell (pid $CLIENT_PID) appeared within 10s: $out"
 }
 
 launch_proto() {
-    "$QML_BIN" "$KIT/proto-shell.qml" &
+    # Base layer first: the app id comes from the scope name, so it is known
+    # before the process exists and cannot race a tag.
+    "$KIT/focus.sh" app "$SHELL_APPID" || true
+    gs_scope_run "$SHELL_APPID" "$QML_BIN" "$KIT/proto-shell.qml" &
     CLIENT_PID=$!
-    log "prototype shell pid=$CLIENT_PID qpa=$QT_QPA_PLATFORM"
+    log "prototype shell pid=$CLIENT_PID qpa=$QT_QPA_PLATFORM scope=app-steam-app$SHELL_APPID-$CLIENT_PID.scope"
     tag_shell
 }
 
@@ -124,37 +141,41 @@ setup_moonlight() {
     fi
 }
 
-# Base layer first, then a watch that keeps tagging every window of the pid.
+# The repair pass for Moonlight, bounded and one-shot — deliberately NOT the
+# day-long background watcher this used to run.
 #
-# The base layer goes first because gamescope switches to it the moment a
-# window carrying the appid is tagged, so there is no window in which an
-# untagged Moonlight is on screen with the wrong base layer.
+# That watcher existed because Moonlight's stream window is a SECOND X11 window
+# of the same pid, created whenever the person on the couch picks a game,
+# minutes after launch: a one-shot `--expect 1` tagged the GUI grid and
+# stopped, leaving the stream window untagged and unselectable. Scope
+# identification retires that whole problem. The stream window belongs to the
+# same process, in the same cgroup, so gamescope resolves it to
+# $MOONLIGHT_APPID the moment it is created — no tag, no watch, nothing to
+# arrive late. Keeping a day-long watcher whose only job is now redundant would
+# be a process that looks like it is doing something and is not; the bench run
+# on 2026-09-06 logged exactly that line ("watching its windows for 86400s")
+# while nothing was ever tagged, because with no scope the atom it discovers
+# windows through was empty. So it is gone.
 #
-# The watch runs in the BACKGROUND and for the life of the client, unlike the
-# shell's one-shot tag, because Moonlight's stream window is a SECOND X11
-# window of the same pid that only exists once a stream starts — which here
-# means whenever the person on the couch picks a game, minutes after launch. A
-# one-shot `--expect 1` would tag the GUI grid and stop, leaving the stream
-# window with no STEAM_GAME and therefore unselectable by gamescope's
-# SteamControlled policy. gs_tag_pid ends by itself when the pid is gone, so
-# the watch dies with the client it belongs to.
-#
-# A relaunched Moonlight is a NEW X11 window (same reason as tag_shell), so
-# this runs after every launch, and the previous watch is ended first.
+# What remains is a short pass over the FIRST window, for its report and for
+# the STEAM_GAME override if that window's scope did not resolve.
 tag_moonlight() {
-    [ -z "${TAG_PID:-}" ] || kill "$TAG_PID" 2>/dev/null
-    TAG_PID=""
-    "$KIT/focus.sh" app "$MOONLIGHT_APPID" || true
-    log "moonlight (pid $CLIENT_PID) is app $MOONLIGHT_APPID and the base layer; watching its windows for ${TAG_TIMEOUT}s"
-    gs_tag_pid "$CLIENT_PID" "$MOONLIGHT_APPID" --timeout "$TAG_TIMEOUT" \
-        --class moonlight --name Moonlight --log "$MOONLIGHT_LOG" &
-    TAG_PID=$!
+    local out
+    if out="$(gs_tag_pid "$CLIENT_PID" "$MOONLIGHT_APPID" --timeout "$TAG_TIMEOUT" --expect 1 \
+            --class moonlight --name Moonlight --log "$MOONLIGHT_LOG" 2>&1)"; then
+        log "moonlight (pid $CLIENT_PID) is app $MOONLIGHT_APPID (base layer $MOONLIGHT_APPID, set at launch): $out"
+        return 0
+    fi
+    log "WARN: no window of moonlight (pid $CLIENT_PID) appeared within ${TAG_TIMEOUT}s: $out"
 }
 
 launch_moonlight() {
-    "$MOONLIGHT_BIN" ${MOONLIGHT_ARGS[@]+"${MOONLIGHT_ARGS[@]}"} > "$MOONLIGHT_LOG" 2>&1 &
+    # Base layer first — the app id is fixed by the scope name at launch.
+    "$KIT/focus.sh" app "$MOONLIGHT_APPID" || true
+    gs_scope_run "$MOONLIGHT_APPID" "$MOONLIGHT_BIN" \
+        ${MOONLIGHT_ARGS[@]+"${MOONLIGHT_ARGS[@]}"} > "$MOONLIGHT_LOG" 2>&1 &
     CLIENT_PID=$!
-    log "moonlight pid=$CLIENT_PID qpa=$QT_QPA_PLATFORM args=[${MOONLIGHT_ARGS[*]:-}] (log $MOONLIGHT_LOG)"
+    log "moonlight pid=$CLIENT_PID qpa=$QT_QPA_PLATFORM args=[${MOONLIGHT_ARGS[*]:-}] scope=app-steam-app$MOONLIGHT_APPID-$CLIENT_PID.scope (log $MOONLIGHT_LOG)"
     tag_moonlight
 }
 

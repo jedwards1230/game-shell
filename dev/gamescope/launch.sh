@@ -1,9 +1,19 @@
 #!/bin/bash
 # Launch test clients into the running gamescope prototype session from an SSH
 # session (or from inside it). Reads /tmp/tv-shell-gamescope.env for DISPLAY /
-# WAYLAND_DISPLAY so the clients land inside gamescope, not on a stray socket.
+# WAYLAND_DISPLAY so the clients land inside gamescope, not on a stray socket,
+# and for XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS so it can create scopes.
+#
+# EVERY app verb launches its client inside its own systemd scope,
+# app-steam-app<id>-<pid>.scope, which is how gamescope identifies an app
+# (lib.sh gs_scope_run). The STEAM_GAME tagging each verb still does afterwards
+# is the repair path for a window whose scope did not resolve, not the way the
+# app is identified.
 #
 #   launch.sh overlay                 QML overlay tagged STEAM_OVERLAY + STEAM_INPUT_FOCUS
+#                                     (deliberately NOT scoped: an overlay is not an app,
+#                                     it is a layer over one, and giving it an app id
+#                                     would make it a focus candidate)
 #   launch.sh x11 <id> [opts] [cmd...] any X11 app; every window of its pid is tagged
 #                                     STEAM_GAME=<id> as it appears. Options go BEFORE the
 #                                     command: --name <wm-name> / --class <wm-class> (lookup
@@ -209,13 +219,25 @@ moonlight_headless() {
         | grep -v -i -E 'ffmpeg|vaapi|Format 0x'
 }
 
-# tag_pid_then_base <pid> <appid> [gs_tag_pid opts...] -> base layer preference
-# first (gamescope falls back to the shell until a window with <appid> exists,
-# then switches the moment one is tagged), then tag every window of <pid>.
-tag_pid_then_base() {
+# base_layer <appid-list> -> set the base-layer preference. Called BEFORE the
+# app is launched: with scope identification the app id is known at launch
+# time, so this no longer races a tag that may never land. gamescope falls
+# back to the shell until a window resolving to <appid> exists, then switches
+# the moment one does.
+base_layer() {
+    "$KIT/focus.sh" app "$1"
+}
+
+# repair_tag <pid> <appid> [gs_tag_pid opts...] -> the REPAIR pass: tag every
+# window of <pid> with STEAM_GAME=<appid>. With the app launched in its own
+# scope gamescope already resolves its windows, so this is a belt-and-braces
+# override for a window whose scope did not resolve (a pid namespace, a
+# hand-off to an already-running instance) and the kit's window-by-window
+# report of what actually appeared. It is never the primary mechanism — see
+# gs_scope_run in lib.sh.
+repair_tag() {
     local pid="$1" appid="$2"
     shift 2
-    "$KIT/focus.sh" app "$appid,$SHELL_APPID"
     gs_tag_pid "$pid" "$appid" "$@"
 }
 
@@ -261,10 +283,13 @@ case "${1:-}" in
         export QT_QPA_PLATFORM=xcb
         export SDL_VIDEODRIVER=x11
         export ENABLE_GAMESCOPE_WSI=1
-        nohup env "${ENV_OPTS[@]}" "$@" > "$LOG_DIR/x11-$APPID.log" 2>&1 &
+        gs_scope_ready || exit 2
+        base_layer "$APPID,$SHELL_APPID"
+        gs_scope_run "$APPID" nohup env "${ENV_OPTS[@]}" "$@" > "$LOG_DIR/x11-$APPID.log" 2>&1 &
         PID=$!
-        echo "x11 app pid $PID (log $LOG_DIR/x11-$APPID.log)"
-        tag_pid_then_base "$PID" "$APPID" --timeout 20 --log "$LOG_DIR/x11-$APPID.log" "${NAME_OPTS[@]}"
+        echo "x11 app pid $PID in app-steam-app$APPID-$PID.scope (log $LOG_DIR/x11-$APPID.log)"
+        repair_tag "$PID" "$APPID" --timeout 20 --log "$LOG_DIR/x11-$APPID.log" "${NAME_OPTS[@]}"
+        gs_scope_check "$PID" "$APPID" || true
         ;;
     apps)
         HOST="${2:?launch.sh apps <host>}"
@@ -330,8 +355,10 @@ case "${1:-}" in
             # self-test, and a Wayland window has no STEAM_GAME selector anyway.
             export QT_QPA_PLATFORM=wayland
             export SDL_VIDEODRIVER=wayland
-            nohup "$MOONLIGHT_BIN" "$@" > "$LOG_DIR/moonlight.log" 2>&1 &
-            echo "moonlight (wayland) pid $! (log $LOG_DIR/moonlight.log)"
+            gs_scope_ready || exit 2
+            gs_scope_run "$MOONLIGHT_APPID" nohup "$MOONLIGHT_BIN" "$@" > "$LOG_DIR/moonlight.log" 2>&1 &
+            PID=$!
+            echo "moonlight (wayland) pid $PID in app-steam-app$MOONLIGHT_APPID-$PID.scope (log $LOG_DIR/moonlight.log)"
             echo "Wayland-native windows have no STEAM_GAME selector; if it does not appear, run:"
             echo "  focus.sh list   # then focus.sh window <xid> is X11-only, so check GAMESCOPE_FOCUSABLE_APPS"
             exit 0
@@ -342,22 +369,30 @@ case "${1:-}" in
         if [ -n "${GAMESCOPE_WSI_FORCE_BYPASS:-}" ]; then
             echo "GAMESCOPE_WSI_FORCE_BYPASS=$GAMESCOPE_WSI_FORCE_BYPASS (XWayland bypass forced)"
         fi
-        nohup "$MOONLIGHT_BIN" "$@" > "$LOG_DIR/moonlight.log" 2>&1 &
+        gs_scope_ready || exit 2
+        # The base layer goes first: the app id is fixed by the scope name at
+        # launch, so there is no window in which Moonlight is on screen under
+        # the wrong base layer, and nothing to race.
+        base_layer "$MOONLIGHT_APPID,$SHELL_APPID"
+        gs_scope_run "$MOONLIGHT_APPID" nohup "$MOONLIGHT_BIN" "$@" > "$LOG_DIR/moonlight.log" 2>&1 &
         PID=$!
-        echo "moonlight (xcb) pid $PID (log $LOG_DIR/moonlight.log)"
+        echo "moonlight (xcb) pid $PID in app-steam-app$MOONLIGHT_APPID-$PID.scope (log $LOG_DIR/moonlight.log)"
         echo "HDR signature in the log: 'server hdr output enabled: true' + 'hdr formats exposed to client: true'"
         # K6: the stream is NOT the window named "Moonlight" (that is the Qt
-        # main window, gone once the session starts). Tag every window of the
-        # pid as it appears, and keep watching: the stream window is created
-        # after the session handshake, 5-20 s in. The WSI log names its xid
-        # the moment it exists; the name lookup covers the GUI (pairing, no
-        # `stream` verb). In stream mode the watch ends once the stream window
-        # ("<host> - Moonlight") is tagged.
+        # main window, gone once the session starts). The stream window is a
+        # SECOND window of the same pid, created after the session handshake
+        # 5-20 s in — and it is inside the same scope, so gamescope resolves it
+        # to 9003 the moment it exists whether or not the repair pass below
+        # ever sees it. The pass still runs: it is the kit's report of which
+        # windows actually appeared, and the STEAM_GAME override for one whose
+        # scope did not resolve. In stream mode it ends once the stream window
+        # ("<host> - Moonlight") is reached.
         DONE_OPTS=(--expect 1)
         [ "${1:-}" = "stream" ] && DONE_OPTS=(--done-name '* - Moonlight')
-        tag_pid_then_base "$PID" "$MOONLIGHT_APPID" --timeout 60 --class moonlight \
+        repair_tag "$PID" "$MOONLIGHT_APPID" --timeout 60 --class moonlight \
             --log "$LOG_DIR/moonlight.log" --name Moonlight "${DONE_OPTS[@]}"
         rc=$?
+        gs_scope_check "$PID" "$MOONLIGHT_APPID" || true
         "$KIT/focus.sh" list 2>/dev/null | grep -E 'FOCUSABLE_APPS|FOCUSED_APP'
         exit $rc
         ;;
@@ -431,18 +466,32 @@ case "${1:-}" in
                 exit 2
             fi
         fi
-        nohup env "${ENV_OPTS[@]}" "${CMD[@]}" > "$LOG_DIR/$VERB.log" 2>&1 &
+        gs_scope_ready || exit 2
+        base_layer "$BASE_LIST"
+        echo "base layer preference $BASE_LIST set before launch"
+        # The whole family lands in this one scope: a cgroup is inherited, so
+        # steamwebhelper and the streaming_client a Remote Play stream spawns
+        # resolve to <appid> without being tagged. A window Steam tagged itself
+        # still wins — STEAM_GAME is authoritative where present.
+        gs_scope_run "$APPID" nohup env "${ENV_OPTS[@]}" "${CMD[@]}" > "$LOG_DIR/$VERB.log" 2>&1 &
         PID=$!
-        echo "$VERB pid $PID: env ${ENV_OPTS[*]} ${CMD[*]} (log $LOG_DIR/$VERB.log)"
-        "$KIT/focus.sh" app "$BASE_LIST"
-        echo "base layer preference $BASE_LIST set; waiting for the first window of the family"
-        gs_tag_pid "$PID" "$APPID" --family --keep-existing --timeout 60 --expect 1 \
+        echo "$VERB pid $PID in app-steam-app$APPID-$PID.scope: env ${ENV_OPTS[*]} ${CMD[*]} (log $LOG_DIR/$VERB.log)"
+        echo "waiting for the first window of the family"
+        repair_tag "$PID" "$APPID" --family --keep-existing --timeout 60 --expect 1 \
             --log "$LOG_DIR/$VERB.log" "${CLASSES[@]}" "${NAMES[@]}"
         rc=$?
+        gs_scope_check "$PID" "$APPID" || true
         "$KIT/focus.sh" list 2>/dev/null | grep -E 'FOCUSABLE_APPS|FOCUSED_APP|BASELAYER_APPID'
-        # keep tagging new family windows (the Remote Play window comes when
-        # the operator starts a stream on the pad) without holding the SSH
+        # Keep watching the family's new windows (the Remote Play window comes
+        # when the operator starts a stream on the pad) without holding the SSH
         # session; one watcher per verb, the previous one is replaced.
+        #
+        # Unlike client.sh's day-long Moonlight watcher — deleted, because the
+        # scope had made it redundant — this one is kept deliberately: those
+        # windows are already identified by the inherited cgroup, so it is here
+        # to OBSERVE, not to identify. Its `--keep-existing` report of which
+        # windows Steam tagged itself (769, or the streamed app's id) is one of
+        # the things this verb exists to measure.
         # pkill -f takes an ERE, so anchor on this kit's own focus.sh path
         # (metacharacters escaped) rather than a loose "focus.sh" match.
         KIT_RE="$(printf '%s' "$KIT" | sed 's,[][\\.*^$/+?(){}|],\\&,g')"
@@ -459,14 +508,19 @@ case "${1:-}" in
         ;;
     xmessage)
         shift
-        nohup xmessage -center "${*:-hello from gamescope}" > "$LOG_DIR/xmessage.log" 2>&1 &
+        gs_scope_ready || exit 2
+        base_layer "9002,$SHELL_APPID"
+        gs_scope_run 9002 nohup xmessage -center "${*:-hello from gamescope}" > "$LOG_DIR/xmessage.log" 2>&1 &
         PID=$!
-        echo "xmessage pid $PID"
-        # xmessage is an Xt client: no _NET_WM_PID, so match its WM_CLASS
-        tag_pid_then_base "$PID" 9002 --timeout 10 --expect 1 --name xmessage --class xmessage
+        echo "xmessage pid $PID in app-steam-app9002-$PID.scope"
+        # xmessage is an Xt client: no _NET_WM_PID, so the repair pass has to
+        # match its WM_CLASS. The scope needs neither — it is read off the pid
+        # the X server reports, not off anything the window carries, which is
+        # exactly why scope identification is the primary mechanism.
+        repair_tag "$PID" 9002 --timeout 10 --expect 1 --name xmessage --class xmessage
         ;;
     *)
-        sed -n '2,39p' "$0"
+        sed -n '2,65p' "$0"
         exit 2
         ;;
 esac

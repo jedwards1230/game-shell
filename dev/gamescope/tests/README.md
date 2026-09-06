@@ -5,8 +5,8 @@ Two offline suites that exercise `dev/gamescope/` — `focus.sh`, `launch.sh`,
 No gamescope, no Steam, no Moonlight, no network, no display server.
 
 ```bash
-./dev/gamescope/tests/run.sh         # Moonlight + focus/tagging suite  (81 assertions)
-./dev/gamescope/tests/run-steam.sh   # Steam / Steam Link / env suite   (69 assertions)
+./dev/gamescope/tests/run.sh         # Moonlight + focus/tagging suite  (99 assertions)
+./dev/gamescope/tests/run-steam.sh   # Steam / Steam Link / env suite   (72 assertions)
 ```
 
 Each script takes an optional path to the kit under test; with no argument it
@@ -27,6 +27,16 @@ that. `-set STEAM_GAME` appends to `tag.log`, which is what the assertions read.
 streaming_client) so the `--family` pid-tree walk has something to walk;
 `bin/moonlight`, `bin/flatpak`, `bin/curl`, `bin/qml6` and `bin/gamescope`
 record their argv and environment and otherwise idle.
+
+`bin/systemd-run` records the argv and the `--unit` name of every scope launch
+(into `systemd-run.argv` and `scopes.log`) and then `exec`s the command, exactly
+as the real `systemd-run --scope` does — so the pid the kit captured with `$!`
+stays the app's own pid and every pid-keyed assertion downstream still holds.
+It is what lets a fixture assert that each verb creates a scope whose unit name
+matches gamescope's `app-steam-app%u-%d.scope` parser, with the verb's own app
+id in it. Both suites also set `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
+into the scratch dir, because `gs_scope_ready` checks the environment before
+calling `systemd-run` at all.
 
 `bin/systemctl` exists so a fixture can assert whether `session.sh` **started**
 `tv-shell-input.service` — the daemon that must not run in
@@ -65,14 +75,40 @@ argv carries no scratch path and the fixture doesn't own their pids. They are
 bounded by the `TV_SHELL_GS_WATCH_SECS` / `TV_SHELL_GS_STEAM_WATCH_SECS` values
 each section sets (0.2–6s), so they exit on their own within seconds.
 
+## What they cannot guard — read this before trusting a green run
+
+**These fixtures cannot catch a change in gamescope's behaviour, and one of the
+worst bugs the kit has had was exactly that.**
+
+They run against a fake `xprop` replaying a scripted window list. That fake
+answers however the fixture wrote it, so the suites verify *our logic* —
+did the kit tag the window it should have, create the scope it should have,
+refuse the launch it should have — and nothing about what the compositor on the
+other side actually does with any of it.
+
+On 2026-09-06 gamescope was pinned from 3.16.23 up to 3.16.28
+(`jedwards1230/homelab-ansible#321`). Under 3.16.28 the kit's post-hoc window
+tagging stopped working outright: `GAMESCOPE_FOCUSABLE_WINDOWS` came back
+**empty** with Moonlight running and rendering, so there was no candidate window
+to tag and nothing the shell could focus. **All 126 assertions passed that day**,
+before, during and after, because a fake `xprop` cannot stop returning windows.
+
+The rule that follows: **the live bench is the only gate on a gamescope version
+bump.** A green fixture run says the kit still does what it was written to do;
+only a run on the box says that is still the right thing to do. These suites
+protect refactors, not upgrades.
+
 ## What they guard
 
-`run.sh` covers pid→xid tagging (windows sharing a pid, a pid-less window found
-by class, neighbour probing with no WSI log, stale titles from a previous
-instance), the Sunshine pre-flight (busy with another app → refused; busy with
-the requested app → resume; unreachable or garbage serverinfo → warn and stream
-anyway, never "idle"), verbatim app names including a leading space, and
-`client.sh` tagging the shell by pid.
+`run.sh` covers scope launching (each verb's client goes into an
+`app-steam-app<its own id>-<pid>.scope`; a missing session bus is a loud
+refusal, never a silent unscoped launch; a refused Moonlight launch creates no
+scope), pid→xid tagging as the repair path (windows sharing a pid, a pid-less
+window found by class, neighbour probing with no WSI log, stale titles from a
+previous instance), the Sunshine pre-flight (busy with another app → refused;
+busy with the requested app → resume; unreachable or garbage serverinfo → warn
+and stream anyway, never "idle"), verbatim app names including a leading space,
+and `client.sh` scoping and tagging the shell by pid.
 
 `run-steam.sh` covers class-family tagging, `--keep-existing` leaving Steam's own
 `STEAM_GAME=769` alone, the detached post-launch watcher, `--watch-baselayer`,

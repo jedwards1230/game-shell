@@ -18,6 +18,13 @@ export PATH="$HERE/bin:$PATH"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tv-shell-gs-fixture.XXXXXX")"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 export TV_SHELL_GS_LOG_DIR="$WORK/clients"; mkdir -p "$TV_SHELL_GS_LOG_DIR"
+# Every app verb launches its client inside a systemd scope, and
+# `systemd-run --user` needs a session bus. Both variables point into the
+# scratch dir: bin/systemd-run is a stub, but gs_scope_ready checks the
+# environment before calling it, and a fixture must not inherit (or depend on)
+# the developer's live user manager.
+export XDG_RUNTIME_DIR="$WORK/run"; mkdir -p "$XDG_RUNTIME_DIR"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 # --- cleanup ---------------------------------------------------------------
 # Runs on a normal exit AND on INT/TERM, so an interrupted run leaves neither
 # the scratch dir nor a stray `sleep 300` behind.
@@ -148,6 +155,10 @@ check "exit 0" [ "$rc" = 0 ]
 check "steam -bigpicture by default, extra args kept" [ "$(paste -sd' ' "$FAKE_X/steam.argv")" = "-bigpicture --extra-arg" ]
 check "base list 9004,769,9001 set first" [ "$(head -1 "$FAKE_X/root.log")" = "set GAMESCOPECTRL_BASELAYER_APPID=9004,769,9001" ]
 check "first window tagged in the foreground" grep -q "tag 0xa00010 STEAM_GAME=9004" "$FAKE_X/tag.log"
+# The scope is what gamescope actually identifies the family by: steam,
+# steamwebhelper and the streaming_client all inherit this one cgroup.
+check "the whole family launched in one scope named for app 9004" [ "$(wc -l < "$FAKE_X/scopes.log")" = 1 ]
+check "scope in gamescope's sscanf format" grep -qE '^app-steam-app9004-[0-9]+$' "$FAKE_X/scopes.log"
 check "focus lines printed" grep -q "GAMESCOPECTRL_BASELAYER_APPID(CARDINAL) = 9004, 769, 9001" <<< "$out"
 check "points at the tag log" grep -q "tail -f $TV_SHELL_GS_LOG_DIR/steam-tag.log" <<< "$out"
 sleep 3
@@ -179,6 +190,7 @@ dump "$out"; sed 's/^/     env| /' "$FAKE_X/steamlink.env"
 check "exit 0" [ "$rc" = 0 ]
 check "flatpak run com.valvesoftware.SteamLink" [ "$(paste -sd' ' "$FAKE_X/steamlink.argv")" = "run com.valvesoftware.SteamLink" ]
 check "tagged 9005" grep -q "tag 0xb00010 STEAM_GAME=9005" "$FAKE_X/tag.log"
+check "scoped as app 9005, not the steam verb's 9004" grep -qE '^app-steam-app9005-[0-9]+$' "$FAKE_X/scopes.log"
 check "base list 9005,9001" [ "$(head -1 "$FAKE_X/root.log")" = "set GAMESCOPECTRL_BASELAYER_APPID=9005,9001" ]
 # steamlink shares the steam verb's env: it is a containerized streaming client too
 check "steamlink runs with WAYLAND_DISPLAY unset as well" not grep -q '^WAYLAND_DISPLAY=' "$FAKE_X/steamlink.env"
