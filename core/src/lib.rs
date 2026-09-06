@@ -9,6 +9,7 @@
 //! | Module | Owns |
 //! |---|---|
 //! | [`atoms`] | The typed X root-atom layer — gamescope's published state (§5) |
+//! | [`boot`] | The boot client: whether a fresh session gets its first app, and the observation that stops a restart stealing a live one |
 //! | [`screen`] | [`screen::ScreenState`], the one snapshot that replaces v1's `hypr-active`/`hypr-clients`/`hypr-monitors` |
 //! | [`launch`] | Scoped launching: `systemd-run --user --scope`, and reading a scope back out of a cgroup path |
 //! | [`baselayer`] | `show`/`home` as one write plus one bounded verify |
@@ -27,6 +28,7 @@
 
 pub mod atoms;
 pub mod baselayer;
+pub mod boot;
 pub mod compositor;
 pub mod config;
 pub mod ipc;
