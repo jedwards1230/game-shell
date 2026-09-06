@@ -18,6 +18,53 @@ export PATH="$HERE/bin:$PATH"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tv-shell-gs-fixture.XXXXXX")"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 export TV_SHELL_GS_LOG_DIR="$WORK/clients"; mkdir -p "$TV_SHELL_GS_LOG_DIR"
+# --- cleanup ---------------------------------------------------------------
+# Runs on a normal exit AND on INT/TERM, so an interrupted run leaves neither
+# the scratch dir nor a stray `sleep 300` behind.
+#
+# Processes are killed BY PID, never by program name: a `pkill -f moonlight`
+# would reach a real Moonlight, or a second fixture run on the same box. Three
+# sources, because no single one sees everything:
+#   1. our own live descendants — the shells and sleeps this script backgrounds;
+#   2. pids recorded in $TV_SHELL_GS_TEST_PIDS — each fake client appends its own
+#      pid on startup. The kit backgrounds them with `nohup` inside a command
+#      substitution, so they are reparented to init and no tree walk finds them;
+#   3. pids passed to track() explicitly, for the one client S2 deliberately
+#      `setsid`s out of our process tree.
+# track() writes to that same file rather than a shell array so it works from
+# inside a command substitution, where an array assignment would be discarded.
+export TV_SHELL_GS_TEST_PIDS="$WORK/pids"
+: > "$TV_SHELL_GS_TEST_PIDS"
+track() { printf '%s\n' "$1" >> "$TV_SHELL_GS_TEST_PIDS"; }
+
+descendants() { # descendants <pid> -> every live process below it, deepest first
+    local p
+    for p in $(pgrep -P "$1" 2>/dev/null); do descendants "$p"; printf '%s ' "$p"; done
+}
+
+reap() { # end the fake clients this section started, and forget them
+    local p
+    while read -r p; do kill "$p" 2>/dev/null; done < "$TV_SHELL_GS_TEST_PIDS"
+    : > "$TV_SHELL_GS_TEST_PIDS"
+}
+
+CLEANED=0
+# shellcheck disable=SC2317,SC2329  # reached only through the traps below.
+# (SC2317 up to shellcheck 0.9.x, SC2329 from 0.10 on — both must be named.)
+cleanup() {
+    [ "$CLEANED" = 0 ] || return 0   # idempotent: a signal fires this, then EXIT does
+    CLEANED=1
+    local pids p
+    pids="$(descendants $$) $(tr '\n' ' ' < "$TV_SHELL_GS_TEST_PIDS" 2>/dev/null)"
+    for p in $pids; do kill "$p" 2>/dev/null; done
+    for p in $pids; do kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null; done
+    rm -rf "$WORK"
+    return 0
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
 export TV_SHELL_GS_POLL_SECS=0.2
 export TV_SHELL_GS_ENV_FILE=/nonexistent
 export DISPLAY=:9
@@ -47,7 +94,7 @@ win() { # win <xid> key=value...
     printf '%s\n' "$@" > "$FAKE_X/win/$x"
 }
 not() { ! "$@"; }
-spawn_pid() { sleep 300 >/dev/null 2>&1 & echo $!; }
+spawn_pid() { sleep 300 >/dev/null 2>&1 & track $!; echo $!; }
 
 echo "== A. lead's spec: two windows, same pid, stream window on poll 3 (WSI log)"
 fresh A; P=$(spawn_pid); export FAKE_WSI_LOG="$FAKE_X/wsi.log"; : > "$FAKE_WSI_LOG"
@@ -146,7 +193,7 @@ check "moonlight args intact" grep -q -x -- '--hdr' "$FAKE_X/moonlight.argv"
 check "base layer 9003,9001 set before tagging" [ "$(head -1 "$FAKE_X/root.log")" = "set GAMESCOPECTRL_BASELAYER_APPID=9003,9001" ]
 check "stream window tagged" grep -q "tag 0x800031 STEAM_GAME=9003" "$FAKE_X/tag.log"
 check "GUI window tagged" grep -q "tag 0x80002f STEAM_GAME=9003" "$FAKE_X/tag.log"
-pkill -f "$FAKE_X/moonlight-wrap" 2>/dev/null; pkill -f 'bin/[m]oonlight stream' 2>/dev/null
+reap
 
 echo "== H. launch.sh moonlight --quit: ends the host's app first, then streams"
 fresh H; export FAKE_SERVERINFO="$FAKE_X/serverinfo.xml"; export FAKE_WSI_LOG="$TV_SHELL_GS_LOG_DIR/moonlight.log"
@@ -158,7 +205,7 @@ check "exit 0" [ "$rc" = 0 ]
 check "quit sent first" [ "$(head -1 "$FAKE_X/moonlight.log")" = "quit sent" ]
 check "then streamed ' Desktop'" grep -q "streaming stream-host \[ Desktop\]" "$FAKE_X/moonlight.log"
 check "host reported idle after quit" grep -q "streaming host: idle" <<< "$out"
-pkill -f 'bin/[m]oonlight stream' 2>/dev/null
+reap
 
 echo "== I. launch.sh moonlight: serverinfo unreachable -> warn, stream anyway"
 fresh I; export FAKE_WSI_LOG="$TV_SHELL_GS_LOG_DIR/moonlight.log"
@@ -167,7 +214,7 @@ out="$(TV_SHELL_GS_XID_PROBE=0 "$KIT/launch.sh" moonlight stream stream-host ' D
 check "exit 0" [ "$rc" = 0 ]
 check "warned" grep -q "WARN: no usable serverinfo" <<< "$out"
 check "streamed" [ -e "$FAKE_X/moonlight.argv" ]
-pkill -f 'bin/[m]oonlight stream' 2>/dev/null
+reap
 
 echo "== J. launch.sh apps: quoted names, running marker, live list"
 fresh J; export FAKE_SERVERINFO="$FAKE_X/serverinfo.xml"
@@ -189,7 +236,7 @@ dump "$out"
 check "shell tagged by pid" grep -q "tagged 'tv-shell-proto' (pid $(cat "$FAKE_X/shell.pid")) as app 9001 and set it as base layer" <<< "$out"
 check "STEAM_GAME set on its window" grep -q "tag 0x400011 STEAM_GAME=9001" "$FAKE_X/tag.log"
 check "base layer 9001" grep -q "set GAMESCOPECTRL_BASELAYER_APPID=9001" "$FAKE_X/root.log"
-pkill -f 'bin/[q]ml6' 2>/dev/null
+reap
 
 echo "== L. garbage serverinfo (HTML error page) -> treated as unreachable, not idle"
 fresh L; export FAKE_SERVERINFO="$FAKE_X/serverinfo.xml"; export FAKE_WSI_LOG="$TV_SHELL_GS_LOG_DIR/moonlight.log"
@@ -200,7 +247,7 @@ dump "$out"
 check "exit 0" [ "$rc" = 0 ]
 check "warned, not 'idle'" grep -q "WARN: no usable serverinfo" <<< "$out"
 check "never claimed idle" not grep -q "streaming host: idle" <<< "$out"
-pkill -f 'bin/[m]oonlight stream' 2>/dev/null
+reap
 
 echo "== M. a window reached by name AND by xid is counted once: --expect 2 waits for the second window"
 fresh M; P=$(spawn_pid)
@@ -215,5 +262,4 @@ kill "$P" 2>/dev/null
 
 echo
 echo "passed=$pass failed=$fail"
-rm -rf "$WORK"
 [ "$fail" = 0 ]

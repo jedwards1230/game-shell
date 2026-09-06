@@ -2,6 +2,7 @@
 # Fake moonlight-qt: records its argv, `list` prints the fixture names, `quit`
 # flips the fake serverinfo to idle, `stream` runs until killed.
 set -u
+echo $$ >> "${TV_SHELL_GS_TEST_PIDS:-/dev/null}"   # so the suite can end this by pid, not by name
 printf '%s\n' "$@" > "${FAKE_X:-/tmp}/moonlight.argv"
 case "${1:-}" in
     list)
@@ -13,9 +14,12 @@ case "${1:-}" in
         ;;
     stream)
         echo "streaming $2 [$3]" >> "${FAKE_X:-/tmp}/moonlight.log"
-        sleep 300
+        # `exec` on purpose: this stub registered ITS pid above, so the process
+        # that persists has to BE that pid. Forking a child here would leave an
+        # orphaned `sleep` the suite has no pid for.
+        exec sleep 300
         ;;
     *)
-        sleep 300
+        exec sleep 300
         ;;
 esac

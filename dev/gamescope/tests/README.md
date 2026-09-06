@@ -30,7 +30,34 @@ record their argv and environment and otherwise idle.
 
 Everything a run writes — the fake X state, a throwaway `$HOME`, and the kit's
 own client-log dir (via `TV_SHELL_GS_LOG_DIR`) — lives under one `mktemp -d`
-scratch directory that is removed on exit. Nothing is written into the checkout.
+scratch directory. Nothing is written into the checkout.
+
+## Cleanup
+
+An `EXIT`/`INT`/`TERM` trap removes the scratch dir and ends every process the
+run started, so an interrupted run leaves nothing behind — a stray `sleep 300`
+or a half-written state dir from a previous run is exactly how a fixture starts
+passing for the wrong reason. The trap is idempotent: a signal fires it, then
+`EXIT` fires it again and the second pass finds nothing.
+
+Processes are ended **by pid, never by program name**. A `pkill -f moonlight`
+would reach a real Moonlight, or a second fixture run on the same box. Pids come
+from three places, because no one of them sees everything:
+
+1. the run's own live descendants, walked with `pgrep -P`;
+2. `$TV_SHELL_GS_TEST_PIDS`, a file each fake client appends its own pid to on
+   startup — the kit backgrounds them with `nohup` inside a command
+   substitution, so they are reparented to init and no tree walk finds them;
+3. `track <pid>`, for the one client `S2` deliberately `setsid`s out of the tree.
+
+For (2) to work each fake client must `exec` the process that outlives it,
+rather than forking one: the registered pid has to *be* the long-lived process,
+or killing it just orphans the `sleep` underneath.
+
+The kit's own detached `focus.sh` watchers are the one thing not tracked — their
+argv carries no scratch path and the fixture doesn't own their pids. They are
+bounded by the `TV_SHELL_GS_WATCH_SECS` / `TV_SHELL_GS_STEAM_WATCH_SECS` values
+each section sets (0.2–6s), so they exit on their own within seconds.
 
 ## What they guard
 

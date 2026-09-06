@@ -18,6 +18,53 @@ export PATH="$HERE/bin:$PATH"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tv-shell-gs-fixture.XXXXXX")"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 export TV_SHELL_GS_LOG_DIR="$WORK/clients"; mkdir -p "$TV_SHELL_GS_LOG_DIR"
+# --- cleanup ---------------------------------------------------------------
+# Runs on a normal exit AND on INT/TERM, so an interrupted run leaves neither
+# the scratch dir nor a stray `sleep 300` behind.
+#
+# Processes are killed BY PID, never by program name: a `pkill -f moonlight`
+# would reach a real Moonlight, or a second fixture run on the same box. Three
+# sources, because no single one sees everything:
+#   1. our own live descendants — the shells and sleeps this script backgrounds;
+#   2. pids recorded in $TV_SHELL_GS_TEST_PIDS — each fake client appends its own
+#      pid on startup. The kit backgrounds them with `nohup` inside a command
+#      substitution, so they are reparented to init and no tree walk finds them;
+#   3. pids passed to track() explicitly, for the one client S2 deliberately
+#      `setsid`s out of our process tree.
+# track() writes to that same file rather than a shell array so it works from
+# inside a command substitution, where an array assignment would be discarded.
+export TV_SHELL_GS_TEST_PIDS="$WORK/pids"
+: > "$TV_SHELL_GS_TEST_PIDS"
+track() { printf '%s\n' "$1" >> "$TV_SHELL_GS_TEST_PIDS"; }
+
+descendants() { # descendants <pid> -> every live process below it, deepest first
+    local p
+    for p in $(pgrep -P "$1" 2>/dev/null); do descendants "$p"; printf '%s ' "$p"; done
+}
+
+reap() { # end the fake clients this section started, and forget them
+    local p
+    while read -r p; do kill "$p" 2>/dev/null; done < "$TV_SHELL_GS_TEST_PIDS"
+    : > "$TV_SHELL_GS_TEST_PIDS"
+}
+
+CLEANED=0
+# shellcheck disable=SC2317,SC2329  # reached only through the traps below.
+# (SC2317 up to shellcheck 0.9.x, SC2329 from 0.10 on — both must be named.)
+cleanup() {
+    [ "$CLEANED" = 0 ] || return 0   # idempotent: a signal fires this, then EXIT does
+    CLEANED=1
+    local pids p
+    pids="$(descendants $$) $(tr '\n' ' ' < "$TV_SHELL_GS_TEST_PIDS" 2>/dev/null)"
+    for p in $pids; do kill "$p" 2>/dev/null; done
+    for p in $pids; do kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null; done
+    rm -rf "$WORK"
+    return 0
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
 export TV_SHELL_GS_POLL_SECS=0.2
 export TV_SHELL_GS_WATCH_SECS=0.2
 export TV_SHELL_GS_ENV_FILE=/nonexistent
@@ -36,8 +83,6 @@ fresh() {
     unset FAKE_WSI_LOG FAKE_SERVERINFO FAKE_STEAMLINK
 }
 win() { local x="$1"; shift; printf '%s\n' "$@" > "$FAKE_X/win/$x"; }
-cleanup() { pkill -f 'focus.sh tag-pid' 2>/dev/null; pkill -f 'focus.sh watch-baselayer' 2>/dev/null; pkill -f 'bin/[s]team' 2>/dev/null; pkill -f 'bin/[f]latpak run' 2>/dev/null; }
-trap 'cleanup; rm -rf "$WORK"' EXIT
 
 echo "== S1. focus.sh tag-pid --family --class: launcher -> client -> streaming_client, three X clients"
 fresh S1
@@ -69,6 +114,7 @@ fresh S2
 bash -c 'echo $$ > "$FAKE_X/fam.launcher"; setsid bash -c "echo \$\$ > \"$FAKE_X/fam.client\"; sleep 300" & sleep 1.5' </dev/null >/dev/null 2>&1 &
 sleep 0.5
 L=$(cat "$FAKE_X/fam.launcher"); C=$(cat "$FAKE_X/fam.client")
+track "$C"   # setsid put this one outside our process tree; the trap needs its pid
 win 0xa00010 appear=3 name=Steam class=steam "pid=$C"
 ( sleep 2.5; kill "$C" 2>/dev/null ) &
 out="$(TV_SHELL_GS_XID_PROBE=0 "$KIT/focus.sh" tag-pid "$L" 9004 --family --class steam --name Steam --timeout 20 2>&1)"; rc=$?
@@ -108,7 +154,7 @@ sleep 3
 check "detached watcher tagged the Remote Play window later" grep -q "tag 0xe00010 STEAM_GAME=9004" "$FAKE_X/tag.log"
 check "detached watcher log exists" grep -q "tagged 0xe00010" "$TV_SHELL_GS_LOG_DIR/steam-tag.log"
 check "baselayer log running" grep -q 'baselayer=\[9004, 769, 9001\]' "$TV_SHELL_GS_LOG_DIR/steam-baselayer.log"
-cleanup
+reap
 
 echo "== S5. launch.sh steam --gamepadui"
 fresh S5
@@ -117,7 +163,7 @@ out="$(TV_SHELL_GS_XID_PROBE=0 TV_SHELL_GS_STEAM_WATCH_SECS=2 "$KIT/launch.sh" s
 check "exit 0" [ "$rc" = 0 ]
 check "steam -gamepadui" [ "$(head -1 "$FAKE_X/steam.argv")" = "-gamepadui" ]
 check "no baselayer watcher without the flag" not grep -q "baselayer" <<< "$out"
-cleanup
+reap
 
 echo "== S6. launch.sh steamlink: not installed -> exit 2; flatpak present -> runs, tagged 9005"
 fresh S6
@@ -138,7 +184,7 @@ check "base list 9005,9001" [ "$(head -1 "$FAKE_X/root.log")" = "set GAMESCOPECT
 check "steamlink runs with WAYLAND_DISPLAY unset as well" not grep -q '^WAYLAND_DISPLAY=' "$FAKE_X/steamlink.env"
 check "steamlink gets the SteamOS streaming_client vars" grep -q -x 'GAMESCOPE_DISPLAY_DISABLED=1' "$FAKE_X/steamlink.env"
 unset WAYLAND_DISPLAY
-cleanup
+reap
 
 echo "== S7. launch.sh steam env (K9): WAYLAND_DISPLAY unset, SteamOS streaming_client vars set; --no-wsi / --wayland-display"
 fresh S7
@@ -152,7 +198,7 @@ check "GAMESCOPE_DISPLAY_DISABLED=1" grep -q -x 'GAMESCOPE_DISPLAY_DISABLED=1' "
 check "GAMESCOPE_ZENITY_DISABLE=1" grep -q -x 'GAMESCOPE_ZENITY_DISABLE=1' "$FAKE_X/steam.env"
 check "layer still enabled by default" grep -q -x 'ENABLE_GAMESCOPE_WSI=1' "$FAKE_X/steam.env"
 check "launch line shows the env" grep -q "env -u WAYLAND_DISPLAY GAMESCOPE_DISPLAY_DISABLED=1 GAMESCOPE_ZENITY_DISABLE=1 steam -bigpicture" <<< "$out"
-cleanup
+reap
 fresh S7b; export WAYLAND_DISPLAY=gamescope-0
 win 0xa00010 appear=1 name=Steam class=steam "pid=@$FAKE_X/steam.client.pid"
 out="$(TV_SHELL_GS_XID_PROBE=0 TV_SHELL_GS_STEAM_WATCH_SECS=2 "$KIT/launch.sh" steam --no-wsi --wayland-display 2>&1)"; rc=$?
@@ -162,7 +208,7 @@ check "--no-wsi disables the layer" grep -q -x 'ENABLE_GAMESCOPE_WSI=0' "$FAKE_X
 check "--no-wsi sets DISABLE_GAMESCOPE_WSI=1" grep -q -x 'DISABLE_GAMESCOPE_WSI=1' "$FAKE_X/steam.env"
 check "no -u left in the launch line when the display is kept" grep -q "env GAMESCOPE_DISPLAY_DISABLED=1 GAMESCOPE_ZENITY_DISABLE=1 ENABLE_GAMESCOPE_WSI=0 DISABLE_GAMESCOPE_WSI=1 steam" <<< "$out"
 unset WAYLAND_DISPLAY
-cleanup
+reap
 # same two flags in the opposite order: env(1) needs every -u BEFORE any
 # NAME=VALUE, so the verb builds the list from flags, never in flag order.
 fresh S7c; export WAYLAND_DISPLAY=gamescope-0
@@ -175,7 +221,7 @@ check "child really ran (argv recorded), so env did not swallow the command" [ "
 check "both effects landed" grep -q -x 'ENABLE_GAMESCOPE_WSI=0' "$FAKE_X/steam.env"
 check "...and the display is gone" not grep -q '^WAYLAND_DISPLAY=' "$FAKE_X/steam.env"
 unset WAYLAND_DISPLAY
-cleanup
+reap
 
 echo "== S8. launch.sh x11 --no-wsi --no-wayland-display"
 fresh S8
@@ -189,13 +235,13 @@ check "layer disabled" grep -q -x 'ENABLE_GAMESCOPE_WSI=0' "$FAKE_X/steam.env"
 check "argv intact" [ "$(head -1 "$FAKE_X/steam.argv")" = "-bigpicture" ]
 check "tagged 9004" grep -q "tag 0xa00010 STEAM_GAME=9004" "$FAKE_X/tag.log"
 unset WAYLAND_DISPLAY
-cleanup
+reap
 fresh S8b
 win 0xa00010 appear=1 name=Steam class=steam "pid=@$FAKE_X/steam.client.pid"
 out="$(TV_SHELL_GS_XID_PROBE=0 WAYLAND_DISPLAY=gamescope-0 "$KIT/launch.sh" x11 9004 --name Steam steam 2>&1)"; rc=$?
 check "x11 without the flags keeps WAYLAND_DISPLAY and the layer" grep -q -x 'WAYLAND_DISPLAY=gamescope-0' "$FAKE_X/steam.env"
 check "..." grep -q -x 'ENABLE_GAMESCOPE_WSI=1' "$FAKE_X/steam.env"
-cleanup
+reap
 # x11 collects the flags AS THEY COME, so this is the order-independence test:
 # --no-wsi first (an assignment) then --no-wayland-display (an unset). env(1)
 # would treat the -u as the command name if they were emitted in flag order.
@@ -211,7 +257,7 @@ check "unset applied" not grep -q '^WAYLAND_DISPLAY=' "$FAKE_X/steam.env"
 check "assignment applied" grep -q -x 'ENABLE_GAMESCOPE_WSI=0' "$FAKE_X/steam.env"
 check "still tagged" grep -q "tag 0xa00010 STEAM_GAME=9004" "$FAKE_X/tag.log"
 unset WAYLAND_DISPLAY
-cleanup
+reap
 
 echo "== S9. session.sh TV_SHELL_GS_EXPOSE_WAYLAND (K10)"
 fresh S9
