@@ -1,4 +1,6 @@
 #!/bin/bash
-# Fake gamescope for the session.sh fixture: records argv and exits.
+# Fake gamescope for the session.sh fixture: records argv (and the one env var
+# session.sh has to hand its child, TV_SHELL_GS_CLIENT) and exits.
 printf '%s\n' "$@" > "${FAKE_X:?}/gamescope.argv"
+printf '%s\n' "${TV_SHELL_GS_CLIENT-<unset>}" > "$FAKE_X/gamescope.client"
 exit 0

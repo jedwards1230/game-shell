@@ -236,6 +236,9 @@ dump "$out"
 check "shell tagged by pid" grep -q "tagged 'tv-shell-proto' (pid $(cat "$FAKE_X/shell.pid")) as app 9001 and set it as base layer" <<< "$out"
 check "STEAM_GAME set on its window" grep -q "tag 0x400011 STEAM_GAME=9001" "$FAKE_X/tag.log"
 check "base layer 9001" grep -q "set GAMESCOPECTRL_BASELAYER_APPID=9001" "$FAKE_X/root.log"
+# The measurement rig's default must not move when a second client mode exists.
+check "default primary child is proto" grep -q "primary child: proto" <<< "$out"
+check "no moonlight spawned by default" [ ! -e "$FAKE_X/moonlight.argv" ]
 reap
 
 echo "== L. garbage serverinfo (HTML error page) -> treated as unreachable, not idle"
@@ -259,6 +262,64 @@ check "exit 0" [ "$rc" = 0 ]
 check "second window tagged (watch did not stop early)" grep -q "tag 0x800031 STEAM_GAME=9003" "$FAKE_X/tag.log"
 check "first window tagged once" [ "$(grep -c 'tag 0x80002f' "$FAKE_X/tag.log")" = 1 ]
 kill "$P" 2>/dev/null
+
+echo "== N. client.sh TV_SHELL_GS_CLIENT=moonlight: Moonlight is the primary child"
+fresh N; export TV_SHELL_GS_ENV_FILE="$FAKE_X/env"
+export FAKE_WSI_LOG="$TV_SHELL_GS_LOG_DIR/moonlight.log"
+# The fake moonlight cannot write its own pid where the window fixture can see
+# it (it is exec'd), so a wrapper records it first — as section G does.
+cat > "$FAKE_X/moonlight-wrap" <<'EOF'
+#!/bin/bash
+echo $$ > "$FAKE_X/moonlight.pid"
+exec moonlight "$@"
+EOF
+chmod +x "$FAKE_X/moonlight-wrap"
+win 0x800040 appear=2 name=Moonlight class=moonlight "pid=@$FAKE_X/moonlight.pid"
+# The stream window: a SECOND window of the same pid, minutes later in real
+# life. It is the reason the moonlight watch runs for the life of the client
+# instead of stopping at the first window like the proto shell's does.
+win 0x800041 appear=6 "name=stream-host - Moonlight" class=moonlight "pid=@$FAKE_X/moonlight.pid" wsi=1
+out="$(TV_SHELL_GS_CLIENT=moonlight TV_SHELL_GS_MOONLIGHT="$FAKE_X/moonlight-wrap" \
+    TV_SHELL_GS_TAG_TIMEOUT=5 TV_SHELL_GS_XID_PROBE=0 timeout 7 "$KIT/client.sh" 2>&1)"
+dump "$out"
+check "logs the primary child" grep -q "primary child: moonlight" <<< "$out"
+check "moonlight spawned" [ -e "$FAKE_X/moonlight.argv" ]
+check "no proto shell spawned" [ ! -e "$FAKE_X/shell.pid" ]
+check "no qml runtime resolved" not grep -q "qml runtime:" <<< "$out"
+check "base layer 9003" grep -q "set GAMESCOPECTRL_BASELAYER_APPID=9003" "$FAKE_X/root.log"
+check "GUI window tagged 9003" grep -q "tag 0x800040 STEAM_GAME=9003" "$FAKE_X/tag.log"
+check "later stream window tagged too" grep -q "tag 0x800041 STEAM_GAME=9003" "$FAKE_X/tag.log"
+check "nothing tagged as the proto shell" not grep -q "STEAM_GAME=9001" "$FAKE_X/tag.log"
+reap
+
+echo "== O. client.sh refuses an unknown TV_SHELL_GS_CLIENT instead of guessing"
+fresh O; export TV_SHELL_GS_ENV_FILE="$FAKE_X/env"
+out="$(TV_SHELL_GS_CLIENT=bigpicture timeout 6 "$KIT/client.sh" 2>&1)"; rc=$?
+dump "$out"
+check "exit 2" [ "$rc" = 2 ]
+check "names the valid values" grep -q "is not one of: proto, moonlight" <<< "$out"
+check "nothing spawned" [ ! -e "$FAKE_X/shell.pid" ]
+check "no base-layer change" [ ! -s "$FAKE_X/root.log" ]
+
+echo "== P. session.sh: the input daemon default follows the primary child (the pad grab)"
+fresh P
+SESS_ENV=(TV_SHELL_GS_STATS="$FAKE_X/stats" TV_SHELL_GS_ENV_FILE="$FAKE_X/env")
+out="$(env "${SESS_ENV[@]}" TV_SHELL_GS_CLIENT=moonlight TV_SHELL_GS_LOG="$FAKE_X/s-moon.log" "$KIT/session.sh" 2>&1)"
+dump "$out"
+check "moonlight: daemon off by default" grep -q 'client=moonlight .* daemon=0 ' "$FAKE_X/s-moon.log"
+check "moonlight: tv-shell-input.service never started" not grep -q 'start tv-shell-input.service' "$FAKE_X/systemctl.log"
+check "moonlight: no pad-grab warning when it is off" not grep -q 'WARN: TV_SHELL_GS_DAEMON=1' "$FAKE_X/s-moon.log"
+check "client handed to gamescope's child" [ "$(cat "$FAKE_X/gamescope.client")" = moonlight ]
+rm -f "$FAKE_X/systemctl.log"
+out="$(env "${SESS_ENV[@]}" TV_SHELL_GS_LOG="$FAKE_X/s-proto.log" "$KIT/session.sh" 2>&1)"
+check "proto (default): daemon on by default" grep -q 'client=proto .* daemon=1 ' "$FAKE_X/s-proto.log"
+check "proto: tv-shell-input.service started" grep -q 'start tv-shell-input.service' "$FAKE_X/systemctl.log"
+check "proto handed to gamescope's child" [ "$(cat "$FAKE_X/gamescope.client")" = proto ]
+rm -f "$FAKE_X/systemctl.log"
+out="$(env "${SESS_ENV[@]}" TV_SHELL_GS_CLIENT=moonlight TV_SHELL_GS_DAEMON=1 TV_SHELL_GS_LOG="$FAKE_X/s-both.log" "$KIT/session.sh" 2>&1)"
+check "moonlight + explicit DAEMON=1 is still honoured" grep -q 'client=moonlight .* daemon=1 ' "$FAKE_X/s-both.log"
+check "and it says the pad will be D-pad only" grep -q 'WARN: TV_SHELL_GS_DAEMON=1 with client=moonlight' "$FAKE_X/s-both.log"
+check "moonlight + explicit DAEMON=1 starts it" grep -q 'start tv-shell-input.service' "$FAKE_X/systemctl.log"
 
 echo
 echo "passed=$pass failed=$fail"

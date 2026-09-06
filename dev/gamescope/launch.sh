@@ -336,18 +336,10 @@ case "${1:-}" in
             echo "  focus.sh list   # then focus.sh window <xid> is X11-only, so check GAMESCOPE_FOCUSABLE_APPS"
             exit 0
         fi
-        # X11 (xcb) is the path that survives. SDL on x11 too, so the stream
-        # window is an X11 window gamescope's SteamControlled policy can
-        # select; the WSI layer reads GAMESCOPE_HDR_OUTPUT_FEEDBACK off the X11
-        # root for HDR, so nothing is lost versus Wayland on that front.
-        export QT_QPA_PLATFORM=xcb
-        export SDL_VIDEODRIVER=x11
-        # Opt-in: the WSI layer only exposes HDR10 formats when the window can
-        # bypass XWayland (matches its toplevel within 2 px). If Moonlight's
-        # log says "hdr formats exposed to client: false" while the root atom
-        # GAMESCOPE_HDR_OUTPUT_FEEDBACK is 1, force the bypass.
+        # X11 (xcb) is the path that survives; the same environment client.sh
+        # gives the session's moonlight primary child (lib.sh, single source).
+        gs_moonlight_x11_env
         if [ -n "${GAMESCOPE_WSI_FORCE_BYPASS:-}" ]; then
-            export GAMESCOPE_WSI_FORCE_BYPASS
             echo "GAMESCOPE_WSI_FORCE_BYPASS=$GAMESCOPE_WSI_FORCE_BYPASS (XWayland bypass forced)"
         fi
         nohup "$MOONLIGHT_BIN" "$@" > "$LOG_DIR/moonlight.log" 2>&1 &

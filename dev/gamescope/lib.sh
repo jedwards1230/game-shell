@@ -52,6 +52,33 @@ gs_qml_version() {
         | sed -n 's/^Qml Runtime \([0-9][0-9.]*\).*/\1/p' | head -1
 }
 
+# gs_moonlight_x11_env -> exports the environment Moonlight needs to present
+# INSIDE gamescope on the X11 (xcb) path, which is the path that survives. SDL
+# on x11 too, so the stream window is an X11 window gamescope's SteamControlled
+# policy can select; the WSI layer reads GAMESCOPE_HDR_OUTPUT_FEEDBACK off the
+# X11 root for HDR, so nothing is lost versus Wayland on that front.
+# ENABLE_GAMESCOPE_WSI is what lets Moonlight present HDR at all: gamescope
+# sets it for its own children but not for a launch.sh arriving over SSH, so it
+# is set here for both callers.
+#
+# GAMESCOPE_WSI_FORCE_BYPASS is passed through when the caller set it: the WSI
+# layer only exposes HDR10 formats when the window can bypass XWayland (matches
+# its toplevel within 2 px), and forcing the bypass is the opt-in escape hatch
+# for a log that says "hdr formats exposed to client: false" while the root
+# atom GAMESCOPE_HDR_OUTPUT_FEEDBACK is 1.
+#
+# Shared by launch.sh (the SSH-side `moonlight` verb) and client.sh (the
+# session's moonlight primary child) so the two can never drift.
+gs_moonlight_x11_env() {
+    export ENABLE_GAMESCOPE_WSI=1
+    export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+    export QT_QPA_PLATFORM=xcb
+    export SDL_VIDEODRIVER=x11
+    if [ -n "${GAMESCOPE_WSI_FORCE_BYPASS:-}" ]; then
+        export GAMESCOPE_WSI_FORCE_BYPASS
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Tagging windows by pid.
 #

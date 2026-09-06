@@ -14,7 +14,8 @@
 #   TV_SHELL_GS_HDR         1 = --hdr-enabled                 (1)
 #   TV_SHELL_GS_VRR         1 = --adaptive-sync               (1)
 #   TV_SHELL_GS_SDR_NITS    --hdr-sdr-content-nits            (200)
-#   TV_SHELL_GS_DAEMON      1 = start tv-shell-input.service  (1)
+#   TV_SHELL_GS_CLIENT      primary child: proto | moonlight  (proto)
+#   TV_SHELL_GS_DAEMON      1 = start tv-shell-input.service  (1; 0 for moonlight)
 #   TV_SHELL_GS_EXPOSE_WAYLAND
 #                           1 = --expose-wayland              (1; use 0 for Steam runs, see README)
 #   TV_SHELL_GS_EXTRA       extra gamescope args, word-split  ("")
@@ -47,7 +48,27 @@ R="${TV_SHELL_GS_REFRESH:-120}"
 HDR="${TV_SHELL_GS_HDR:-1}"
 VRR="${TV_SHELL_GS_VRR:-1}"
 NITS="${TV_SHELL_GS_SDR_NITS:-200}"
-DAEMON="${TV_SHELL_GS_DAEMON:-1}"
+CLIENT="${TV_SHELL_GS_CLIENT:-proto}"
+export TV_SHELL_GS_CLIENT="$CLIENT"
+# The input daemon's DEFAULT depends on the primary child, and this is the one
+# non-obvious thing in this script.
+#
+# Under gamescope the daemon never yields the gamepad. Its only focus source is
+# Hyprland, which is not here, so it holds the exclusive evdev grab
+# (EVIOCGRAB) forever and keeps translating the pad into arrow keys; on the
+# pinned build it presents no virtual pad at all. An app under gamescope
+# therefore gets D-pad only, no face buttons — which is useless for a streaming
+# client, and Moonlight reads the pad directly and needs no daemon anyway.
+#
+# So moonlight mode defaults it OFF. Defaulting (rather than only documenting
+# it) is deliberate: a reboot must not silently restore the grab that breaks
+# the pad. An explicit TV_SHELL_GS_DAEMON=1 is still honoured — someone
+# measuring the grab itself needs to be able to ask for it — and says so in the
+# log so the resulting broken pad is not a mystery.
+case "$CLIENT" in
+    moonlight) DAEMON="${TV_SHELL_GS_DAEMON:-0}" ;;
+    *) DAEMON="${TV_SHELL_GS_DAEMON:-1}" ;;
+esac
 EXPOSE_WAYLAND="${TV_SHELL_GS_EXPOSE_WAYLAND:-1}"
 
 log() { printf 'tv-shell-gamescope: %s\n' "$*"; }
@@ -69,7 +90,11 @@ if mkfifo "$STATS"; then
 else
     log "WARN: mkfifo $STATS failed; gamescope will have no stats output"
 fi
-log "starting: ${W}x${H}@${R} hdr=$HDR vrr=$VRR sdr_nits=$NITS daemon=$DAEMON expose_wayland=$EXPOSE_WAYLAND"
+log "starting: client=$CLIENT ${W}x${H}@${R} hdr=$HDR vrr=$VRR sdr_nits=$NITS daemon=$DAEMON expose_wayland=$EXPOSE_WAYLAND"
+if [ "$CLIENT" = "moonlight" ] && [ "$DAEMON" = "1" ]; then
+    log "WARN: TV_SHELL_GS_DAEMON=1 with client=moonlight: the daemon will hold the"
+    log "WARN: exclusive gamepad grab and Moonlight will see D-pad only, no face buttons"
+fi
 
 STARTED_DAEMON=0
 if [ "$DAEMON" = "1" ] && command -v systemctl >/dev/null 2>&1 \

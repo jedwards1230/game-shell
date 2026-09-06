@@ -5,7 +5,7 @@ Two offline suites that exercise `dev/gamescope/` — `focus.sh`, `launch.sh`,
 No gamescope, no Steam, no Moonlight, no network, no display server.
 
 ```bash
-./dev/gamescope/tests/run.sh         # Moonlight + focus/tagging suite  (57 assertions)
+./dev/gamescope/tests/run.sh         # Moonlight + focus/tagging suite  (81 assertions)
 ./dev/gamescope/tests/run-steam.sh   # Steam / Steam Link / env suite   (69 assertions)
 ```
 
@@ -27,6 +27,12 @@ that. `-set STEAM_GAME` appends to `tag.log`, which is what the assertions read.
 streaming_client) so the `--family` pid-tree walk has something to walk;
 `bin/moonlight`, `bin/flatpak`, `bin/curl`, `bin/qml6` and `bin/gamescope`
 record their argv and environment and otherwise idle.
+
+`bin/systemctl` exists so a fixture can assert whether `session.sh` **started**
+`tv-shell-input.service` — the daemon that must not run in
+`TV_SHELL_GS_CLIENT=moonlight` mode. Without it the real `systemctl` would talk
+to the developer's live user manager, which is precisely the thing under test.
+It records its argv and reports the unit inactive so the branch reaches `start`.
 
 Everything a run writes — the fake X state, a throwaway `$HOME`, and the kit's
 own client-log dir (via `TV_SHELL_GS_LOG_DIR`) — lives under one `mktemp -d`
