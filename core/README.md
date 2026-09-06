@@ -13,7 +13,8 @@ its relationship to `daemon/`.
 | `screen` | `ScreenState` — one snapshot of what is on screen, replacing `hypr-active`/`hypr-clients`/`hypr-monitors`. Read in one round trip; `_APP` is not exposed as an app id at all (below) |
 | `launch` | Scoped launching: `systemd-run --user --scope` into `app-steam-app<appid>-<pid>.scope`, the argv as a testable value, and reading a scope back out of a cgroup path. Preflight is fail-closed — there is no unscoped fallback — and a launch is **confirmed** (the launcher is still alive and `/proc/<pid>/cgroup` names the scope) before it reports success |
 | `baselayer` | `show`/`home` as one write plus one bounded verify, `IntentGate` (which serializes a write and its verify against other intents), and `reconcile` as the read-only recovery path |
-| `config` | `~/.config/tv-shell/core.toml` — a separate file from v1's `config.toml` (below), plus the socket path. All-defaults on a missing file, `deny_unknown_fields` everywhere, `validate()` before any value is used |
+| `config` | `~/.config/tv-shell/core.toml` — a separate file from v1's `config.toml` (below), plus the socket path and the `[[app]]` class table. All-defaults on a missing file, `deny_unknown_fields` everywhere, `validate()` before any value is used |
+| `boot` | Whether a fresh session gets its first app — and the observation that stops a core restart stealing a live one (below) |
 | `protocol` | The IPC grammar, carried over from v1 unchanged in contract (§4): newline framing, 4096-byte lines, `ok` / `unknown` / `error:<msg>` / a bare JSON document |
 | `ipc` | The Unix-socket server — `LinesCodec`, one task per connection, socket bound 0600 under a tightened umask. Compositor work sits behind a `Compositor` trait so the whole request/reply surface is testable with no X server |
 | `compositor` | The seam between the two: IPC verbs → the §5 X primitives |
@@ -140,6 +141,8 @@ failure inverted:
   for — which is exactly the string gamescope parses. A launch that cannot be
   confirmed is an `error:`, and the reason says whether the process died or
   merely landed outside its scope (where gamescope could never focus it).
+- **A launch environment belongs to the app CLASS, and one of its operations is a removal.** Measured 2026-09-06: a bare `/usr/bin/moonlight` in the v2 session inherits `WAYLAND_DISPLAY=gamescope-0`, selects native Wayland — which §6 records Moonlight 6.1.0 segfaulting on — and never maps a window, so the base layer is right and the screen is black. The core said so exactly ("app 9003 never mapped a window … the base layer was set, so this is the app failing to start"), which is the correct failure; needing a human to remember `env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb …` is not. `[[app]]` carries both halves, and `env_unset` is first-class because **no value substitutes for absence**: `WAYLAND_DISPLAY=""` is not unset, and pressure-vessel rewrites an empty one back to `wayland-0` (§11). `launch <appid>` with no command is the class form; an explicit command for a known id still takes the class environment, because the environment is a property of the class and not of the argv.
+- **A boot launch is "this compositor has never been used", never "the core started".** The core unit is `Restart=always`, so a restart under a live game is the designed recovery path — and relaunching there would yank the screen from something being played. `boot::decide` therefore fires only when the startup reconcile shows an EMPTY base layer *and* nothing on screen; a populated list, an app on screen, or a failed read are all "in use" and the core does nothing. Two consequences that are deliberate: a restart never resurrects an app the user quit (after a return to the shell the base layer holds the shell id), and an unreadable X state fails closed, because a failed read is no evidence rather than weak evidence. It runs after the socket is listening, so a slow app never delays the control surface §9 exists to keep reachable.
 - **Steam owns the base-layer atom, and the core reconciles after it.** Measured
   2026-09-05: while the Steam client runs it rewrites
   `GAMESCOPECTRL_BASELAYER_APPID` on every stream start and stop and drops our id
@@ -265,6 +268,21 @@ Several tests in this crate exist to make a stated rule falsifiable rather than
 to cover a line. The way to check one is still doing its job is to **break the
 rule in the source and confirm the suite goes red**, then revert:
 
+- Delete the `env_remove` loop from `launch::prepare_command`.
+  `the_class_environment_reaches_the_spawned_command` **and**
+  `wayland_display_is_absent_from_the_real_child_environment` must fail — the
+  second on a real child's own environment, not on a recorded intention.
+- Make `boot::decide` ignore `observed`, or treat a `None` observation as fresh.
+  `a_restart_under_a_live_app_never_launches` / `an_unreadable_session_does_not_launch`
+  must fail. This is the one whose regression costs a television.
+- Drop the `return` from `boot::run`'s launch-failure arm.
+  `a_failed_boot_launch_never_shows` must fail.
+- Make `compositor::resolve_launch`'s `(None, true)` arm return an empty argv
+  instead of an error. `an_unknown_id_with_no_command_is_a_clean_error` must fail.
+- Make an explicit command for a KNOWN class drop the class environment.
+  `an_explicit_command_for_a_known_class_keeps_its_environment` must fail.
+- Delete the `boot_app` arm of `CoreConfig::validate`.
+  `a_boot_app_with_no_class_is_refused` must fail.
 - Turn `write_and_verify`'s `Err(SwitchError::NotObserved { .. })` into an `Ok`.
   `baselayer::tests::a_switch_that_never_takes_is_never_ok` must fail.
 - Make `IntentGate::run` call `f()` without taking the lock.
@@ -301,6 +319,12 @@ ExecStart" passed while the unit read nothing. A named consumer has to exist.
 
 Each of these is a follow-up, and none of it is implemented in this crate today:
 
+- **§12's other app-class fields**: an id strategy (scope / pid / class), an
+  input contract (`gamepad` / `keyboard`) and an HDR expectation. `[[app]]`
+  models the id, the command and the environment only — the id strategy is fixed
+  at "scope, tag as repair" and is not selectable, §7's input layer does not
+  exist, and the HDR settle key is itself unconsumed. Three more keys whose
+  stated consumer does not exist is the #416 class; they land with their readers.
 - uinput / input presenters and the pad grab (§7)
 - CEC — which leaves the core entirely in v2 and becomes an observer sidecar (§8)
 - the QML shell (§13 Q1 is still open on its runtime) and any panel changes

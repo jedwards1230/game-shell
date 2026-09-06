@@ -171,7 +171,8 @@ core/                        # Rust v2 core (tv-shell-core) — gamescope, BESID
     screen.rs                #   ScreenState: one snapshot; keys on GAMESCOPE_FOCUSED_WINDOW, never _APP
     launch.rs                #   Scoped launch into app-steam-app<id>-<pid>.scope; fail-closed, no unscoped fallback
     baselayer.rs             #   show/home: one write + one bounded verify; reconcile after Steam, never contend
-    config.rs                #   core.toml (separate file from v1's config.toml) + socket path
+    boot.rs                  #   Boot client: launch the first app ONLY on a compositor the reconcile shows is fresh
+    config.rs                #   core.toml (separate file from v1's config.toml) + socket path + the [[app]] class table
     protocol.rs              #   IPC grammar, carried over from v1 unchanged in contract
     ipc.rs                   #   Unix-socket server (0600); compositor behind a trait so IPC tests need no X
     compositor.rs            #   Seam: IPC verbs -> the X primitives

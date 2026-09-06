@@ -8,6 +8,11 @@
 //! 3. **Reconcile**: read the base-layer list back as the last intent. The core
 //!    never writes "home" on boot; that would yank a live game.
 //! 4. Serve IPC until a signal says to stop.
+//! 5. **Then**, and only for a compositor that reconcile showed is FRESH, run
+//!    the boot client (see [`boot`]). It is step 5 rather than step 3½ because
+//!    the socket must exist before anything slow does — an operator debugging a
+//!    session that will not come up needs the control surface more than the
+//!    session needs its first app.
 //!
 //! There is also one non-serving mode, `write-session-env <path>`, which the
 //! session script runs before starting the target. It is here rather than in a
@@ -15,7 +20,9 @@
 //! the mode gamescope is actually started at — see [`CoreConfig::session_env`].
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use tv_shell_core::boot;
 use tv_shell_core::compositor::GamescopeCompositor;
 use tv_shell_core::config::{self, CoreConfig};
 use tv_shell_core::ipc;
@@ -81,6 +88,9 @@ async fn serve() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Read before `config` moves into the compositor.
+    let boot_app = config.boot_app();
+
     let compositor = match GamescopeCompositor::connect(config, None) {
         Ok(c) => c,
         Err(e) => {
@@ -88,13 +98,40 @@ async fn serve() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    compositor.reconcile_on_start();
+
+    // The reconcile is the ONLY input to the boot decision: a fresh compositor
+    // gets the boot app, a session someone is already using does not, and a
+    // failed read gets nothing at all (§5/§9 — see `boot`). Decided here, while
+    // the observation is fresh; acted on below, after the socket is up.
+    let reconciled = compositor.reconcile_on_start();
+    let boot_decision = boot::decide(
+        boot_app,
+        reconciled.as_ref().map(|r| boot::Observed {
+            base_layer: &r.base_layer,
+            on_screen: r.on_screen,
+        }),
+    );
 
     let sock_path = config::socket_path();
-    let server = ipc::serve(
-        sock_path.clone(),
-        tv_shell_core::compositor::shared(compositor),
-    );
+    let compositor = tv_shell_core::compositor::shared(compositor);
+    let server = ipc::serve(sock_path.clone(), Arc::clone(&compositor));
+
+    // AFTER the listener exists, and off the reactor. A cold app start can take
+    // seconds — the map bound alone is 30 s — and §9 makes the control surface
+    // the thing an operator reaches for when the session is wedged. Running the
+    // boot client before `serve` would leave the socket absent for exactly as
+    // long as the app took, which is precisely when someone would be trying to
+    // reach it. The boot client drives the same `Compositor` the IPC layer does,
+    // so its `show` takes the same `IntentGate` as an operator's rather than
+    // racing one.
+    let boot_compositor = Arc::clone(&compositor);
+    tokio::spawn(async move {
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || boot::run(&boot_compositor, boot_decision)).await
+        {
+            tracing::error!("boot client task failed: {e}");
+        }
+    });
 
     // `ipc::serve` loops forever, so without this the `ExitCode::SUCCESS` below
     // was unreachable and a SIGTERM (which is how systemd stops the unit, every

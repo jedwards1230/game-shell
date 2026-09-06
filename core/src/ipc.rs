@@ -138,7 +138,7 @@ pub async fn dispatch(compositor: &Arc<dyn Compositor>, cmd: Command) -> String 
             }
             Err(_) => protocol::resp_error(&format!("not an app id: {app_id}")),
         },
-        Command::LaunchUsage => protocol::resp_usage("launch <appid> <cmd> [args...]"),
+        Command::LaunchUsage => protocol::resp_usage("launch <appid> [cmd args...]"),
         Command::Unknown => protocol::resp_unknown(),
     }
 }
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(reply(&c, "show").await, "error:usage: show <appid>");
         assert_eq!(
             reply(&c, "launch").await,
-            "error:usage: launch <appid> <cmd> [args...]"
+            "error:usage: launch <appid> [cmd args...]"
         );
         assert_eq!(reply(&c, "frobnicate").await, "unknown");
         assert_eq!(reply(&c, "hypr-active").await, "unknown");
