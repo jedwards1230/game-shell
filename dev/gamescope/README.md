@@ -165,19 +165,73 @@ Then pick "TV Shell (gamescope prototype)" at the greeter, or, on an autologin k
 never shows one, point the display manager's autologin session at `tv-shell-gamescope`
 for the week. The default boot session is untouched; log out (or set it back) to return to it.
 
+## Moonlight as the session's client (`TV_SHELL_GS_CLIENT=moonlight`)
+
+The session's primary child is selectable:
+
+| `TV_SHELL_GS_CLIENT` | Primary child |
+|---|---|
+| `proto` (default) | `proto-shell.qml`, the measurement rig. Launches nothing on purpose. |
+| `moonlight` | Moonlight-qt's own GUI, tagged `STEAM_GAME=9003` and set as the base layer. |
+
+The default stays `proto` so running the kit as a bench behaves exactly as it did.
+`moonlight` turns the same session into an appliance: the box boots straight into a
+pad-navigable grid of the streaming host's apps, in HDR, with no keyboard.
+
+```sh
+TV_SHELL_GS_CLIENT=moonlight session.sh
+# or in the session .desktop:  Exec=/usr/bin/env TV_SHELL_GS_CLIENT=moonlight /opt/tv-shell/dev/gamescope/session.sh
+```
+
+`TV_SHELL_GS_MOONLIGHT_ARGS` (word-split) is appended to the launch, so
+`stream <host> '<app>'` boots straight into a stream instead of the grid; empty (the
+default) is the grid. `TV_SHELL_GS_MOONLIGHT` overrides the binary.
+
+**This is an interim step, not the v2 shell.** It gives pad-navigable streaming on boot
+and HDR, and nothing else: no Plex, no web apps, no settings, no local app launcher, no
+shell of ours — Moonlight's UI is the whole UI. It exists because the v2 core does not
+exist yet, and it is the smallest thing that makes the gamescope session usable from the
+couch in the meantime.
+
+**Do not "helpfully" re-enable the input daemon in this mode.** `session.sh` defaults
+`TV_SHELL_GS_DAEMON=0` when the client is `moonlight`, and that default is the feature.
+Under gamescope the daemon never yields the gamepad: its only focus source is Hyprland,
+which is not running here, so it keeps its exclusive evdev grab (`EVIOCGRAB`) forever and
+goes on translating the pad into arrow keys, and on the pinned build it presents no
+virtual pad at all. With the daemon up, an app under gamescope gets **D-pad only, no face
+buttons** — you can move around Moonlight's grid and never start anything. Moonlight
+reads the pad directly and needs no daemon, so the measured fix is to not run one. An
+explicit `TV_SHELL_GS_DAEMON=1` is still honoured (someone measuring the grab itself needs
+it) and logs a `WARN` saying the pad will be D-pad only, so the symptom is never a mystery.
+
+The consequence of dropping the daemon is that this mode has **no intent surface**: no
+Super-key escape, no nav drawer, no `intent`-driven automation. Quitting Moonlight returns
+you to Moonlight — `client.sh` relaunches its primary child, which for a streaming
+appliance is the right behaviour (quitting the client puts you back on the grid, not on a
+black screen). A Moonlight that cannot start at all hits the same fast-exit backoff the
+prototype shell does — three exits inside 10 s stretches the retry to 60 s — so a broken
+install cannot hot-spin.
+
+Unlike the shell's one-shot tag, the window watch in this mode runs in the background for
+the life of the client. Moonlight's stream window is a **second** X11 window of the same
+pid that only exists once a stream starts, which here means whenever someone picks a game,
+minutes after launch; a one-shot watch would tag the grid and stop, leaving the stream
+window with no `STEAM_GAME` and therefore unselectable by gamescope's SteamControlled
+policy. `TV_SHELL_GS_TAG_TIMEOUT` (86400 s) bounds it.
+
 ## Files
 
 | File | Role |
 |---|---|
-| `session.sh` | The session. Starts `tv-shell-input.service`, creates the stats FIFO, execs gamescope with `--steam --expose-wayland --keep-alive -W/-H/-r --hdr-enabled --adaptive-sync`, logs to journal tag `tv-shell-gamescope` |
-| `client.sh` | gamescope's primary child. Runs `proto-shell.qml` on X11 with a Qt 6 runtime, tags it `STEAM_GAME=9001`, makes it the base layer, writes `/tmp/tv-shell-gamescope.env` for the SSH-side tools, relaunches it on exit (with backoff once it crash-loops) |
-| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides), `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below; `--family` follows the pid tree, `--class` repeats, `--keep-existing` never overwrites a tag the client set itself), and `gs_watch_baselayer`, the base-layer atom logger |
+| `session.sh` | The session. Starts `tv-shell-input.service` (**not** in `TV_SHELL_GS_CLIENT=moonlight` mode — see above), creates the stats FIFO, execs gamescope with `--steam --expose-wayland --keep-alive -W/-H/-r --hdr-enabled --adaptive-sync`, logs to journal tag `tv-shell-gamescope` |
+| `client.sh` | gamescope's primary child. Runs `proto-shell.qml` on X11 with a Qt 6 runtime and tags it `STEAM_GAME=9001` — or, with `TV_SHELL_GS_CLIENT=moonlight`, Moonlight tagged `STEAM_GAME=9003`. Either way it makes the client the base layer, writes `/tmp/tv-shell-gamescope.env` for the SSH-side tools, and relaunches it on exit (with backoff once it crash-loops) |
+| `lib.sh` | Sourced by `client.sh`, `focus.sh` and `launch.sh`: the Qt 6 `qml` resolver (`qml6`, `/usr/lib/qt6/bin/qml`, `/usr/lib64/qt6/bin/qml`, then a `qml` whose `--version` says 6; `TV_SHELL_GS_QML` overrides), `gs_tag_pid`, the tag-every-window-of-a-pid watcher (below; `--family` follows the pid tree, `--class` repeats, `--keep-existing` never overwrites a tag the client set itself), and `gs_watch_baselayer`, the base-layer atom logger, and `gs_moonlight_x11_env`, the one definition of the xcb/SDL/WSI environment Moonlight is launched with (shared by `launch.sh moonlight` and `client.sh`'s moonlight mode so they cannot drift) |
 | `proto-shell.qml` | The prototype shell: shows window size, keyboard focus, last key, a moving dot, and a black-to-white strip |
 | `proto-overlay.qml` | Overlay test client, semi-transparent side panel |
 | `focus.sh` | `list` / `tag` / `tag-pid` / `watch-baselayer` / `app` / `window` / `clear` over gamescope's root X11 atoms. `tag-pid <pid> <id>` tags every window of a pid as it appears (`--timeout`, `--class`, `--family`, `--keep-existing`, `--log`, `--name`, `--expect`, `--done-name`); `watch-baselayer [secs]` logs every change of `GAMESCOPECTRL_BASELAYER_APPID` / `GAMESCOPE_FOCUSED_APP` with a timestamp |
 | `launch.sh` | `overlay` / `x11` / `apps <host>` / `moonlight [--quit]` (X11, every window of its pid tagged `STEAM_GAME=9003`; `--wayland` for the xdg-shell experiment) / `steam [--gamepadui] [--watch-baselayer]` (the full Steam client, its whole process family tagged `STEAM_GAME=9004` as windows appear, for 10 min in a detached watcher) / `steamlink` (the standalone Steam Link client, `STEAM_GAME=9005`) / `xmessage` into the running session from SSH |
 | `measure.sh` | Reads DRM connector properties, debugfs bit depth, the active mode, gamescope's own info (`gamescopectl`, `backend_info`, `help`) and the root feedback atoms, and prints verdicts. Every DRM read is scoped to one connector (the first connected + enabled one, or `TV_SHELL_GS_CONNECTOR=card1-HDMI-A-1` to choose on a two-output box) and to the CRTC driving it. Under `sudo` the gamescope-side reads run as the session user |
-| `tests/` | Offline fixture suites for the kit's shell logic — a fake X display (`tests/bin/xprop`) plus fake `steam`/`moonlight`/`flatpak`/`curl`/`qml6`/`gamescope`. `tests/run.sh` (Moonlight + tagging, 57 assertions) and `tests/run-steam.sh` (Steam/Steam Link/env, 69 assertions) run on any Linux box with no hardware and no network; CI runs both. See `tests/README.md` |
+| `tests/` | Offline fixture suites for the kit's shell logic — a fake X display (`tests/bin/xprop`) plus fake `steam`/`moonlight`/`flatpak`/`curl`/`qml6`/`gamescope`/`systemctl`. `tests/run.sh` (Moonlight + tagging + client selection, 81 assertions) and `tests/run-steam.sh` (Steam/Steam Link/env, 69 assertions) run on any Linux box with no hardware and no network; CI runs both. See `tests/README.md` |
 
 ## Running a measurement
 

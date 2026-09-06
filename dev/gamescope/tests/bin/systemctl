@@ -1,0 +1,14 @@
+#!/bin/bash
+# Fake systemctl for the session.sh fixtures. It exists so a fixture can assert
+# whether the session STARTED tv-shell-input.service without ever touching the
+# real user manager: on a developer box the true systemctl would talk to the
+# live daemon unit, which is exactly the thing these tests are about.
+#
+# `--user show-environment` succeeds so session.sh takes its daemon branch;
+# is-active reports "not running" (exit 3) so the branch reaches `start`.
+set -u
+printf '%s\n' "$*" >> "${FAKE_X:?}/systemctl.log"
+case "$*" in
+    *is-active*) exit 3 ;;
+esac
+exit 0
