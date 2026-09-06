@@ -4,6 +4,8 @@
 >
 > This document describes what tv-shell **is meant to be, fully realized**. It is not a task list — open work lives in GitHub issues, and §10 links the two. Where a claim is about today rather than the end state, it says so.
 >
+> **v2 (2026-09-05):** the compositor decision in §5 and decision 5 in §12 are superseded by [`docs/V2_DESIGN.md`](V2_DESIGN.md), which records the gamescope-based v2 architecture built beside v1. Everything else here stands.
+>
 > ⚠️ **One decision in this document is deliberately open**: whether the fleet console may serve remote *shell* nodes, which would require it to hold their RCE-capable daemon bridge tokens. See **§12 decision 3**. Everything else here is settled. **Sidecars-only is the operative behavior until the owner decides — do not implement the remote-shell-node path.**
 
 ## 1. What it is
