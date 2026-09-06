@@ -6,7 +6,7 @@ tv-shell is a Quickshell (QML) + Rust couch-gaming shell for Moonlight streaming
 
 - **Rust** (stable toolchain — see `host/`, `daemon/`, and `panel/` for minimum versions; daemon requires ≥1.75 MSRV, host and panel crates need Cargo ≥1.85)
 - **Qt 6.8** (for `qmlformat` and `qmltestrunner`)
-- **Linux** with evdev/uinput access (daemon only; `host/` and `protocol/` build on Linux, macOS, and Windows; `panel/` builds on Linux/macOS — it dials the daemon's Unix-socket IPC unconditionally, so it does not build on Windows)
+- **Linux** with evdev/uinput access (daemon only; `host/` and `protocol/` build on Linux, macOS, and Windows; `panel/` builds on Linux/macOS — it dials the daemon's Unix-socket IPC unconditionally, so it does not build on Windows; `core/` is Linux-only — it is an X11 client and binds a Unix socket)
 
 ## Build, test & lint
 
@@ -49,6 +49,25 @@ cargo fmt --check -p tv-shell-panel
 cargo clippy -p tv-shell-panel --all-targets -- -D warnings
 cargo build --release -p tv-shell-panel   # equivalent: ./scripts/build-panel.sh
 cargo test -p tv-shell-panel
+```
+
+### Core (`core/` — v2 gamescope core, Linux)
+
+```bash
+cargo fmt --check -p tv-shell-core
+cargo clippy -p tv-shell-core --all-targets -- -D warnings
+cargo build --release -p tv-shell-core
+cargo test -p tv-shell-core
+```
+
+The X-backed integration test is `#[ignore]`-gated behind `TV_SHELL_TEST_XVFB`,
+which names an X display (e.g. `:99`) — the same opt-in shape as the MQTT broker
+tests above, so the line above stays offline and needs no display server. To run
+it you need an X server:
+
+```bash
+Xvfb :99 -screen 0 1920x1080x24 &
+TV_SHELL_TEST_XVFB=:99 cargo test -p tv-shell-core --test atoms_xvfb -- --ignored
 ```
 
 ### QML shell (`shell/` — no build step; formatting and headless tests)

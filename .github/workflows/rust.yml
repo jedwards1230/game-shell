@@ -1,13 +1,16 @@
-# Rust CI for the tv-shell input daemon (daemon/).
+# Rust CI for the tv-shell Linux Rust crates: the input daemon (daemon/), the web
+# control panel (panel/), and the v2 core (core/).
 #
 # Builds, formats, lints, and tests the daemon crate on a Linux runner — the only
 # place the evdev/uinput code compiles (it is excluded on non-Linux dev hosts).
 # Runs inside a slim official `rust` container (toolchain preinstalled, ~1.5 GB
 # vs the ~30 GB ubuntu-latest image; no system libs needed — evdev is pure Rust).
 #
-# Since the repo is a Cargo workspace (daemon/ + host/ + protocol/), every cargo
-# command is `-p tv-shell-input`-scoped so the host crate (cross-platform, CI'd
-# separately in host.yml) is never dragged into the daemon's Linux/cec build. The
+# Since the repo is a Cargo workspace (daemon/ + host/ + protocol/ + panel/ +
+# core/), every cargo command is `-p`-scoped so no crate's graph leaks into
+# another's build — the host crate (cross-platform, CI'd separately in host.yml)
+# is never dragged into the daemon's Linux/cec build, and the daemon's
+# evdev/zbus/bluer/cec graph never reaches the pure-Rust panel and core legs. The
 # workspace shares one target dir at the repo ROOT, so the build output is at
 # `../target/release/...` from `working-directory: daemon`.
 #
@@ -137,6 +140,61 @@ jobs:
         run: |
           {
             echo "## Rust CI — \`panel/\`"
+            echo ""
+            echo "| Step | Result |"
+            echo "|------|--------|"
+            echo "| Format | ${{ steps.fmt.outcome }} |"
+            echo "| Clippy | ${{ steps.clippy.outcome }} |"
+            echo "| Build (release) | ${{ steps.build.outcome }} |"
+            echo "| Test | ${{ steps.test.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The v2 core (core/, `tv-shell-core`). Pure Rust like the panel — x11rb needs
+  # no libxcb/libX11 — so it reuses the panel job's shape and needs no apt step.
+  # `-p`-scoped like every sibling, so the daemon's Linux-only graph
+  # (evdev/zbus/bluer/cec) never reaches this build.
+  core:
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Add rustfmt + clippy
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: .
+          key: core
+
+      - name: Format check
+        id: fmt
+        run: cargo fmt --check -p tv-shell-core
+
+      - name: Clippy
+        id: clippy
+        run: cargo clippy -p tv-shell-core --all-targets -- -D warnings
+
+      - name: Build
+        id: build
+        run: cargo build --release -p tv-shell-core
+
+      # The Xvfb-backed integration tests are `#[ignore]`d behind
+      # TV_SHELL_TEST_XVFB (see core/tests/atoms_xvfb.rs), so this leg stays
+      # hermetic — it compiles and clippy-checks that file without running it.
+      - name: Test
+        id: test
+        run: cargo test -p tv-shell-core
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Rust CI — \`core/\`"
             echo ""
             echo "| Step | Result |"
             echo "|------|--------|"

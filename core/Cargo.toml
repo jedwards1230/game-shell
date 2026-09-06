@@ -1,0 +1,39 @@
+[package]
+name = "tv-shell-core"
+# v2 core. No release stream exists yet (V2_DESIGN §11 gives the core its own
+# stream when it ships), so this is 0.0.0 like `protocol` and `panel` — nothing
+# reports it and editing it cuts no release. It gains a real floor once a
+# `core-v*` tag series exists.
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0"
+description = "tv-shell v2 core: gamescope base-layer policy, scope launching, and the screen-state read that replaces the v1 Hyprland queries"
+
+[[bin]]
+name = "tv-shell-core"
+path = "src/main.rs"
+
+[lib]
+name = "tv_shell_core"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "1.1"
+anyhow = { workspace = true }
+thiserror = "2"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = "0.2"
+# X11 is the whole focus/HDR contract under gamescope (V2_DESIGN §5, §6), and it
+# is spoken as raw root-window properties. `x11rb` is a pure-Rust X11 client with
+# no libxcb/libX11 system dependency, which keeps the workspace's "a default
+# build needs no system C libraries" invariant (see daemon/Cargo.toml's `cec`
+# rationale) intact. `allow-unsafe-code` is deliberately NOT enabled: the safe
+# `RustConnection` backend is the only one used.
+x11rb = { version = "0.14", default-features = false }

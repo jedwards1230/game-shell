@@ -1,0 +1,41 @@
+[Unit]
+# The v2 session target — the single thing the session script starts and waits on.
+#
+# UNTESTED ON HARDWARE. These units follow docs/V2_DESIGN.md §4 and the shape of
+# the SteamOS/ChimeraOS `gamescope-session` package, but nothing here has been
+# booted. Read them as a proposal for review, not as a verified configuration.
+#
+# The dependency shape is deliberate and is the §4 contract:
+#
+#   * `BindsTo=` gamescope: when the compositor dies the target stops, the
+#     session script's `--wait` returns, and autologin restarts the session.
+#     That is what makes "gamescope dies → the session exits" TRUE rather than
+#     leaving an orphaned target with nothing to draw on.
+#   * `Upholds=` core and shell: systemd keeps restarting them for as long as
+#     the target is up. This is the §9 mitigation for "the core dies" and "the
+#     shell dies" — a restart under the live compositor, with the base-layer
+#     list re-resolving to the shell on its own.
+#   * `Wants=` the optional sidecars: the panel is the LAN recovery surface and
+#     must NOT be able to fail the session, since it is what an operator reaches
+#     for when the session is already broken.
+#
+# None of Binds/Upholds/Wants carries ordering. Ordering is `graphical-session.target`,
+# which becomes active only after gamescope has sent READY=1 — and gamescope
+# sends that only once its environment file exists, so every unit ordered after
+# it can rely on the file being there.
+Description=tv-shell v2 session (gamescope)
+
+# Stop the whole session if the compositor goes away.
+BindsTo=tv-shell-gamescope.service
+After=tv-shell-gamescope.service
+
+# Restart-forever children.
+Upholds=tv-shell-core.service tv-shell-shell.service
+
+# Best-effort sidecars. A failure here must never take the session down.
+Wants=tv-shell-stats.service tv-shell-panel.service tv-shell-cec.service
+
+# Never co-exist with the v1 session: they contend for the seat, the pads and
+# the CEC adapter. v1 remains selectable at the display manager (§11 rollback);
+# it is simply never running at the same time.
+Conflicts=tv-shell-input.service tv-shell-quickshell.service

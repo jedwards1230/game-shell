@@ -1,0 +1,41 @@
+[Unit]
+# tv-shell-core — the v2 policy process. UNTESTED ON HARDWARE — see the header
+# in tv-shell-session.target.
+#
+# Started by `Upholds=` on tv-shell-session.target, not by an [Install] section:
+# the session target is the single owner of this unit's lifecycle, exactly as
+# the v1 session script is for tv-shell-input.service. Enabling it into
+# default.target would start a second, compositor-less copy at user-manager boot.
+Description=tv-shell v2 core (gamescope base-layer policy, launching, IPC)
+After=graphical-session.target
+# §11: v1 and v2 never run together. They would contend for the seat, the pads
+# and the CEC adapter, and both would claim restart authority.
+Conflicts=tv-shell-input.service
+
+[Service]
+Type=simple
+
+# The compositor's environment, published by tv-shell-gamescope.service's ready
+# handshake. The leading `-` makes a missing file non-fatal: the core connects
+# to $DISPLAY, and a developer running it against an existing X server has no
+# such file. Ordering After=graphical-session.target is what makes the file
+# present in the session case.
+EnvironmentFile=-%t/tv-shell-gamescope-environment
+
+# The core reads its typed config from ~/.config/tv-shell/core.toml itself and
+# resolves its socket from $TV_SHELL_CORE_SOCK or /run/user/%U/. That is a
+# SEPARATE file and a SEPARATE socket from v1's (§11: v1 and v2 share no config
+# file, prefix or unit name), so no per-machine wiring belongs here.
+#
+# Rewrite this path to the resolved install prefix, as scripts/install.sh does
+# for the v1 units.
+ExecStart=/opt/tv-shell/bin/tv-shell-core
+
+# The core is stateless on start: it reads the base-layer list back as its last
+# intent rather than asserting one (§9), so a restart is cheap and safe even
+# with a game on screen. Restart quickly, but let the §9 short-session tracker
+# see a crash-loop rather than hiding one behind an infinite retry.
+Restart=on-failure
+RestartSec=2
+
+# No [Install] section by design — see the [Unit] comment.

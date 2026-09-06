@@ -1,0 +1,86 @@
+[Unit]
+# gamescope, the v2 compositor. UNTESTED ON HARDWARE — see the header in
+# tv-shell-session.target.
+#
+# Type=notify with a ready-fd handshake, following docs/V2_DESIGN.md §4 and the
+# ChimeraOS/SteamOS `gamescope-session` units this is derived from.
+#
+# THE HANDSHAKE, and why it is shaped this way:
+#
+#   gamescope's `-R <fd-or-fifo>` writes one line to that path once the
+#   compositor is up. `ExecStartPost` blocks reading it, then dumps the
+#   compositor's environment (WAYLAND_DISPLAY, DISPLAY, GAMESCOPE_WAYLAND_DISPLAY,
+#   XAUTHORITY) to %t/tv-shell-gamescope-environment and only THEN sends
+#   `--ready`. So `READY=1` means "the environment file exists and is complete",
+#   which is exactly the precondition every unit ordered after
+#   graphical-session.target needs. A plain Type=simple would let the core start
+#   against a compositor that has no X server yet and no environment file to
+#   read, and the failure would present as "the core cannot connect to X" rather
+#   than as a startup ordering bug.
+#
+# NotifyAccess=all because the notification comes from ExecStartPost, not from
+# the main process.
+Description=gamescope compositor for the tv-shell v2 session
+Before=graphical-session.target
+Wants=graphical-session.target
+
+# A compositor that will not start is not something to retry into a black
+# screen: three attempts in a minute, then stop and let the session script's
+# --wait return so the display manager can offer v1 (§11 rollback).
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=all
+# The handshake must complete promptly; a compositor still not ready after five
+# seconds is wedged, not slow.
+TimeoutStartSec=5
+
+# The FIFOs are created by the session script before the target is started, so
+# they exist by the time gamescope opens them. %t is $XDG_RUNTIME_DIR.
+Environment=TV_SHELL_READY_FIFO=%t/tv-shell-gamescope-ready
+Environment=TV_SHELL_STATS_FIFO=%t/tv-shell-gamescope-stats
+Environment=TV_SHELL_ENV_FILE=%t/tv-shell-gamescope-environment
+
+# §9: a layer failure must exit loudly rather than ask an invisible question.
+# gamescope's zenity dialogs are untagged windows nobody can see, and a client
+# blocked behind one hangs at 0% CPU with no log line for as long as you let it.
+Environment=GAMESCOPE_ZENITY_DISABLE=1
+
+# The mode is PINNED (§6): the EDID preferred mode on this chain is 60 Hz, so
+# letting the display choose gives 4K60. Keep these in step with [display] in
+# ~/.config/tv-shell/core.toml — the core reads that file, this unit does not.
+#
+# `--steam` selects the SteamControlled focus policy the whole §5 model depends
+# on. `--expose-wayland` stays ON: §11's per-app fix (unset WAYLAND_DISPLAY for
+# Steam-runtime apps) is proven, and chasing the problem via gamescope master
+# instead recreates it.
+ExecStart=/usr/bin/gamescope \
+    --steam \
+    --expose-wayland \
+    --hdr-enabled \
+    --adaptive-sync \
+    -W 3840 -H 2160 -r 120 \
+    -e \
+    -R ${TV_SHELL_READY_FIFO} \
+    -T ${TV_SHELL_STATS_FIFO} \
+    -- /bin/true
+
+# Block on the ready FIFO, publish the environment, then notify. Written as a
+# single `/bin/sh -c` because the read and the dump have to happen in that order
+# in one shell; `-` prefixes so a partial dump cannot wedge the whole start.
+ExecStartPost=/bin/sh -c '\
+    read -r _line < "${TV_SHELL_READY_FIFO}"; \
+    : > "${TV_SHELL_ENV_FILE}"; \
+    for v in WAYLAND_DISPLAY DISPLAY GAMESCOPE_WAYLAND_DISPLAY XAUTHORITY; do \
+        eval "val=\\$$v"; \
+        [ -n "$val" ] && printf "%s=%s\\n" "$v" "$val" >> "${TV_SHELL_ENV_FILE}"; \
+    done; \
+    systemd-notify --ready'
+
+# No Restart=: the compositor is BindsTo'd by the session target, so its death
+# is meant to end the session and hand control back to the display manager,
+# not to be papered over by a restart under a session whose clients have all
+# lost their surfaces.
+Restart=no

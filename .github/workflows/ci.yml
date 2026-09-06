@@ -59,6 +59,7 @@ jobs:
               - 'daemon/**'
               - 'panel/**'
               - 'protocol/**'
+              - 'core/**'
               - '.github/workflows/rust.yml'
               - '.github/workflows/ci.yml'
             host:
