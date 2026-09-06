@@ -71,22 +71,48 @@ pub struct DisplayConfig {
     pub height: u32,
     /// `-r`. Refresh rate in Hz. See [`Self::width`] for the link.
     pub refresh: u32,
-    /// Whether HDR should be on by default. Applied as a root-atom write, never
-    /// as a bare `gamescopectl <convar>` — §6: a value-less call RESETS the
-    /// convar to its default and turns HDR off with no log line, which is how
-    /// the phase-2 "feedback 0" was self-inflicted.
+    /// Whether HDR is on.
     ///
-    /// **NOT YET READ BY ANYTHING.** The unit passes `--hdr-enabled`
-    /// unconditionally, and the core does not write an HDR atom — the atom that
-    /// would carry it is not even in [`crate::atoms::names::ALL`]. It becomes
-    /// live with the HDR/VRR control surface (§6); until then this key records
-    /// intent and changes nothing.
+    /// **Consumed by [`CoreConfig::session_env`]**: it renders
+    /// `--hdr-enabled --hdr-sdr-content-nits <n>` (or nothing) into
+    /// `TV_SHELL_GS_HDR_ARGS`, which the gamescope unit word-splits into its
+    /// `ExecStart`. The unit used to pass `--hdr-enabled` unconditionally while
+    /// this key documented itself as read by nothing — so an operator could set
+    /// `hdr = false` and get HDR anyway. The measured kit gates the flag on
+    /// `TV_SHELL_GS_HDR` for the same reason.
+    ///
+    /// Still NOT a runtime toggle: the core writes no HDR atom (the atom is not
+    /// even in [`crate::atoms::names::ALL`]). Changing this takes a session
+    /// restart. When the runtime surface lands (§6) it must be a **root-atom
+    /// write**, never a bare `gamescopectl <convar>` — a value-less convar call
+    /// RESETS the convar to its default and turns HDR off with no log line,
+    /// which is how the phase-2 "feedback 0" was self-inflicted.
     pub hdr: bool,
     /// `--hdr-sdr-content-nits`: the shell's white point inside an HDR output.
     ///
-    /// **NOT YET READ BY ANYTHING** — same PR as [`Self::hdr`]. The flag is not
-    /// on the unit's `ExecStart` either.
+    /// Consumed with [`Self::hdr`] (it is the second half of the same flag pair,
+    /// exactly as the kit pairs them).
+    ///
+    /// **§6 leaves the right value OPEN** — it is an eyes-only criterion, and
+    /// gamescope#1887 (SDR oversaturated on an HDR output) is the known risk for
+    /// the shell's own colours. 200 is the only value ever run on this chain
+    /// (`dev/gamescope/session.sh:51`), so it is the default here; it is not a
+    /// settled answer, and this key exists so it can be moved without a rebuild.
     pub sdr_nits: u32,
+    /// Whether VRR (`--adaptive-sync`) is on.
+    ///
+    /// **§13 Q11 IS OPEN, AND THIS KEY EXISTS SO THIS PR DOES NOT CLOSE IT.**
+    /// §6 and the ops record both note OLED near-black flicker and AVR OSD
+    /// problems with VRR on this exact chain and lean toward off; the week-long
+    /// live measurement nonetheless ran with it ON (`TV_SHELL_GS_VRR` defaults
+    /// to 1 in `dev/gamescope/session.sh:50`). The unit used to hard-code
+    /// `--adaptive-sync` with no knob and no comment, which silently answered an
+    /// open design question in the direction the ops record warns against.
+    ///
+    /// The default here matches the measured configuration, because that is the
+    /// one we have evidence about. Turning it off is a one-line config change
+    /// and a session restart. Q11 stays open.
+    pub vrr: bool,
     /// How long `GAMESCOPE_HDR_OUTPUT_FEEDBACK` must read the configured value
     /// before an HDR-capable launch is allowed to proceed.
     ///
@@ -108,7 +134,13 @@ impl Default for DisplayConfig {
             height: 2160,
             refresh: 120,
             hdr: true,
-            sdr_nits: 400,
+            // The kit's measured value, not a round number someone liked. It
+            // was 400 here and 200 in the only invocation ever run on the
+            // chain; §6 leaves the right answer to the eyes, so the default
+            // should at least be a number that has been looked at.
+            sdr_nits: 200,
+            // The measured configuration. §13 Q11 is open — see the field docs.
+            vrr: true,
             hotplug_settle_ms: 2000,
         }
     }
@@ -263,9 +295,34 @@ impl CoreConfig {
     /// `KEY=value` lines; every value here is a bare integer, so no quoting
     /// question arises — deliberately, since a value needing quotes is a value
     /// whose `${VAR}` splitting rules would have to be reasoned about.
+    /// Two of the four values are ARGUMENT LISTS rather than scalars
+    /// (`TV_SHELL_GS_HDR_ARGS`, `TV_SHELL_GS_VRR_ARGS`), because a flag that is
+    /// sometimes absent cannot be expressed by substituting a value. systemd
+    /// splits an unquoted `$VAR` into words and an empty one into no words at
+    /// all, so `$TV_SHELL_GS_VRR_ARGS` in the `ExecStart` is exactly the kit's
+    /// `if [ "$VRR" = 1 ]; then ARGS+=(--adaptive-sync); fi`. Every other value
+    /// stays a bare integer and is substituted as `${VAR}` (no splitting).
     pub fn session_env(&self) -> String {
+        let hdr_args = if self.display.hdr {
+            format!(
+                "--hdr-enabled --hdr-sdr-content-nits {}",
+                self.display.sdr_nits
+            )
+        } else {
+            String::new()
+        };
+        let vrr_args = if self.display.vrr {
+            "--adaptive-sync"
+        } else {
+            ""
+        };
         format!(
-            "{ENV_WIDTH}={}\n{ENV_HEIGHT}={}\n{ENV_REFRESH}={}\n{ENV_XWAYLAND_COUNT}={}\n",
+            "{ENV_WIDTH}={}\n\
+             {ENV_HEIGHT}={}\n\
+             {ENV_REFRESH}={}\n\
+             {ENV_XWAYLAND_COUNT}={}\n\
+             {ENV_HDR_ARGS}={hdr_args}\n\
+             {ENV_VRR_ARGS}={vrr_args}\n",
             self.display.width,
             self.display.height,
             self.display.refresh,
@@ -391,6 +448,12 @@ pub const ENV_HEIGHT: &str = "TV_SHELL_GS_HEIGHT";
 pub const ENV_REFRESH: &str = "TV_SHELL_GS_REFRESH";
 /// See [`ENV_WIDTH`].
 pub const ENV_XWAYLAND_COUNT: &str = "TV_SHELL_GS_XWAYLAND_COUNT";
+/// `--hdr-enabled --hdr-sdr-content-nits <n>`, or empty. An ARGUMENT LIST, not a
+/// value: the unit substitutes it unquoted so systemd word-splits it, which is
+/// how a sometimes-absent flag is expressed at all.
+pub const ENV_HDR_ARGS: &str = "TV_SHELL_GS_HDR_ARGS";
+/// `--adaptive-sync`, or empty. See [`ENV_HDR_ARGS`].
+pub const ENV_VRR_ARGS: &str = "TV_SHELL_GS_VRR_ARGS";
 
 /// The Steam client's app id under gamescope's `--steam` focus policy.
 pub const STEAM_CLIENT_APP_ID: u32 = 769;
@@ -722,6 +785,100 @@ restart_window_secs = 120
     /// could not do: that test checks a key is *classified*, so a key labelled
     /// "read by the unit's ExecStart" passed while the unit hard-coded the value
     /// and read nothing. Here the named consumer has to exist.
+    /// Just the unit's `ExecStart=`, joined into one line.
+    fn gamescope_exec_start() -> String {
+        let unit = gamescope_unit();
+        unit.lines()
+            .skip_while(|l| !l.starts_with("ExecStart="))
+            .take_while(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Every flag the measured kit passes unconditionally
+    /// (`dev/gamescope/session.sh`'s `ARGS` array).
+    ///
+    /// The rule this pins: **a unit may not silently drop a flag the only
+    /// measured invocation carries.** Each of these was absent at some point and
+    /// each absence had a symptom nobody would trace back to a missing flag —
+    /// an un-pinned backend, a shell upscaled from a nested size that was never
+    /// set, a mouse cursor parked on a 10-foot UI, and (the bad one)
+    /// `--keep-alive`, without which a shell crash takes the compositor, the
+    /// session and any running game with it.
+    const KIT_UNCONDITIONAL_FLAGS: &[&str] = &[
+        "--backend",
+        "--steam",
+        "--keep-alive",
+        "-W",
+        "-H",
+        "-r",
+        "-w",
+        "-h",
+        "--stats-path",
+        "--hide-cursor-delay",
+    ];
+
+    #[test]
+    fn the_unit_carries_every_flag_the_measured_session_carries() {
+        let exec = gamescope_exec_start();
+        let tokens: Vec<&str> = exec.split_whitespace().collect();
+        for flag in KIT_UNCONDITIONAL_FLAGS {
+            assert!(
+                tokens.contains(flag),
+                "`{flag}` is in dev/gamescope/session.sh's ARGS — the only gamescope \
+                 invocation this project has measured — and is missing from the unit. \
+                 Either carry it or say in the unit why it differs. ExecStart: {exec}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_flag_the_kit_makes_configurable_is_configurable_or_explained() {
+        // THE CLASS: the kit gated a flag on an env var BECAUSE the answer was
+        // open. A unit that hard-codes one answer without saying it is answering
+        // anything closes a design question in silence.
+        let unit = gamescope_unit();
+        let exec = gamescope_exec_start();
+
+        // HDR and VRR are config-driven, as argument lists (a sometimes-absent
+        // flag cannot be expressed by substituting a value).
+        for var in [ENV_HDR_ARGS, ENV_VRR_ARGS] {
+            assert!(
+                exec.contains(&format!("${var}")),
+                "{var} must be substituted UNQUOTED so systemd word-splits it: {exec}"
+            );
+            assert!(
+                !exec.contains(&format!("${{{var}}}")),
+                "${{{var}}} is the no-split form, which would pass the whole list as one \
+                 argument (and an empty one as an empty argument): {exec}"
+            );
+        }
+        for hardcoded in ["--hdr-enabled", "--adaptive-sync", "--hdr-sdr-content-nits"] {
+            assert!(
+                !exec.split_whitespace().any(|t| t == hardcoded),
+                "`{hardcoded}` is hard-coded in the ExecStart, so the config key that \
+                 gates it changes nothing: {exec}"
+            );
+        }
+        // `--expose-wayland` IS hard-coded, and that is allowed only because the
+        // unit names the decision it rests on. §11 settled it; §13 Q11 did not
+        // settle VRR, which is why that one is a config key instead.
+        assert!(
+            exec.split_whitespace().any(|t| t == "--expose-wayland"),
+            "{exec}"
+        );
+        assert!(
+            unit.contains("§11"),
+            "a hard-coded flag the kit makes configurable must cite the decision that \
+             closed the question"
+        );
+        assert!(
+            unit.contains("Q11"),
+            "the unit must record that VRR is an OPEN question (§13 Q11) rather than \
+             leaving a reader to assume the default was reasoned about"
+        );
+    }
+
     #[test]
     fn the_display_keys_reach_the_unit_that_claims_to_read_them() {
         let unit = gamescope_unit();
@@ -750,20 +907,67 @@ restart_window_secs = 120
     fn the_rendered_env_file_is_one_key_value_line_per_key() {
         let env = CoreConfig::default().session_env();
         let lines: Vec<_> = env.lines().collect();
-        assert_eq!(lines.len(), 4, "{env:?}");
-        for l in lines {
+        assert_eq!(lines.len(), 6, "{env:?}");
+        for l in &lines {
             let (k, v) = l
                 .split_once('=')
                 .unwrap_or_else(|| panic!("not KEY=value: {l:?}"));
-            assert!(!k.is_empty() && !v.is_empty(), "{l:?}");
-            // Bare integers only: anything needing quotes would drag systemd's
-            // ${VAR} splitting rules into the ExecStart.
-            assert!(v.bytes().all(|b| b.is_ascii_digit()), "{l:?}");
+            assert!(!k.is_empty(), "{l:?}");
+            if k.ends_with("_ARGS") {
+                // An argument list: flags and bare integers, no quoting. A value
+                // needing quotes would drag systemd's word-splitting rules into
+                // the ExecStart, where they are much harder to reason about.
+                assert!(
+                    !v.contains(['"', '\'', '$', '\\']),
+                    "an argument list must need no quoting: {l:?}"
+                );
+            } else {
+                assert!(
+                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
+                    "a substituted value must be a bare integer: {l:?}"
+                );
+            }
         }
         assert!(
             env.ends_with('\n'),
             "a trailing newline or the last line is lost"
         );
+    }
+
+    #[test]
+    fn hdr_and_vrr_render_as_present_or_absent_flags_not_as_values() {
+        let on = CoreConfig::parse("[display]\nhdr = true\nvrr = true\nsdr_nits = 203\n")
+            .unwrap()
+            .session_env();
+        assert!(
+            on.contains(&format!(
+                "{ENV_HDR_ARGS}=--hdr-enabled --hdr-sdr-content-nits 203"
+            )),
+            "{on}"
+        );
+        assert!(
+            on.contains(&format!("{ENV_VRR_ARGS}=--adaptive-sync")),
+            "{on}"
+        );
+
+        // Off must render EMPTY, not `--adaptive-sync=0` or a `0` argument:
+        // systemd splits an empty $VAR into no words at all, which is the only
+        // way to express "do not pass this flag".
+        let off = CoreConfig::parse("[display]\nhdr = false\nvrr = false\n")
+            .unwrap()
+            .session_env();
+        assert!(off.contains(&format!("{ENV_HDR_ARGS}=\n")), "{off}");
+        assert!(off.contains(&format!("{ENV_VRR_ARGS}=\n")), "{off}");
+        assert!(!off.contains("--hdr-enabled"), "{off}");
+        assert!(!off.contains("--adaptive-sync"), "{off}");
+    }
+
+    #[test]
+    fn the_sdr_nits_default_is_the_value_that_was_actually_measured() {
+        // §6 leaves this to the eyes; 200 is the only value ever run on the
+        // chain (dev/gamescope/session.sh:51). It was 400 here — a number
+        // nobody had looked at through the television.
+        assert_eq!(DisplayConfig::default().sdr_nits, 200);
     }
 
     #[test]
@@ -810,9 +1014,7 @@ restart_window_secs = 120
     #[test]
     fn every_key_is_either_consumed_or_declared_unconsumed() {
         let unconsumed = [
-            // Read by nothing yet; land with the HDR/VRR surface (§6).
-            "display.hdr",
-            "display.sdr_nits",
+            // Read by nothing yet; lands with the HDR-aware launch path (§6).
             "display.hotplug_settle_ms",
             // Read by nothing yet; land with the forced-paint heartbeat (§9).
             "supervisor.stall_secs",
@@ -833,6 +1035,9 @@ restart_window_secs = 120
             "display.width",
             "display.height",
             "display.refresh",
+            "display.hdr",
+            "display.sdr_nits",
+            "display.vrr",
             "session.xwayland_count",
         ];
 
@@ -851,6 +1056,7 @@ restart_window_secs = 120
             refresh,
             hdr,
             sdr_nits,
+            vrr,
             hotplug_settle_ms,
         } = display;
         let SessionConfig {
@@ -871,6 +1077,7 @@ restart_window_secs = 120
             u64::from(refresh),
             u64::from(hdr),
             u64::from(sdr_nits),
+            u64::from(vrr),
             hotplug_settle_ms,
             u64::from(shell_app_id),
             u64::from(xwayland_count),
@@ -892,7 +1099,11 @@ restart_window_secs = 120
         // dead string in the list above.
         for key in unconsumed.iter().chain(consumed.iter()) {
             let (table, name) = key.split_once('.').expect("keys are `table.name`");
-            let value = if name == "hdr" { "true" } else { "1" };
+            let value = if name == "hdr" || name == "vrr" {
+                "true"
+            } else {
+                "1"
+            };
             CoreConfig::parse(&format!("[{table}]\n{name} = {value}\n"))
                 .unwrap_or_else(|e| panic!("{key} is not a real config key: {e}"));
         }

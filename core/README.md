@@ -20,15 +20,49 @@ its relationship to `daemon/`.
 
 `units/` holds the v2 session units (§4's `tv-shell-session.target` shape, taken
 from the ChimeraOS `gamescope-session` files rather than written from scratch).
-They are **untested on hardware** — nothing has booted this session yet, and the
-cutover criteria in §11 are all unmet. Two things about them are worth knowing
-before reading: every v2 sidecar carries a **`v2-` infix** (`tv-shell-v2-panel`,
-not `tv-shell-panel` — §11 forbids a shared unit name and v1 already owns the
-plain one), and gamescope's primary child is
-`units/tv-shell-gamescope-child.sh`, which publishes the compositor environment
-from **inside** gamescope's process tree and then sends `READY=1`. Its
-`sleep infinity` tail is an explicit placeholder for §4's real session child,
-not finished work.
+
+> **They are untested on hardware AND not yet installable.** `scripts/install.sh`
+> contains **zero** references to `core/`, and the `tv-shell-gamescope.desktop`
+> session file §4 names does not exist in `config/` — so nothing rewrites the
+> `/opt/tv-shell` prefix in their `ExecStart` lines and the v2 session cannot be
+> selected at the display manager. Earlier comments in the units claimed
+> install.sh rewrote those paths, as it does for the v1 units; that was not true,
+> and it also left the repo shipping the hardcoded `/opt/tv-shell` that
+> `CLAUDE.md` forbids. Wiring install.sh and adding the `.desktop` is outstanding
+> work. The §11 cutover criteria are all unmet.
+
+Three things are worth knowing before reading them:
+
+- Every v2 sidecar carries a **`v2-` infix** (`tv-shell-v2-panel`, not
+  `tv-shell-panel` — §11 forbids a shared unit name and v1 already owns the
+  plain one).
+- gamescope's primary child is `units/tv-shell-gamescope-child.sh`, which
+  publishes the compositor environment from **inside** gamescope's process tree
+  and then sends `READY=1`. Its `sleep infinity` tail is an explicit placeholder
+  for §4's real session child, not finished work.
+- **v1 exclusion is one-directional, and deliberately not `Conflicts=`.**
+  `Conflicts=` is bidirectional, so the Ansible CEC watchdog restarting
+  `tv-shell-input` on a bad `cec-health` reading (§9,
+  jedwards1230/homelab-ansible#266) would have issued a start job that stopped
+  the v2 session target — a black screen mid-game, caused by a watchdog acting on
+  a misreading, which is the exact incident §9 was written about. The session
+  script stops and `mask --runtime`s the v1 units instead, so a stray start fails
+  loudly rather than tearing down a live session, and a runtime mask cannot
+  outlive the user manager. **That is a mitigation: §9 still requires the
+  watchdog to stand down at cutover, and that is unfiled on the Ansible side.**
+
+### The rule the ExecStart is written under
+
+The measurement kit made a flag configurable **because the answer was still
+open**. A unit that hard-codes one answer without saying it is answering anything
+closes a design question in silence — and that had happened four times
+(`--adaptive-sync` against §13 Q11, `--hdr-enabled` and its nits against §6's
+eyes-only criterion, the pinned mode). So every flag in
+`tv-shell-gamescope.service`'s `ExecStart` is either config-driven as the kit
+gates it, or names the question it answers and the decision that closed it
+(`--expose-wayland` → §11). Two tests enforce it: one asserts the unit still
+carries every flag the measured session carries, the other that no
+kit-configurable flag is hard-coded.
 
 ## Why a new crate, not an evolution of `daemon/`
 
@@ -188,4 +222,11 @@ Each of these is a follow-up, and none of it is implemented in this crate today:
   and never written, and nothing holds the base layer across a known transition
   (Moonlight main → stream window, a browser navigation) or applies hysteresis
   before treating a fallback to the shell as an exit.
+- **Installation.** `scripts/install.sh` does not know about `core/`, and there
+  is no `config/tv-shell-gamescope.desktop`, so the units cannot be installed and
+  the session cannot be selected (see the box above).
+- **A recovery surface.** §9 makes the panel the thing you reach for when the
+  session is wedged. `tv-shell-v2-panel.service` does not exist, and when it does
+  it belongs to `default.target` — not to the session target, where it would die
+  with the thing it exists to recover.
 - per-app Xwayland server creation (`GAMESCOPE_CREATE_XWAYLAND_SERVER`, §5)

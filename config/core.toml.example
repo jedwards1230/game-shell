@@ -47,25 +47,46 @@
 #height = 2160
 #refresh = 120
 
-# NOT YET READ BY THE CORE — and not by the unit either. The unit passes
-# --hdr-enabled unconditionally, and the core writes no HDR atom: the atom that
-# would carry this is not even in the core's interned name list yet. This key
-# records intent and changes nothing until the HDR/VRR control surface (§6)
-# lands.
+# Whether HDR is on.
 #
-# Whether HDR should be on by default. When it becomes live it will be applied
-# as a ROOT-ATOM WRITE, read back via GAMESCOPE_HDR_OUTPUT_FEEDBACK — and NEVER
-# as a bare `gamescopectl <convar>`. On 3.16.x and master a value-less convar
-# call RESETS the convar to its default and turns HDR off with no log line at
-# all; that is how the phase-2 "feedback 0" was self-inflicted.
+# LIVE. `hdr = false` renders an EMPTY TV_SHELL_GS_HDR_ARGS and gamescope starts
+# without --hdr-enabled. The unit used to pass --hdr-enabled unconditionally
+# while this key documented itself as read by nothing, so `hdr = false` got you
+# HDR anyway; the measured kit gates the flag on TV_SHELL_GS_HDR for the same
+# reason this now does.
+#
+# It is a START-TIME setting, not a runtime toggle: changing it needs a session
+# restart, because the core writes no HDR atom yet. When the runtime surface
+# lands (§6) it will be a ROOT-ATOM WRITE read back via
+# GAMESCOPE_HDR_OUTPUT_FEEDBACK — and NEVER a bare `gamescopectl <convar>`. On
+# 3.16.x and master a value-less convar call RESETS the convar to its default and
+# turns HDR off with no log line at all; that is how the phase-2 "feedback 0" was
+# self-inflicted.
 #hdr = true
 
-# NOT YET READ BY THE CORE — same PR as `hdr` above; the flag is not on the
-# unit's ExecStart either.
-#
 # --hdr-sdr-content-nits: the white point SDR content (the shell itself) is
-# mapped to inside an HDR output. The black floor is an eyes-only criterion.
-#sdr_nits = 400
+# mapped to inside an HDR output. Passed with --hdr-enabled, as one pair.
+#
+# NOT A SETTLED NUMBER. §6 makes the black floor an eyes-only criterion and names
+# gamescope#1887 (SDR oversaturated on an HDR output) as the risk for the shell's
+# own colours. 200 is the only value ever run on this chain
+# (dev/gamescope/session.sh:51). It was 400 here — a number nobody had looked at
+# through the television — and is now the measured one. Expect to move it.
+#sdr_nits = 200
+
+# Whether VRR (--adaptive-sync) is on.
+#
+# §13 Q11 IS OPEN AND THIS KEY EXISTS SO NOTHING CLOSES IT BY ACCIDENT. §6 and
+# the ops record both note OLED near-black flicker and AVR OSD problems with VRR
+# on this exact chain and lean toward off; the week-long live measurement
+# nonetheless ran with it ON (TV_SHELL_GS_VRR defaults to 1 in the kit). The unit
+# used to hard-code --adaptive-sync with no knob and no comment, silently
+# answering an open design question in the direction the ops record warns
+# against.
+#
+# The default matches the measured configuration, because that is the one we have
+# evidence about. Turning it off is this one line and a session restart.
+#vrr = true
 
 # NOT YET READ BY THE CORE — the launch path does not gate on display feedback
 # yet; the gate lands with the HDR-aware launch path (§6).

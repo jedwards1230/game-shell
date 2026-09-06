@@ -2,7 +2,7 @@
 # tv-shell-core — the v2 policy process. UNTESTED ON HARDWARE — see the header
 # in tv-shell-session.target.
 #
-# Started by `Upholds=` on tv-shell-session.target, not by an [Install] section:
+# Started by `Wants=` on tv-shell-session.target, not by an [Install] section:
 # the session target is the single owner of this unit's lifecycle, exactly as
 # the v1 session script is for tv-shell-input.service. Enabling it into
 # default.target would start a second, compositor-less copy at user-manager boot.
@@ -38,9 +38,31 @@ After=tv-shell-gamescope.service
 BindsTo=tv-shell-gamescope.service
 PartOf=tv-shell-session.target
 
-# §11: v1 and v2 never run together. They would contend for the seat, the pads
-# and the CEC adapter, and both would claim restart authority.
-Conflicts=tv-shell-input.service
+# THERE IS DELIBERATELY NO `Conflicts=tv-shell-input.service` HERE ANY MORE.
+#
+# §11 is right that v1 and v2 must never run together — they contend for the
+# seat, the pads and the CEC adapter, and both claim restart authority. But
+# `Conflicts=` is BIDIRECTIONAL, and that is a loaded gun on this box.
+#
+# The `htpc_common` Ansible role ships a CEC watchdog as a SYSTEM unit that
+# probes `cec-health`, misreads a deliberately stopped `tv-shell-input` as a
+# wedged adapter, and restarts it (§9; jedwards1230/homelab-ansible#266). With
+# `Conflicts=` in place, that restart issues a start job for tv-shell-input,
+# which STOPS this unit — and the same directive on the session target stops the
+# whole session. Mid-game the screen goes black and the box relogins, caused by a
+# watchdog acting on a bad reading. That is the precise incident §9 was written
+# about, wired into v2's own units.
+#
+# Mutual exclusion is enforced ONE-DIRECTIONALLY instead, by the session script:
+# it stops the v1 units and `mask --runtime`s them before starting the target,
+# and unmasks on the way out. A stray `systemctl --user start tv-shell-input`
+# then FAILS LOUDLY against the mask instead of tearing down a live session, and
+# a runtime mask cannot outlive the user manager, so a v2 session that dies badly
+# can never leave v1 unstartable.
+#
+# THAT IS A MITIGATION, NOT THE FIX. §9 requires the watchdog to STAND DOWN at
+# cutover and its health probe to distinguish a stopped unit from a wedged
+# adapter. That work is on the Ansible side and is still unfiled there.
 
 [Service]
 Type=simple
@@ -71,21 +93,37 @@ EnvironmentFile=%t/tv-shell-gamescope-environment
 # SEPARATE file and a SEPARATE socket from v1's (§11: v1 and v2 share no config
 # file, prefix or unit name), so no per-machine wiring belongs here.
 #
-# Rewrite this path to the resolved install prefix, as scripts/install.sh does
-# for the v1 units.
+# ⚠ PLACEHOLDER PATH — THESE UNITS ARE NOT INSTALLABLE YET. scripts/install.sh
+# has ZERO references to core/, and the tv-shell-gamescope.desktop session file
+# §4 names does not exist in config/, so nothing rewrites this prefix and the v2
+# session cannot be selected at the display manager. An earlier comment here
+# claimed install.sh rewrote it, as it does for the v1 units; that was not true,
+# and it also left the repo shipping the hardcoded /opt/tv-shell that CLAUDE.md
+# forbids. See core/README.md § "Not yet here".
 ExecStart=/opt/tv-shell/bin/tv-shell-core
 
 # The core is stateless on start: it reads the base-layer list back as its last
 # intent rather than asserting one (§9), so a restart is cheap and safe even
 # with a game on screen.
 #
-# Restart=on-failure with no StartLimit* here ON PURPOSE. §9's crash-loop
-# response (three exits under 60 s → back off, then select the v1 session) is
-# NOT IMPLEMENTED — there is no short-session tracker and nothing reads
-# [supervisor].restart_threshold. Adding a StartLimitBurst here would look like
-# that protection without being it, which is the mistake the gamescope unit's
-# comment made. See tv-shell-session.target's header for the full statement.
-Restart=on-failure
+# `Restart=always`, and the target `Wants=` this unit rather than `Upholds=` it.
+# Those two go together and the pairing is the point.
+#
+# `Upholds=` restarts a unit even after a CLEAN exit, and specifically defeats a
+# manual `systemctl --user stop` — that is its whole purpose. Combined with a
+# `Restart=` on the unit it also gives one unit two independent restart
+# mechanisms with no shared rate limit. The practical cost: an operator debugging
+# over SSH cannot take the core down without stopping the session target, which
+# blanks the television. `Restart=always` delivers §9's actual requirement (the
+# core dies → it comes back) while still honouring an explicit stop job, which is
+# the right end of that trade for a box someone has to debug remotely.
+#
+# No StartLimit* here ON PURPOSE. §9's crash-loop response (three exits under
+# 60 s → back off, then select the v1 session) is NOT IMPLEMENTED — there is no
+# short-session tracker and nothing reads [supervisor].restart_threshold. Adding
+# a StartLimitBurst would look like that protection without being it, which is
+# the mistake the gamescope unit's comment made. See tv-shell-session.target.
+Restart=always
 RestartSec=2
 
 # No [Install] section by design — see the [Unit] comment.

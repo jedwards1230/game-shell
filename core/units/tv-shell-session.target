@@ -11,13 +11,25 @@
 #     session script's `--wait` returns, and autologin restarts the session.
 #     That is what makes "gamescope dies → the session exits" TRUE rather than
 #     leaving an orphaned target with nothing to draw on.
-#   * `Upholds=` core and shell: systemd keeps restarting them for as long as
-#     the target is up. This is the §9 mitigation for "the core dies" and "the
-#     shell dies" — a restart under the live compositor, with the base-layer
-#     list re-resolving to the shell on its own.
-#   * `Wants=` the optional sidecars: the panel is the LAN recovery surface and
-#     must NOT be able to fail the session, since it is what an operator reaches
-#     for when the session is already broken.
+#   * `Wants=` core and shell, with `Restart=always` on the units themselves.
+#     That is the §9 mitigation for "the core dies" and "the shell dies" — a
+#     restart under the live compositor, with the base-layer list re-resolving to
+#     the shell on its own. It is deliberately NOT `Upholds=`: that restarts a
+#     unit even after a clean exit and specifically defeats a manual
+#     `systemctl --user stop`, so an operator debugging over SSH could not take
+#     the core down without stopping this target and blanking the television.
+#     `Restart=always` gives the same crash recovery and still honours a stop.
+#
+#   * THE PANEL IS NOT HERE, AND THAT IS THE FIX, NOT AN OMISSION. §9 makes the
+#     panel the LAN recovery surface — the thing you reach for when the session
+#     is wedged. It was `Wants=` on this target, which means it would have died
+#     with the very thing it exists to recover, and an operator would have found
+#     the recovery surface gone at exactly the moment they needed it. When
+#     `tv-shell-v2-panel.service` lands it gets `[Install] WantedBy=default.target`
+#     and is `systemctl --user enable`d, so it outlives every session on the box.
+#     **Until then the v2 session has NO recovery surface**, which is worth
+#     saying out loud: a `Wants=` on a unit that does not exist is a silent skip,
+#     so the session would have come up believing it had one.
 #
 # WHY THE `v2-` INFIX ON THE SIDECARS AND THE SHELL:
 #
@@ -29,12 +41,10 @@
 #   v1's config and dialling v1's socket, and it would look like the v2 panel
 #   simply misbehaving. So every v2 sidecar carries the infix.
 #
-#   NONE OF THESE FOUR UNITS EXIST YET (`tv-shell-v2-shell`, `-stats`, `-panel`,
-#   `-cec`). That is why they are all `Wants=` for now: a `Wants=` on a missing
-#   unit is a soft skip at load, while an `Upholds=` on a missing unit is a LOAD
-#   ERROR that fails the whole target. `tv-shell-v2-shell.service` becomes
-#   `Upholds=` — its §9 "shell dies → restart under the live compositor" role —
-#   the moment that unit lands.
+#   NONE OF THESE UNITS EXIST YET (`tv-shell-v2-shell`, `-stats`, `-cec`; the
+#   panel is a separate case, above). They are `Wants=` because a `Wants=` on a
+#   missing unit is a soft skip at load — but note that a soft skip is also
+#   invisible, so the session comes up as if they were there.
 #
 # None of Binds/Upholds/Wants carries ordering, INCLUDING the `After=` on this
 # target: ordering a target does not order the units it upholds. So each child
@@ -70,16 +80,19 @@ Description=tv-shell v2 session (gamescope)
 BindsTo=tv-shell-gamescope.service
 After=tv-shell-gamescope.service
 
-# Restart-forever children. Only the core exists today; the shell unit joins it
-# here (as `Upholds=`) when it lands — see the [Unit] comment above.
-Upholds=tv-shell-core.service
+# The session's own children. Restart-on-death lives on each unit
+# (`Restart=always`), not here as `Upholds=` — see the [Unit] comment.
+#
+# The panel is deliberately absent: it is the recovery surface and belongs to
+# default.target, not to the session it recovers.
+Wants=tv-shell-core.service
+Wants=tv-shell-v2-shell.service tv-shell-v2-stats.service tv-shell-v2-cec.service
 
-# Best-effort sidecars, plus the not-yet-written shell. A failure here must
-# never take the session down, and a unit that does not exist yet is a soft skip
-# rather than a load error.
-Wants=tv-shell-v2-shell.service tv-shell-v2-stats.service tv-shell-v2-panel.service tv-shell-v2-cec.service
-
-# Never co-exist with the v1 session: they contend for the seat, the pads and
-# the CEC adapter. v1 remains selectable at the display manager (§11 rollback);
-# it is simply never running at the same time.
-Conflicts=tv-shell-input.service tv-shell-quickshell.service
+# NO `Conflicts=` — see the long comment in tv-shell-core.service. It is
+# bidirectional, so the Ansible CEC watchdog restarting tv-shell-input on a bad
+# `cec-health` reading would have stopped this target and black-screened a live
+# game. v1 exclusion is one-directional, done by the session script (stop +
+# `mask --runtime` the v1 units, unmask on exit), which also covers v1's PANEL —
+# left running it would keep serving on the LAN while dialling a socket with no
+# daemon behind it, so the recovery surface would look broken rather than saying
+# "v2 is running".
