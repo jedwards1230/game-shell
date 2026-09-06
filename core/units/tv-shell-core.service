@@ -93,14 +93,19 @@ EnvironmentFile=%t/tv-shell-gamescope-environment
 # SEPARATE file and a SEPARATE socket from v1's (§11: v1 and v2 share no config
 # file, prefix or unit name), so no per-machine wiring belongs here.
 #
-# ⚠ PLACEHOLDER PATH — THESE UNITS ARE NOT INSTALLABLE YET. scripts/install.sh
-# has ZERO references to core/, and the tv-shell-gamescope.desktop session file
-# §4 names does not exist in config/, so nothing rewrites this prefix and the v2
-# session cannot be selected at the display manager. An earlier comment here
-# claimed install.sh rewrote it, as it does for the v1 units; that was not true,
-# and it also left the repo shipping the hardcoded /opt/tv-shell that CLAUDE.md
-# forbids. See core/README.md § "Not yet here".
-ExecStart=/opt/tv-shell/bin/tv-shell-core
+# THE PREFIX IS A TOKEN, NOT A PATH. `scripts/install-v2.sh` substitutes
+# @TV_SHELL_V2_PREFIX@ with its resolved --prefix (default /opt/tv-shell-v2) when
+# it writes this unit into ~/.config/systemd/user/, exactly as scripts/install.sh
+# rewrites the v1 units' ExecStart.
+#
+# A token rather than a default literal, and the difference matters here: v1's
+# units carry a real /opt/tv-shell default because that IS their prefix, but a v2
+# unit copied into place by hand with an unsubstituted default would exec V1's
+# binary out of v1's prefix and look like it worked. `@TV_SHELL_V2_PREFIX@/bin/…`
+# cannot be executed, so the same mistake fails loudly at the first start — the
+# §3 rule applied to the installer. A test asserts the committed units name no
+# absolute path and the installed ones carry no token.
+ExecStart=@TV_SHELL_V2_PREFIX@/bin/tv-shell-core
 
 # The core is stateless on start: it reads the base-layer list back as its last
 # intent rather than asserting one (§9), so a restart is cheap and safe even

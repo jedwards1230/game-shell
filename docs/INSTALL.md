@@ -53,6 +53,28 @@ never overwrites your existing `~/.config/tv-shell` files. Useful flags:
 `--no-build` (reuse an existing binary), `--features` (daemon Cargo features,
 default `cec,mcp`), `--session-dir`, `--user`. See `./scripts/install.sh --help`.
 
+### The v2 (gamescope) session — `scripts/install-v2.sh`
+
+The v2 session installs **beside** this one, never over it
+([`V2_DESIGN.md`](V2_DESIGN.md) §11): its own prefix, units, config file and
+session entry, so v1 stays selectable as the rollback.
+
+```bash
+sudo ./scripts/install-v2.sh --user "$USER"   # default prefix /opt/tv-shell-v2
+```
+
+It builds `tv-shell-core`, installs it and the two session scripts to
+`<prefix>/bin/`, writes the three v2 systemd `--user` units with their install
+prefix substituted, writes `/usr/share/wayland-sessions/tv-shell-v2.desktop`, and
+seeds `~/.config/tv-shell/core.toml` (v2's config file — **not** `config.toml`,
+which is v1's and would abort the v1 daemon if it carried v2 tables). It refuses
+`--prefix /opt/tv-shell` so it cannot land in v1's tree. Flags: `--prefix`,
+`--user`, `--session-dir`, `--unit-dir`, `--config-dir`, `--no-build`; see
+`./scripts/install-v2.sh --help`.
+
+At the display manager you then get **TV Shell v2 (gamescope)** alongside **TV
+Shell (Wayland)**. v2 is unproven on hardware — see `core/README.md`.
+
 ## 3. Configure
 
 Everything machine-specific lives under `~/.config/tv-shell/` and is seeded

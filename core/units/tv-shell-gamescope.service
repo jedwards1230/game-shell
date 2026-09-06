@@ -168,12 +168,10 @@ Environment=GAMESCOPE_ZENITY_DISABLE=1
 # into its ExecStart is a worse idea than editing the unit) and the kit's
 # daemon-start logic (v2 has no v1 daemon in the session at all).
 #
-# ⚠ THE PATH BELOW IS A PLACEHOLDER — THESE UNITS ARE NOT INSTALLABLE YET.
-# `scripts/install.sh` contains ZERO references to `core/`, and the
-# `tv-shell-gamescope.desktop` session file §4 names does not exist in `config/`.
-# So nothing rewrites this prefix, and the v2 session cannot be selected at the
-# display manager. Earlier comments here claimed install.sh handled it, as it
-# does for the v1 units; that was not true. See core/README.md § "Not yet here".
+# THE CHILD PATH BELOW IS A TOKEN. `scripts/install-v2.sh` substitutes
+# @TV_SHELL_V2_PREFIX@ with its resolved --prefix when it installs this unit; see
+# the long note on tv-shell-core.service's ExecStart for why it is a token and
+# not a default literal.
 ExecStart=/usr/bin/gamescope \
     --backend drm \
     --steam \
@@ -186,7 +184,7 @@ ExecStart=/usr/bin/gamescope \
     --xwayland-count ${TV_SHELL_GS_XWAYLAND_COUNT} \
     --hide-cursor-delay 3000 \
     --stats-path ${TV_SHELL_STATS_FIFO} \
-    -- /opt/tv-shell/bin/tv-shell-gamescope-child.sh
+    -- @TV_SHELL_V2_PREFIX@/bin/tv-shell-gamescope-child.sh
 
 # No Restart=: the compositor is BindsTo'd by the session target, so its death
 # is meant to end the session and hand control back to the display manager,

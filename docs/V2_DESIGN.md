@@ -64,7 +64,7 @@ Compositor: **gamescope**, DRM backend, `--steam` (SteamControlled focus policy)
 ```
 display manager (autologin, Relogin=true) ── selects one of:
   tv-shell-wayland.desktop   → v1 session (Hyprland + Quickshell + tv-shell-input)   [unchanged]
-  tv-shell-gamescope.desktop → v2 session script: stop any stale target, reset-failed,
+  tv-shell-v2.desktop        → v2 session script: stop any stale target, reset-failed,
       mkfifo ready + stats, systemctl --user start --wait tv-shell-session.target
         ├─ tv-shell-gamescope.service   Type=notify, NotifyAccess=all, TimeoutStartSec=5,
         │     Before=graphical-session.target; -R <ready fifo> → env dumped to
@@ -78,6 +78,8 @@ display manager (autologin, Relogin=true) ── selects one of:
         └─ tv-shell-cec.service         Wants=            — kernel-CEC observer sidecar (optional)
       apps: app-steam-app<id>-<pid>.scope, one per launch, on their own Xwayland server
 ```
+
+**The v2 session file is `tv-shell-v2.desktop`, not the `tv-shell-gamescope.desktop` this section first named.** That name was already taken by the Ansible-owned gamescope measurement prototype (`dev/gamescope/README.md`), which is §10's regression bench and still gets selected — so reusing it would have overwritten a live session entry. `scripts/install-v2.sh` writes the v2 one, and a test asserts the name collides with neither it nor v1's `tv-shell-wayland.desktop`.
 
 `BindsTo`/`Upholds`/`Wants` carry no ordering; ordering is `graphical-session.target`, which becomes active only after gamescope's `READY=1`, and that is sent only after the environment file exists. The session script's `--wait` is what makes "gamescope dies → the session exits" true.
 
@@ -229,6 +231,7 @@ The panel becomes the recovery and observability surface for the supervisor (uni
 
 ## 11. Deploy and migration
 
+- **The installer is `scripts/install-v2.sh`**, a separate script rather than a mode on v1's `scripts/install.sh` — the rule below applies to the installer itself, and a flag whose default is v1 is one forgotten argument away from installing over the running appliance. It defaults to the `/opt/tv-shell-v2` prefix, refuses `--prefix /opt/tv-shell` outright, installs the three v2 units with their `@TV_SHELL_V2_PREFIX@` token substituted, and writes `tv-shell-v2.desktop`. Six tests in `core/src/config.rs` run it into a scratch tree and assert the installed units carry no token and no path under v1's prefix. What it does **not** yet give the core is a release stream or an Ansible pin (both below).
 - **Beside, not instead, at every shared layer.** v2 has its own session entry, install prefix and git clone (a `/dev/deploy` of a v2 branch must not replace v1's `shell/`), its own config file (the v1 daemon's `config.toml` root is `deny_unknown_fields`, so a new v2 table would abort v1 at startup), its own core binary and unit, and a panel unit whose managed unit names are config. Only one session runs at a time, so the socket and ports do not collide. Cutover includes "deploy v2, select v1, confirm v1 boots".
 - **Hot git deploy stays**: `/dev/deploy` → `/dev/build` → unit restart → screenshot. Screenshots move to gamescope's `gamescope_control.take_screenshot` (grim's protocol is not served), which makes the core a Wayland client of `GAMESCOPE_WAYLAND_DISPLAY`; the same client serves `gamescope-action-binding` (§7).
 - **Fix the Ansible pin first** (jedwards1230/homelab-ansible#320): the role pins a pre-workspace-model daemon and downgrades the running one on any run. The v2 core gets its own release stream and pin. Packaging (#144, #147) remains the end state for install, upgrade and rollback.

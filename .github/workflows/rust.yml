@@ -225,12 +225,16 @@ jobs:
 
       # C2: the v2 session scripts were shellchecked by nothing. `gamescope.yml`
       # covers dev/gamescope/ only, and these ship as part of the core.
-      - name: Shellcheck the session scripts
+      #
+      # scripts/install-v2.sh joins them: it is v2's installer, it is what the
+      # install tests above execute, and no other job lints it (v1's
+      # scripts/install.sh is still shellchecked by nothing — out of scope here).
+      - name: Shellcheck the session scripts and the v2 installer
         id: shellcheck
         run: |
           shellcheck --version
-          shellcheck -x core/units/*.sh
-          for f in core/units/*.sh; do bash -n "$f"; done
+          shellcheck -x core/units/*.sh scripts/install-v2.sh
+          for f in core/units/*.sh scripts/install-v2.sh; do bash -n "$f"; done
 
       - name: Summary
         if: always()

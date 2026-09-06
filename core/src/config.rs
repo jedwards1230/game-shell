@@ -1108,4 +1108,304 @@ restart_window_secs = 120
                 .unwrap_or_else(|e| panic!("{key} is not a real config key: {e}"));
         }
     }
+
+    // -- the install link ----------------------------------------------------
+    //
+    // §11's "beside, not instead, at every shared layer" was a rule that nothing
+    // checked, and the units shipped a hard-coded `/opt/tv-shell` — v1's prefix —
+    // under a comment claiming an installer rewrote it. No installer knew the
+    // units existed.
+    //
+    // These tests run the REAL `scripts/install-v2.sh` into a scratch tree and
+    // assert on the files it actually writes. Re-implementing its substitution
+    // in the test would be the #416 shape again: a property confirmed only by
+    // the code that already believes it.
+
+    use std::process::Command;
+
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("core/ is a workspace member, so it has a parent")
+            .to_path_buf()
+    }
+
+    /// v1's session entry, written by `scripts/install.sh`. Reusing it would
+    /// replace the rollback path §11 depends on.
+    const V1_SESSION_FILE: &str = "tv-shell-wayland.desktop";
+    /// The Ansible-owned gamescope measurement prototype's entry
+    /// (`dev/gamescope/README.md`) — the §10 regression bench. V2_DESIGN §4 named
+    /// this file for v2 before the prototype claimed it.
+    const PROTOTYPE_SESSION_FILE: &str = "tv-shell-gamescope.desktop";
+    /// The third name, which is v2's.
+    const V2_SESSION_FILE: &str = "tv-shell-v2.desktop";
+    /// The stand-in the committed units carry instead of an absolute path.
+    const PREFIX_TOKEN: &str = "@TV_SHELL_V2_PREFIX@";
+    /// v1's install prefix. A v2 unit naming a path under it would run v1's tree.
+    const V1_PREFIX: &str = "/opt/tv-shell";
+
+    struct Staged {
+        root: std::path::PathBuf,
+        prefix: std::path::PathBuf,
+        units: std::path::PathBuf,
+        sessions: std::path::PathBuf,
+        config: std::path::PathBuf,
+    }
+
+    impl Drop for Staged {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Run `scripts/install-v2.sh --no-build` into a scratch tree.
+    ///
+    /// `--no-build` is not a shortcut: a `cargo build` from inside `cargo test`
+    /// would block on the build lock this very test run holds. Every path this
+    /// exercises is downstream of the binary, not of building it.
+    ///
+    /// `--user` is passed explicitly because the installer refuses an IMPLICIT
+    /// root user (the root-owned-install footgun), and CI runs this in a
+    /// root-only container.
+    fn stage_install(tag: &str) -> Staged {
+        // Under `target/`, NOT `std::env::temp_dir()`. /tmp is shared with every
+        // other job on the box and this went intermittently `Permission denied`
+        // there; a scratch tree under the build directory is private to the
+        // checkout, gitignored, and cleaned by `cargo clean`.
+        let root = repo_root()
+            .join("target")
+            .join(format!("install-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let s = Staged {
+            prefix: root.join("prefix"),
+            units: root.join("units"),
+            sessions: root.join("sessions"),
+            config: root.join("config"),
+            root,
+        };
+        let user = String::from_utf8(
+            Command::new("id")
+                .arg("-un")
+                .output()
+                .expect("running id -un")
+                .stdout,
+        )
+        .expect("id -un is utf-8");
+
+        let out = Command::new("bash")
+            .arg(repo_root().join("scripts/install-v2.sh"))
+            .arg("--no-build")
+            .args(["--user", user.trim()])
+            .arg("--prefix")
+            .arg(&s.prefix)
+            .arg("--unit-dir")
+            .arg(&s.units)
+            .arg("--session-dir")
+            .arg(&s.sessions)
+            .arg("--config-dir")
+            .arg(&s.config)
+            .output()
+            .expect("running scripts/install-v2.sh");
+        assert!(
+            out.status.success(),
+            "install-v2.sh failed: {}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        s
+    }
+
+    /// The v2 unit files as installed, name and content, sorted by name.
+    fn installed_units(s: &Staged) -> Vec<(String, String)> {
+        let mut v: Vec<_> = std::fs::read_dir(&s.units)
+            .expect("the installer created the unit dir")
+            .map(|e| {
+                let p = e.unwrap().path();
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(&p).unwrap(),
+                )
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// Every non-comment line of a unit, so a comment discussing v1's prefix
+    /// (several do, at length) is not mistaken for a directive naming it.
+    fn directive_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with('#'))
+    }
+
+    #[test]
+    fn the_committed_units_name_no_absolute_install_path() {
+        // The bug this pins: the units shipped `/opt/tv-shell/bin/...` while
+        // claiming an installer rewrote it. CLAUDE.md forbids the hardcode and
+        // §11 forbids the *prefix* — and the second is the one that would have
+        // silently run v1's tree out of a v2 unit.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("units");
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in directive_lines(&text) {
+                assert!(
+                    !line.contains(&format!("{V1_PREFIX}/")),
+                    "{name}:{} names a path under v1's prefix: {line}",
+                    n + 1
+                );
+            }
+        }
+        // And the two that need a prefix say so with the token, so the installer
+        // has something to substitute and a hand-copied unit fails loudly.
+        for (unit, needle) in [
+            (
+                "tv-shell-core.service",
+                "ExecStart=@TV_SHELL_V2_PREFIX@/bin/tv-shell-core",
+            ),
+            (
+                "tv-shell-gamescope.service",
+                "@TV_SHELL_V2_PREFIX@/bin/tv-shell-gamescope-child.sh",
+            ),
+        ] {
+            let text = std::fs::read_to_string(dir.join(unit)).unwrap();
+            assert!(text.contains(needle), "{unit} must carry `{needle}`");
+        }
+    }
+
+    #[test]
+    fn the_installed_units_carry_no_token_and_no_v1_path() {
+        let s = stage_install("units");
+        let units = installed_units(&s);
+        assert_eq!(units.len(), 3, "expected three v2 units, got {units:?}");
+        for (name, text) in &units {
+            assert!(
+                !text.contains(PREFIX_TOKEN),
+                "{name} still carries {PREFIX_TOKEN} after install — systemd would exec a path that does not exist"
+            );
+            for (n, line) in directive_lines(text) {
+                assert!(
+                    !line.contains(&format!("{V1_PREFIX}/")),
+                    "{name}:{} names a path under v1's prefix after install: {line}",
+                    n + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rewritten_exec_paths_point_at_the_resolved_prefix() {
+        let s = stage_install("exec");
+        let prefix = s.prefix.display().to_string();
+
+        let core = std::fs::read_to_string(s.units.join("tv-shell-core.service")).unwrap();
+        assert!(
+            core.contains(&format!("ExecStart={prefix}/bin/tv-shell-core\n")),
+            "the core unit's ExecStart must be the resolved prefix's binary"
+        );
+
+        // The gamescope unit's prefix use is NOT on the `ExecStart=` line: it is
+        // the child command at the end of a line-continued invocation, which is
+        // exactly what a naive `/^ExecStart=/` rewrite (v1's shape) would miss.
+        let gs = std::fs::read_to_string(s.units.join("tv-shell-gamescope.service")).unwrap();
+        assert!(
+            gs.contains(&format!("-- {prefix}/bin/tv-shell-gamescope-child.sh")),
+            "the gamescope unit's child command must be the resolved prefix's script"
+        );
+
+        // And the files those paths name are actually there. The session script
+        // resolves the core binary from its OWN directory, so this adjacency is
+        // load-bearing, not incidental.
+        for f in [
+            "tv-shell-gamescope-child.sh",
+            "tv-shell-gamescope-session.sh",
+        ] {
+            assert!(
+                s.prefix.join("bin").join(f).is_file(),
+                "{f} was not installed"
+            );
+        }
+
+        let desktop = std::fs::read_to_string(s.sessions.join(V2_SESSION_FILE)).unwrap();
+        assert!(
+            desktop.contains(&format!("Exec={prefix}/bin/tv-shell-gamescope-session.sh")),
+            "the session entry's Exec must be the resolved prefix's session script: {desktop}"
+        );
+        assert!(
+            s.config.join("core.toml").is_file(),
+            "core.toml was not seeded"
+        );
+    }
+
+    #[test]
+    fn the_v2_session_entry_collides_with_neither_v1_nor_the_prototype() {
+        // Both other names are live: v1's is the §11 rollback the operator
+        // selects when v2 misbehaves, and the prototype's is the §10 regression
+        // bench. Overwriting either removes something someone still selects.
+        assert_ne!(V2_SESSION_FILE, V1_SESSION_FILE);
+        assert_ne!(V2_SESSION_FILE, PROTOTYPE_SESSION_FILE);
+
+        let s = stage_install("session");
+        let written: Vec<String> = std::fs::read_dir(&s.sessions)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            written,
+            vec![V2_SESSION_FILE.to_string()],
+            "the v2 installer must write exactly its own session entry"
+        );
+
+        // The committed reference copy in config/ carries the same name, so an
+        // operator wiring the session by hand lands on the same file.
+        assert!(
+            repo_root().join("config").join(V2_SESSION_FILE).is_file(),
+            "config/{V2_SESSION_FILE} must exist as the reference session entry"
+        );
+    }
+
+    #[test]
+    fn the_v2_unit_names_collide_with_none_of_v1s() {
+        // §11: v1 and v2 share no unit name. v1's are the ones scripts/install.sh
+        // installs, which are exactly the unit files committed in config/ — read
+        // rather than listed, so a v1 unit added later cannot escape this.
+        let v1: Vec<String> = std::fs::read_dir(repo_root().join("config"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".service") || n.ends_with(".target"))
+            .collect();
+        assert!(!v1.is_empty(), "expected v1 units in config/");
+
+        let s = stage_install("names");
+        for (name, _) in installed_units(&s) {
+            assert!(
+                !v1.contains(&name),
+                "{name} is also a v1 unit name — a v2 target pulling it would start v1's process"
+            );
+        }
+    }
+
+    #[test]
+    fn the_installer_refuses_v1s_prefix() {
+        // The one refusal: --prefix /opt/tv-shell would put v2's binary and
+        // session script inside the tree the couch's v1 session runs from.
+        for arg in [V1_PREFIX, "/opt/tv-shell/"] {
+            let out = Command::new("bash")
+                .arg(repo_root().join("scripts/install-v2.sh"))
+                .args(["--no-build", "--prefix", arg])
+                .output()
+                .expect("running scripts/install-v2.sh");
+            assert!(
+                !out.status.success(),
+                "installing to {arg} must fail, but it succeeded"
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("refusing"),
+                "the refusal must say why: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
 }

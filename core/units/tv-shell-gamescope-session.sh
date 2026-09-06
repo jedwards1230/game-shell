@@ -1,6 +1,8 @@
 #!/bin/bash
 # tv-shell v2 session script — launched by the display manager via
-# tv-shell-gamescope.desktop.
+# tv-shell-v2.desktop (installed by scripts/install-v2.sh; a third name, since v1
+# owns tv-shell-wayland.desktop and the Ansible measurement prototype owns
+# tv-shell-gamescope.desktop).
 #
 # UNTESTED ON HARDWARE. This follows docs/V2_DESIGN.md §4 and the shape of the
 # ChimeraOS/SteamOS `gamescope-session` script it is derived from, but it has
@@ -32,9 +34,20 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATS_FIFO="$RUNTIME_DIR/tv-shell-gamescope-stats"
 ENV_FILE="$RUNTIME_DIR/tv-shell-gamescope-environment"
 MODE_FILE="$RUNTIME_DIR/tv-shell-gamescope-mode"
-# Rewrite this path to the resolved install prefix, as scripts/install.sh does
-# for the v1 units.
-CORE_BIN="${TV_SHELL_CORE_BIN:-/opt/tv-shell/bin/tv-shell-core}"
+# THE PREFIX IS RESOLVED AT RUNTIME, NOT REWRITTEN AT INSTALL.
+#
+# This used to be a hard-coded /opt/tv-shell path with a comment claiming
+# scripts/install.sh rewrote it. It did not — install.sh had no reference to
+# core/ at all — so the shipped script pointed at v1's prefix, which is both the
+# hardcode CLAUDE.md forbids and a path that would have run v1's tree.
+#
+# scripts/install-v2.sh installs this script and the core binary side by side in
+# <prefix>/bin/, so the script's own directory IS the prefix's bin dir. Deriving
+# it needs no substitution and cannot go stale: unlike the units (systemd cannot
+# resolve a path at runtime, so those carry a @TV_SHELL_V2_PREFIX@ token the
+# installer substitutes), a script can just look at itself.
+SESSION_BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CORE_BIN="${TV_SHELL_CORE_BIN:-$SESSION_BIN_DIR/tv-shell-core}"
 
 # The v1 units this session must exclude. Held in one place because the stop,
 # the mask and the unmask all have to agree.

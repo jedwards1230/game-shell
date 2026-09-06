@@ -70,6 +70,15 @@ Xvfb :99 -screen 0 1920x1080x24 &
 TV_SHELL_TEST_XVFB=:99 cargo test -p tv-shell-core --test atoms_xvfb -- --ignored
 ```
 
+The default `cargo test` above also **runs `scripts/install-v2.sh`** into a
+scratch tree under `target/` and asserts on the files it writes (no leftover
+prefix token, no path under v1's prefix, the session entry's name). So that
+script must stay lint-clean and executable:
+
+```bash
+shellcheck -x core/units/*.sh scripts/install-v2.sh
+```
+
 ### QML shell (`shell/` — no build step; formatting and headless tests)
 
 ```bash

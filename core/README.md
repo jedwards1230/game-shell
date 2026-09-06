@@ -21,15 +21,23 @@ its relationship to `daemon/`.
 `units/` holds the v2 session units (§4's `tv-shell-session.target` shape, taken
 from the ChimeraOS `gamescope-session` files rather than written from scratch).
 
-> **They are untested on hardware AND not yet installable.** `scripts/install.sh`
-> contains **zero** references to `core/`, and the `tv-shell-gamescope.desktop`
-> session file §4 names does not exist in `config/` — so nothing rewrites the
-> `/opt/tv-shell` prefix in their `ExecStart` lines and the v2 session cannot be
-> selected at the display manager. Earlier comments in the units claimed
-> install.sh rewrote those paths, as it does for the v1 units; that was not true,
-> and it also left the repo shipping the hardcoded `/opt/tv-shell` that
-> `CLAUDE.md` forbids. Wiring install.sh and adding the `.desktop` is outstanding
-> work. The §11 cutover criteria are all unmet.
+> **They are installable now, and still untested on hardware.**
+> `scripts/install-v2.sh` builds the core, lays a v2-only prefix
+> (`/opt/tv-shell-v2` by default), installs these units with their
+> `@TV_SHELL_V2_PREFIX@` token substituted, and writes a
+> `tv-shell-v2.desktop` session entry — a third name, since v1 owns
+> `tv-shell-wayland.desktop` and the Ansible measurement prototype owns
+> `tv-shell-gamescope.desktop` (the name §4 wrote before that prototype existed).
+> Nothing here has been booted: read the units as a proposal that can now be
+> deployed, not as a verified configuration, and note that the §11 cutover
+> criteria are all still unmet.
+>
+> Until this commit the units hard-coded `/opt/tv-shell` — **v1's** prefix — under
+> comments claiming `scripts/install.sh` rewrote it, as it does for the v1 units.
+> It did not; install.sh had no reference to `core/` at all. Six tests in
+> `config.rs` (`the_committed_units_name_no_absolute_install_path` and the five
+> that run the real installer into a scratch tree) now make that class of claim
+> falsifiable.
 
 Three things are worth knowing before reading them:
 
@@ -147,6 +155,28 @@ failure inverted:
   refuses to start on `shell_app_id = 769` rather than letting the shell inherit
   that path and collide with the real client.
 
+## Install
+
+```bash
+sudo ./scripts/install-v2.sh --user "$(id -un)"
+```
+
+That builds `tv-shell-core`, installs it plus the two session scripts to
+`/opt/tv-shell-v2/bin/`, writes the three units into `~/.config/systemd/user/`
+with `@TV_SHELL_V2_PREFIX@` substituted, writes
+`/usr/share/wayland-sessions/tv-shell-v2.desktop`, and seeds
+`~/.config/tv-shell/core.toml` from the example. Then select **TV Shell v2
+(gamescope)** at the display manager; **TV Shell (Wayland)** is still there and
+is §11's rollback. `--prefix`, `--session-dir`, `--unit-dir` and `--config-dir`
+move any of those; `--no-build` reuses an existing binary. It is re-runnable and
+never overwrites an existing `core.toml`.
+
+It is a **separate script from `scripts/install.sh`, not a `--v2` flag on it**,
+for the reason in its header: §11's "beside, not instead" applies to the
+installer too, and a flag whose default is v1 is one forgotten argument away from
+installing over the running appliance. This script names no v1 prefix, no v1 unit
+and no v1 session file, and refuses `--prefix /opt/tv-shell` outright.
+
 ## Build, test & lint
 
 ```bash
@@ -191,6 +221,15 @@ rule in the source and confirm the suite goes red**, then revert:
   `a_launch_without_a_verified_scope_environment_is_refused` must fail.
 - Hard-code the mode back into the gamescope unit's `ExecStart`.
   `the_display_keys_reach_the_unit_that_claims_to_read_them` must fail.
+- Put `/opt/tv-shell/bin/tv-shell-core` back in the core unit's `ExecStart`.
+  `the_committed_units_name_no_absolute_install_path` must fail (and so must the
+  three install tests, because the installer refuses to write it).
+- Replace `subst_prefix` in `scripts/install-v2.sh` with a plain copy.
+  `the_installed_units_carry_no_token_and_no_v1_path` must fail.
+- Set the installer's `SESSION_FILE` to `tv-shell-gamescope.desktop`.
+  `the_v2_session_entry_collides_with_neither_v1_nor_the_prototype` must fail.
+- Add `tv-shell-panel.service` to the installer's `UNITS`.
+  `the_v2_unit_names_collide_with_none_of_v1s` must fail.
 
 That last one is the shape worth noticing: the config's consumer test used to
 check only that a key was *classified*, so a key labelled "read by the unit's
@@ -222,9 +261,10 @@ Each of these is a follow-up, and none of it is implemented in this crate today:
   and never written, and nothing holds the base layer across a known transition
   (Moonlight main → stream window, a browser navigation) or applies hysteresis
   before treating a fallback to the shell as an exit.
-- **Installation.** `scripts/install.sh` does not know about `core/`, and there
-  is no `config/tv-shell-gamescope.desktop`, so the units cannot be installed and
-  the session cannot be selected (see the box above).
+- ~~**Installation.**~~ Done: `scripts/install-v2.sh` + `config/tv-shell-v2.desktop`
+  (see the box above). What is still missing on that path is a **release
+  stream** — §11 gives the core its own `core-v*` tags and its own Ansible pin,
+  and neither exists, so a deploy today is "run the installer from a checkout".
 - **A recovery surface.** §9 makes the panel the thing you reach for when the
   session is wedged. `tv-shell-v2-panel.service` does not exist, and when it does
   it belongs to `default.target` — not to the session target, where it would die
