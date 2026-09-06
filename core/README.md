@@ -236,10 +236,27 @@ Xvfb :99 -screen 0 1920x1080x24 &
 TV_SHELL_TEST_XVFB=:99 cargo test -p tv-shell-core --test atoms_xvfb -- --ignored
 ```
 
-**CI runs them** (`rust.yml`'s `core` job installs `xvfb` and executes exactly
-the two lines above). It did not before, and no developer box here has Xvfb
-either, so those nine tests executed in neither place — compiled everywhere, run
-nowhere. The same job now also shellchecks `core/units/*.sh`, which
+**They share one X server and run serialised.** Four of them write ROOT-window
+properties and `screen_state_assembles_from_real_server_bytes` reads whole-root
+state, so run in parallel they race each other — and that is not theoretical: CI
+went intermittently red with `failed to read whole buffer` from
+`AtomConn::connect`, a *connection* error rather than an assertion, i.e. nine
+simultaneous handshakes against one Xvfb. `connect()` therefore hands back an
+`XSession` holding a process-wide lock, so a test added later is serialised
+without having to know it needs to be, and CI passes `--test-threads=1` as well
+to say the same thing at the call site. **Neither is tuning; do not remove
+either.** The fix is deliberately not a retry or a sleep: making a
+shared-mutable-state test pass by timing is the failure mode this crate's whole
+test strategy is written against.
+
+**CI runs them** (`rust.yml`'s `core` job installs `xvfb` + `x11-utils`, waits
+for the server to accept a real connection via `xdpyinfo` — the socket file
+appears before Xvfb is listening, so the old path check let cargo start too
+early — and fails naming *Xvfb* if it never comes up, rather than letting a dead
+server surface as a confusing client-side error inside a test). It did not run
+them at all before, and no developer box here has Xvfb either, so those nine
+tests executed in neither place — compiled everywhere, run nowhere. The same job
+now also shellchecks `core/units/*.sh` and `scripts/install-v2.sh`, which
 `gamescope.yml` does not cover (it lints `dev/gamescope/` only).
 
 ### Rule-defending tests, and how to check they still defend anything

@@ -174,10 +174,13 @@ jobs:
       # was compiled everywhere and run in neither place. A test that runs
       # nowhere is not a test. shellcheck comes from the same apt call for the
       # session scripts below.
+      # x11-utils is here for `xdpyinfo`, which the readiness check below uses to
+      # prove the server ACCEPTS CONNECTIONS rather than merely that its socket
+      # file exists.
       - name: System dependencies (Xvfb for the atom round-trips, shellcheck)
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends xvfb shellcheck
+          apt-get install -y --no-install-recommends xvfb x11-utils shellcheck
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
@@ -209,17 +212,49 @@ jobs:
       # These PANIC rather than skip when TV_SHELL_TEST_XVFB is unset (see the
       # file header), so a broken server surfaces as a failure — the step cannot
       # pass by quietly running nothing.
+      #
+      # `--test-threads=1` IS REQUIRED, NOT TUNING. All nine tests share ONE
+      # Xvfb and four of them write ROOT-window properties, while
+      # `screen_state_assembles_from_real_server_bytes` reads whole-root state —
+      # so in parallel it races every writer, and nine simultaneous connection
+      # handshakes against one server is where it actually broke (a
+      # `failed to read whole buffer` mid-handshake, i.e. a HARNESS failure
+      # wearing a test's name). DO NOT REMOVE IT: the flakiness comes back
+      # intermittently, which is worse than a red build because it trains people
+      # to hit re-run. The tests also take a process-wide lock of their own
+      # (`X_SERVER` in core/tests/atoms_xvfb.rs) so a developer running them by
+      # hand gets the same guarantee; this flag states the constraint here too.
+      #
+      # Readiness waits on an actual CONNECTION (`xdpyinfo`), not on
+      # /tmp/.X11-unix/X99 existing: the socket file appears before Xvfb accepts
+      # connections, so the old path check let cargo start against a server that
+      # was not listening yet. And if Xvfb never comes up — or dies — this fails
+      # naming XVFB, rather than letting the failure present as a confusing
+      # client-side error inside a test.
       - name: Test (Xvfb atom round-trips)
         id: test_xvfb
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           xvfb_pid=$!
-          trap 'kill "$xvfb_pid"' EXIT
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          ready=0
           for _ in $(seq 1 50); do
-            [ -e /tmp/.X11-unix/X99 ] && break
+            if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+              echo "::error::Xvfb exited during startup — the X server is not available, so the atom round-trips cannot run."
+              exit 1
+            fi
+            if xdpyinfo -display :99 >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
             sleep 0.2
           done
-          TV_SHELL_TEST_XVFB=:99 cargo test -p tv-shell-core --test atoms_xvfb -- --ignored
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::Xvfb did not accept a connection on :99 within 10s — failing here rather than letting cargo report it as a test error."
+            exit 1
+          fi
+          TV_SHELL_TEST_XVFB=:99 \
+            cargo test -p tv-shell-core --test atoms_xvfb -- --ignored --test-threads=1
         env:
           DISPLAY: ":99"
 

@@ -70,6 +70,12 @@ Xvfb :99 -screen 0 1920x1080x24 &
 TV_SHELL_TEST_XVFB=:99 cargo test -p tv-shell-core --test atoms_xvfb -- --ignored
 ```
 
+Those tests **share that one server** — several write root-window properties and
+one reads whole-root state — so they serialise on a process-wide lock inside
+`core/tests/atoms_xvfb.rs`, and CI additionally passes `--test-threads=1`. Run in
+parallel they raced, and it presented as a *connection* error
+(`failed to read whole buffer`), not an assertion. Keep both.
+
 The default `cargo test` above also **runs `scripts/install-v2.sh`** into a
 scratch tree under `target/` and asserts on the files it writes (no leftover
 prefix token, no path under v1's prefix, the session entry's name). So that

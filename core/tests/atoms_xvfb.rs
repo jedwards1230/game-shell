@@ -66,9 +66,55 @@ fn display() -> String {
     raw
 }
 
-fn connect() -> AtomConn {
+/// Serialises every test in this file against the ONE X server they share.
+///
+/// These tests are not independent and cannot be made so by tidying: four of
+/// them write ROOT-window properties and `screen_state_assembles_from_real_
+/// server_bytes` reads whole-root state, so under `cargo test`'s default
+/// parallelism it races every writer — and nine simultaneous connection
+/// handshakes against one Xvfb is where the failure actually landed, as a
+/// `failed to read whole buffer` mid-handshake rather than as an assertion.
+///
+/// The lock lives HERE, not only as `--test-threads=1` in CI, because the
+/// sharing is a property of the code: a developer running these by hand does not
+/// read the workflow file, and a flag in one caller cannot make a statement
+/// about the resource. CI passes the flag as well — belt and braces, and it
+/// documents the constraint at the call site.
+static X_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An `AtomConn` that holds the serialising lock for as long as it lives.
+///
+/// It derefs to `AtomConn`, so every test body is unchanged and — the point —
+/// a test added later gets the serialisation from `connect()` without having to
+/// know it needs it. Forgetting the lock is not reachable.
+struct XSession {
+    conn: AtomConn,
+    // Held for the test's lifetime. Never read, which is exactly its job.
+    #[allow(dead_code)]
+    guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for XSession {
+    type Target = AtomConn;
+    fn deref(&self) -> &AtomConn {
+        &self.conn
+    }
+}
+
+fn connect() -> XSession {
+    // Poison-tolerant: one panicking test must not turn every later test into a
+    // second, misleading failure about a poisoned lock.
+    let guard = X_SERVER.lock().unwrap_or_else(|p| p.into_inner());
     let d = display();
-    AtomConn::connect(Some(&d)).unwrap_or_else(|e| panic!("connecting to {d}: {e}"))
+    let conn = AtomConn::connect(Some(&d)).unwrap_or_else(|e| {
+        panic!(
+            "connecting to {d}: {e}\n\
+             A CONNECTION error here is the harness, not the code under test: \
+             the X server named by TV_SHELL_TEST_XVFB is not accepting \
+             connections (never came up, or died mid-run)."
+        )
+    });
+    XSession { conn, guard }
 }
 
 #[test]
