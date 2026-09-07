@@ -292,6 +292,20 @@ impl Compositor for GamescopeCompositor {
         Ok(rx)
     }
 
+    fn running_app_pid(&self, app_id: AppId) -> Option<u32> {
+        match screen::read(&self.conn) {
+            Ok(state) => state
+                .focusable_windows
+                .iter()
+                .find(|w| w.app_id == app_id)
+                .map(|w| w.pid),
+            Err(e) => {
+                tracing::warn!("could not read the focusable windows: {e}");
+                None
+            }
+        }
+    }
+
     fn on_screen_app(&self) -> Option<AppId> {
         match screen::read(&self.conn) {
             Ok(state) => state.on_screen_app(),

@@ -62,6 +62,14 @@ pub trait Compositor: Send + Sync + 'static {
         app_id: AppId,
     ) -> Result<std::sync::mpsc::Receiver<std::process::ExitStatus>, String>;
 
+    /// The pid of a RUNNING app with this id, if the compositor knows one.
+    ///
+    /// Read from `GAMESCOPE_FOCUSABLE_WINDOWS`, whose triplets carry the pid
+    /// gamescope itself resolved via `XResQueryClientIds` — so this is the
+    /// compositor's own answer about the process behind a window, not a guess of
+    /// ours. Used only by [`crate::boot::adopt`], to find something to watch.
+    fn running_app_pid(&self, app_id: AppId) -> Option<u32>;
+
     /// The app id of whatever is on screen right now, if one resolves.
     ///
     /// The supervisor's guard against relaunching over something the user moved
@@ -209,6 +217,9 @@ mod tests {
             Err("error: not supervised in tests".into())
         }
         fn on_screen_app(&self) -> Option<AppId> {
+            None
+        }
+        fn running_app_pid(&self, _: AppId) -> Option<u32> {
             None
         }
         fn launch(&self, app_id: AppId, command: &[String]) -> String {

@@ -896,9 +896,9 @@ restart_window_secs = 120
         assert!(DEFAULT_SOCKET_NAME.ends_with(".sock"));
     }
 
-    /// Serializes the env mutation below. Same shape as
-    /// `daemon/src/daemon_config.rs`'s `ENV_GUARD`.
-    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes the env mutation below — the CRATE-WIDE guard, not a local
+    /// one. See [`crate::ENV_GUARD`] for why a per-module lock was not enough.
+    use crate::ENV_GUARD;
 
     /// Run `f` with `XDG_CONFIG_HOME` pointed at a scratch dir and
     /// `TV_SHELL_CORE_CONFIG` unset, restoring both afterwards.
