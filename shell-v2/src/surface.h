@@ -76,7 +76,14 @@ class Surface : public QQuickWindow, public QQmlParserStatus
     // Shadows QWindow::visible on purpose -- see the header comment. Same name,
     // same NOTIFY signal, so every existing binding keeps working; only the
     // write path changes.
-    Q_PROPERTY(bool visible READ isVisible WRITE setVisible NOTIFY visibleChanged)
+    //
+    // FINAL is not decoration. Without it Qt's property cache logs
+    // "Member visible of the object tvshell::Surface overrides a member of the
+    // base object. Consider renaming it or adding final or override specifier"
+    // on every run -- a real warning about a real shadowing, which we want
+    // DECLARED rather than accidental. FINAL says the shadowing is deliberate
+    // and stops a further subclass from shadowing it again.
+    Q_PROPERTY(bool visible READ isVisible WRITE setVisible NOTIFY visibleChanged FINAL)
 
 public:
     // Mirrors tvshell::SurfaceRole. Duplicated as a Q_ENUM rather than exposing
