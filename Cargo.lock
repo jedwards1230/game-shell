@@ -3007,6 +3007,7 @@ name = "tv-shell-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "evdev",
  "futures",
  "libc",
  "serde",

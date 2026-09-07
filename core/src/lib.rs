@@ -17,10 +17,12 @@
 //! | [`protocol`] | The IPC grammar, carried over from v1 unchanged in contract (§4) |
 //! | [`ipc`] | The Unix-socket server |
 //! | [`compositor`] | The seam between the two: verbs → X primitives |
+//! | [`input`] | The pad fleet: discovery, `EVIOCGRAB`, permanent per-player presenters (§7). **Default-off** |
 //!
-//! Explicitly **not** here yet, each a follow-up: uinput/input presenters, CEC,
-//! the QML shell, panel changes, HTTP/MCP/MQTT/metrics, the forced-paint
-//! heartbeat, and per-app Xwayland server creation.
+//! Explicitly **not** here yet, each a follow-up: CEC, the QML shell, panel
+//! changes, HTTP/MCP/MQTT/metrics, the forced-paint heartbeat, per-app Xwayland
+//! server creation — and, within [`input`], routing to a shell, the Meta-hold
+//! and safety-combo escapes, rumble/battery/LED, and companion-node inhibition.
 //!
 //! It is a lib plus a thin bin for the same reason the daemon is: `pub` items in
 //! a library are public API and are never "dead", so `clippy -D warnings` stays
@@ -45,6 +47,7 @@ pub mod baselayer;
 pub mod boot;
 pub mod compositor;
 pub mod config;
+pub mod input;
 pub mod ipc;
 pub mod launch;
 pub mod protocol;

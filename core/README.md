@@ -18,6 +18,7 @@ its relationship to `daemon/`.
 | `protocol` | The IPC grammar, carried over from v1 unchanged in contract (§4): newline framing, 4096-byte lines, `ok` / `unknown` / `error:<msg>` / a bare JSON document |
 | `ipc` | The Unix-socket server — `LinesCodec`, one task per connection, socket bound 0600 under a tightened umask. Compositor work sits behind a `Compositor` trait so the whole request/reply surface is testable with no X server |
 | `compositor` | The seam between the two: IPC verbs → the §5 X primitives |
+| `input` | The pad fleet (§7): DB-match-or-reject discovery, stable per-player slots, hot join/leave, `EVIOCGRAB`, and **permanent** per-player uinput presenters. **Off unless `[input].enabled` is set** — with it off nothing is enumerated, opened or grabbed. Every rule is in a pure submodule; only `evdev_backend` and `runtime` touch hardware |
 
 `units/` holds the v2 session units (§4's `tv-shell-session.target` shape, taken
 from the ChimeraOS `gamescope-session` files rather than written from scratch).
@@ -160,6 +161,56 @@ failure inverted:
   `focus=steam` in the stats pipe) and is reserved for it. `CoreConfig::validate`
   refuses to start on `shell_app_id = 769` rather than letting the shell inherit
   that path and collide with the real client.
+
+## The §7 rules the input layer enforces
+
+Same shape, for the pad fleet. Every one is defended by a test, and every one of
+those tests has been mutation-checked (`## Build, test & lint`).
+
+- **The presenters are permanent.** One uinput pad per player slot, created at
+  startup before any controller is looked at and alive for the whole session. A
+  presenter that appeared when a pad connected and vanished when it left would be
+  a hotplug event, and every game and Moonlight forward those to the streaming
+  host (jedwards1230/tv-shell#402). `Plan` — the type the join/leave path
+  produces — has no variant that could create or destroy one, so the churn is
+  unrepresentable rather than merely avoided.
+- **Permanence forces a fixed profile, and the cost is stated.** v1 built its
+  virtual pad *from* the physical one, copying its `input_id`, key set and
+  `absinfo`; that is only possible once a pad is in hand, so permanence and
+  source-derived capabilities are mutually exclusive. The presenter is therefore
+  a canonical Xbox 360 pad, and a physical pad's extra buttons are **dropped**
+  while its axes are **rescaled**. Drops are counted per reason and reported by
+  `input-state`, so a lost button is a number rather than a mystery.
+- **A leave returns the presenter to rest, before releasing the pad.** The
+  presenter outlives the pad, so a button held at the moment of an unplug would
+  stay held for the rest of the session with nothing able to notice — from a
+  consumer's side no device disconnected. So a leave emits an explicit release
+  for every held key and a return to neutral for every axis, then one sync, and
+  only then releases.
+- **DB-match-or-reject, with no bare-`BTN_SOUTH` fallback.** `ydotoold`'s virtual
+  device advertises `BTN_SOUTH` and is in no controller database, so "claim the
+  first `BTN_SOUTH` device" grabs a software injector and feeds synthetic input
+  back into the fleet. v1 patched that with an `is_synthetic` name match; the
+  database gate rejects it structurally instead.
+- **Our own presenters are refused by devnode, not by name.** A presenter carries
+  a *database-known* `input_id` on purpose, so it passes the gate on its own
+  merits — devnode ownership is the only thing between the core and grabbing the
+  device it just created. A presenter whose devnode never appears is a fatal
+  start rather than a warning, because the alternative is a session that eats
+  itself on its first poll.
+- **Membership is polled, not notified.** The fleet is recomputed from a full
+  enumeration on a timer, and a pad is gone because it is absent from that
+  enumeration. §10's rule, from v1's residual defect: an attached listener that
+  processed nothing. The stream read that retires a yanked pad in milliseconds is
+  an optimisation on top, never the sole sensor. A failed enumeration changes
+  nothing — "we could not read the device list" is not evidence that every pad
+  was unplugged, and treating it as one would release a live fleet mid-game.
+- **`input-state` answers from a snapshot, and says when it last ran.** It is the
+  verb an operator reaches for when something is wrong, so it must not hang on a
+  wedged input loop — hence a `watch` snapshot rather than a request/reply round
+  trip. The price is a report that looks plausible whether the loop is alive or
+  dead, so it carries `last_poll_unix_ms` and `polls_completed`: a stopped loop
+  is visible as a number that stops advancing.
 
 ## Install
 
@@ -337,6 +388,100 @@ That last one is the shape worth noticing: the config's consumer test used to
 check only that a key was *classified*, so a key labelled "read by the unit's
 ExecStart" passed while the unit read nothing. A named consumer has to exist.
 
+#### `input` (§7)
+
+Thirty mutations were run against this module and all thirty are killed. The ones
+worth repeating by hand:
+
+- Set `InputConfig::default().enabled` to `true`.
+  `input_is_disabled_by_default` must fail. **This is the safety flag**; nothing
+  else in the crate matters more.
+- Add a `create_presenter` call to `session::poll`'s join arm.
+  `a_pad_unplug_and_replug_never_touches_a_presenter` must fail — the
+  jedwards1230/tv-shell#402 regression.
+- Swap the two statements at the end of `session::retire` so the release comes
+  before the quiesce.
+  `a_leave_quiesces_the_presenter_then_releases_the_pad` must fail. Note it fails
+  on the ORDER: the test records how many events had been emitted at the moment
+  of each release, because two independent lists prove both happened and never in
+  which sequence.
+- Replace `discovery::classify`'s final database check with a bare
+  `Verdict::Claim`. `a_btn_south_device_in_no_database_is_refused` must fail.
+- Make `classify` skip the `owned.contains` check.
+  `our_own_presenter_is_refused_even_though_the_db_knows_its_id` and
+  `the_session_never_claims_its_own_presenters` must both fail.
+- Make `session::poll` treat an enumeration error as an empty device list.
+  `a_failed_enumeration_does_not_retire_the_fleet` must fail.
+- Make `presenter::translate` map `SYN_DROPPED` to `Forward::Sync`.
+  `syn_report_flushes_and_syn_dropped_does_not` must fail.
+
+And against `core/tests/input_uinput.rs`, which runs on a real kernel:
+
+- Put the slot-order check in `evdev_backend::create_presenter` back to the
+  `debug_assert_eq!` it started as. `creating_presenters_out_of_order_is_refused`
+  must fail — and **it must be run `--release` to see the point**: in a debug
+  build the assert fires and the test fails on the panic, but in release the
+  assert compiles to nothing, the out-of-order creation *succeeds*, and the test
+  fails on its own assertion instead. Measured 2026-09-06. That is the whole
+  reason it is a real check: `emit` indexes `presenters` by slot, so the release
+  build the couch runs was the one build with no guard at all.
+
+- Give the canonical profile an id no controller database knows.
+  `a_created_presenter_gets_a_devnode_that_discovery_refuses_as_ours` must fail
+  on its *precondition* — that test's whole point is that the presenter's id IS
+  database-known, so ownership is the only thing refusing it.
+- Build the presenter's axes with `range.max` instead of `range.neutral()`.
+  `a_created_presenter_advertises_the_canonical_profile_at_rest` must fail.
+- Drop the slot from `PadProfile::device_name`.
+  `each_player_gets_its_own_presenter_device` must fail. **It did not, at first**
+  — see survivor 4 below.
+
+Four mutations SURVIVED the first pass, and each exposed a test that proved
+less than it claimed. They are recorded because the fixes are the interesting
+part:
+
+1. **`SlotAllocator::alloc` scanning up from the high-water mark instead of from
+   zero.** The reconnect test frees the TOP slot, which both behaviours handle
+   identically. Only a hole in the MIDDLE separates them, so
+   `a_freed_slot_below_the_high_water_mark_is_reused_first` was added.
+2. **Dropping the input clamp in `presenter::rescale`.** The clamp on the
+   *result* already keeps every ordinary out-of-range value in bounds, so the
+   input clamp looked redundant — it is not: it prevents the intermediate
+   multiply overflowing `i64` for a far-out-of-range value against a narrow
+   source range. `rescale_does_not_overflow_on_a_far_out_of_range_value` reaches
+   that case.
+3. **Stamping `last_poll_unix_ms` unconditionally at the top of `poll`.** Two
+   polls in the same millisecond carry the same stamp, so the assertion held
+   either way. `polls_completed` was added beside the timestamp precisely so
+   "it did not run" is distinguishable from "it ran again quickly".
+4. **Dropping the slot from `PadProfile::device_name`.**
+   `each_player_gets_its_own_presenter_device` compared each created device
+   against `device_name(n)` — the very function being mutated — so both sides
+   moved together and the test passed while every presenter shared one name.
+   A test that checks a value against the function that produced it is asserting
+   an identity, not a property. It now asserts the two names DIFFER from each
+   other, that each carries its own slot, and that both are recognisably ours —
+   none of which reference `device_name`.
+
+- Drop the `self.emit_failures += 1` from `session::emit`, leaving the log line.
+  `a_presenter_that_refuses_events_is_counted` must fail. `retire` documents that
+  it returns a presenter to rest; if those emits fail that claim is false and
+  **nothing downstream can notice**, because the pad is gone and from a game's
+  side no device disconnected. A journal line is not a signal anyone is reading
+  at the time.
+
+The safety flag has its own entry, because it is the easiest thing here to test
+vacuously:
+
+- Move the `enabled` check in `input::decide` to AFTER `config.resolve()`.
+  `a_disabled_config_does_no_work_at_all` must fail. Note the mutation still
+  returns `Disabled` for a disabled config in the happy path — asserting only
+  "returns `Disabled`" or "the flag parses as false" would pass against it. The
+  test uses an unreadable `controller_db` as a **probe**: `resolve` reads it, so
+  the same config comes back `Disabled` only if the gate short-circuited, and
+  the test's second half flips `enabled` alone to prove the probe is live and
+  the file really would have been read.
+
 ## Not yet here
 
 Each of these is a follow-up, and none of it is implemented in this crate today:
@@ -348,10 +493,16 @@ Each of these is a follow-up, and none of it is implemented in this crate today:
 - **§12's other app-class fields**: an id strategy (scope / pid / class), an
   input contract (`gamepad` / `keyboard`) and an HDR expectation. `[[app]]`
   models the id, the command and the environment only — the id strategy is fixed
-  at "scope, tag as repair" and is not selectable, §7's input layer does not
-  exist, and the HDR settle key is itself unconsumed. Three more keys whose
-  stated consumer does not exist is the #416 class; they land with their readers.
-- uinput / input presenters and the pad grab (§7)
+  at "scope, tag as repair" and is not selectable, and the HDR settle key is
+  itself unconsumed. The input contract now has a layer to belong to, but that
+  layer does not route yet (below), so it still reads nothing. Keys whose stated
+  consumer does not exist are the #416 class; they land with their readers.
+- **The rest of §7.** The `input` module claims the fleet and re-presents it, and
+  on its own that is behaviourally invisible. Not yet: routing to a shell and the
+  `gamepad`/`keyboard` contracts (there is no shell to route to), the Meta-hold
+  and safety-combo escapes (`intent home` with no shell lands on an empty
+  compositor — a black television), rumble/battery/LED, and the companion
+  touchpad/motion-node inhibition §7 calls for (SteamOS's `ds-inhibit` shape).
 - CEC — which leaves the core entirely in v2 and becomes an observer sidecar (§8)
 - the QML shell (§13 Q1 is still open on its runtime) and any panel changes
 - the HTTP bridge, MCP server, MQTT publisher and `/metrics` (§4 carries their

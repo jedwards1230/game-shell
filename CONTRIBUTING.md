@@ -76,6 +76,31 @@ one reads whole-root state — so they serialise on a process-wide lock inside
 parallel they raced, and it presented as a *connection* error
 (`failed to read whole buffer`), not an assertion. Keep both.
 
+`core/tests/input_uinput.rs` is gated the same way, on `TV_SHELL_TEST_UINPUT`. It
+covers the one part of the input layer no unit test can reach: that the kernel
+accepts the canonical pad profile, publishes a devnode for it, and that discovery
+then refuses that devnode as ours.
+
+```bash
+sudo modprobe uinput
+TV_SHELL_TEST_UINPUT=1 cargo test -p tv-shell-core --test input_uinput -- --ignored
+```
+
+**It needs two permissions, not one.** Writing `/dev/uinput` is enough to CREATE
+a presenter and not enough to read one back: the `/dev/input/eventN` the kernel
+publishes for it is `root:input 0660` with no ACL, so on a desktop session
+(where logind grants an ACL on `/dev/uinput` alone) creation succeeds and every
+readback fails `EACCES` — and `evdev::enumerate()` silently omits the device,
+because it skips what it cannot open. Join the `input` group (`sudo usermod -aG
+input "$USER"`, then log out and back in) or run the suite as root. The test's
+preflight checks both halves and fails naming the group, rather than letting the
+permission error surface as a confusing assertion deep inside a test.
+
+**Not wired into CI.** `/dev/uinput` is a kernel device, not an apt package, so
+whether a GitHub-hosted runner can `modprobe uinput` has to be *observed*, not
+assumed from the runner's shape — that assumption is how the Xvfb tests spent
+months compiled everywhere and run nowhere.
+
 The default `cargo test` above also **runs `scripts/install-v2.sh`** into a
 scratch tree under `target/` and asserts on the files it writes (no leftover
 prefix token, no path under v1's prefix, the session entry's name). So that
