@@ -96,13 +96,15 @@ void Surface::applyVisibility()
     if (!handle())
         create();
 
+    // MUTATION (throwaway branch, never merged): tag AFTER the map instead of
+    // before it. If tst_premap is defending anything, this must turn it red.
+    QQuickWindow::setVisible(true);
+
     const bool ok = applyTags(static_cast<std::uint32_t>(winId()), tagsForRole(pureRole(), m_appId));
     if (ok != m_tagged) {
         m_tagged = ok;
         Q_EMIT taggedChanged();
     }
-
-    QQuickWindow::setVisible(true);
 }
 
 } // namespace tvshell
