@@ -26,6 +26,20 @@
 //! a library are public API and are never "dead", so `clippy -D warnings` stays
 //! clean even where a module is not yet wired into `main`.
 
+/// The ONE lock every test that mutates the process environment must hold.
+///
+/// `std::env::set_var` is `unsafe` because it is unsound under **any**
+/// concurrent environment access, not merely a racing write to the same
+/// variable — the environ block itself can be reallocated under a reader. So a
+/// per-module guard is not enough, and this crate had two: one in `config`'s
+/// tests and one in `launch`'s. They did not exclude each other, and the result
+/// was a config test failing in a run whose only change was in `boot` — a flake
+/// with no plausible local cause, which is the worst kind to chase.
+///
+/// One lock, crate-wide. A test that mutates the environment takes THIS.
+#[cfg(test)]
+pub(crate) static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod atoms;
 pub mod baselayer;
 pub mod boot;

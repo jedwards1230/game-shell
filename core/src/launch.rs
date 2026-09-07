@@ -708,11 +708,11 @@ mod tests {
     /// child's own output.
     #[test]
     fn wayland_display_is_absent_from_the_real_child_environment() {
-        // Serialized and restored: `set_var` is process-global, and this test
-        // spawns children — the same discipline `config.rs` uses for its own env
-        // mutation. Note `WAYLAND_DISPLAY` is read by nothing else in this crate.
-        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        // Serialized and restored on the CRATE-WIDE guard. This used to be a
+        // local static, which did not exclude `config`'s env-mutating tests —
+        // and `set_var` is unsound under any concurrent environment access, not
+        // just a racing write to the same name. See `crate::ENV_GUARD`.
+        let _g = crate::ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
 
         let env_bin = ["/usr/bin/env", "/bin/env"]
             .into_iter()

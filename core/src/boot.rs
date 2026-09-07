@@ -64,6 +64,12 @@ pub enum BootDecision {
     NotConfigured,
     /// A fresh compositor. Launch and show this class.
     Launch(AppId),
+    /// The boot app is ALREADY RUNNING and nothing here started it — a core
+    /// restart under a live session. Supervise it without touching it.
+    ///
+    /// Distinct from [`Self::AppOnScreen`] because the actions differ: this one
+    /// attaches a watcher, that one walks away. Both leave the screen alone.
+    Adopt(AppId),
     /// The base layer already names something — someone is using this session.
     BaseLayerInUse,
     /// A window is already on screen.
@@ -78,6 +84,11 @@ impl BootDecision {
         match self {
             Self::NotConfigured => "no boot_app configured",
             Self::Launch(_) => "the compositor is fresh (empty base layer, nothing on screen)",
+            Self::Adopt(_) => {
+                "the boot app is already on screen and this core did not start it (a core \
+                 restart under a live session), so it is adopted for supervision — WITHOUT \
+                 launching or touching the screen"
+            }
             Self::BaseLayerInUse => {
                 "the base layer already names an app, so this session is in use — \
                  a boot launch here would take the screen from it"
@@ -111,7 +122,16 @@ pub fn decide(boot_app: Option<AppId>, observed: Option<Observed<'_>>) -> BootDe
         return BootDecision::SessionUnreadable;
     };
     if let Some(on_screen) = observed.on_screen {
-        return BootDecision::AppOnScreen(on_screen);
+        // OUR app, running, unsupervised — a core restart under a live session.
+        // Adoption is not a relaunch: it attaches a watcher and performs no
+        // compositor action at all, so the "a restart never steals the screen"
+        // property is untouched. Anything ELSE on screen is someone else's
+        // session and we walk away from it.
+        return if on_screen == boot_app {
+            BootDecision::Adopt(boot_app)
+        } else {
+            BootDecision::AppOnScreen(on_screen)
+        };
     }
     if !observed.base_layer.is_empty() {
         return BootDecision::BaseLayerInUse;
@@ -158,15 +178,126 @@ pub struct Observed<'a> {
 /// conflation that would let a restart stomp a running game.
 pub struct Supervised {
     app_id: AppId,
-    exits: std::sync::mpsc::Receiver<std::process::ExitStatus>,
+    how: ExitSource,
     launched_at: Instant,
 }
+
+/// How a [`Supervised`] app's exit will be learned about.
+///
+/// The two arms are the whole difference between a launch and an adoption, and
+/// keeping them as one type is what lets `supervise` treat them identically
+/// everywhere else.
+enum ExitSource {
+    /// We forked it, so the reaper hands us the real status.
+    Launched(std::sync::mpsc::Receiver<std::process::ExitStatus>),
+    /// We found it already running. The cgroup scope is the only signal
+    /// available: it disappears when the last process in it exits. That tells us
+    /// THAT the app went away and never WHY — hence [`ExitKind::Unknown`].
+    ///
+    /// The scope name is the identity, not the pid: it embeds a per-launch tag,
+    /// so it cannot be confused by pid reuse the way a bare `/proc/<pid>` check
+    /// could.
+    Adopted { pid: u32, scope: String },
+}
+
+/// How often an adopted app's scope is checked for having gone away.
+///
+/// A constant rather than a config key: it trades notice latency against wakeups
+/// and there is no deployment-specific right answer — the relaunch delay is 2 s
+/// anyway, so a finer poll would not make the television recover sooner.
+const ADOPTED_POLL: Duration = Duration::from_secs(2);
 
 impl Supervised {
     /// The app being supervised.
     pub fn app_id(&self) -> AppId {
         self.app_id
     }
+
+    /// Was this app adopted rather than launched by this core?
+    pub fn is_adopted(&self) -> bool {
+        matches!(self.how, ExitSource::Adopted { .. })
+    }
+
+    /// Block until the app exits, and say what is known about how.
+    ///
+    /// The one place either source is waited on, so `supervise` does not branch
+    /// on how the app got here. `sleep` is injected for the adopted poll so a
+    /// test does not wait real seconds.
+    fn wait(&self, mut sleep: impl FnMut(Duration)) -> (ExitKind, String) {
+        match &self.how {
+            ExitSource::Launched(exits) => match exits.recv() {
+                Ok(status) => (ExitKind::of(&status), status.to_string()),
+                // A closed channel means the reaper went away without reporting.
+                // Treated as a failure rather than silently stopping: a
+                // supervisor that quits with no log line is §9's complaint.
+                Err(_) => (
+                    ExitKind::Failed,
+                    "the launcher's reaper went away without reporting a status".to_string(),
+                ),
+            },
+            ExitSource::Adopted { pid, scope } => {
+                while crate::launch::scope_of(*pid).is_some_and(|s| s.unit == *scope) {
+                    sleep(ADOPTED_POLL);
+                }
+                (
+                    ExitKind::Unknown,
+                    format!("adopted app left its scope {scope} (status unknowable)"),
+                )
+            }
+        }
+    }
+}
+
+/// Adopt an app this core did NOT launch, so a restarted core still supervises it.
+///
+/// **Adoption performs no compositor action.** It does not launch, does not
+/// write the base layer, and does not show anything — it attaches a watcher to
+/// something already on screen. That is what keeps it from becoming the very
+/// thing the boot decision exists to prevent: there is no path here that turns
+/// an observation into a relaunch of something the user quit, because there is
+/// no launch in it at all. What happens LATER, when the adopted app exits, is
+/// the ordinary [`after_exit`] decision plus [`ExitKind::Unknown`]'s refusal to
+/// guess.
+///
+/// Returns `None` when the app's pid cannot be resolved (nothing to watch) or it
+/// is not in a scope we can name (nothing to watch it BY) — both of which mean
+/// the honest answer is "not supervised", logged, rather than a watcher on a
+/// guess.
+pub fn adopt(compositor: &Arc<dyn Compositor>, app_id: AppId) -> Option<Supervised> {
+    let Some(pid) = compositor.running_app_pid(app_id) else {
+        tracing::warn!(
+            app_id = %app_id,
+            "boot client: cannot adopt — the running app resolves to no pid, so there is \
+             nothing to watch. It stays UNSUPERVISED until the next fresh session.",
+        );
+        return None;
+    };
+    let Some(scope) = crate::launch::scope_of(pid) else {
+        tracing::warn!(
+            app_id = %app_id, pid,
+            "boot client: cannot adopt — pid {pid} is in no cgroup scope this core can name, \
+             so its exit cannot be observed. It stays UNSUPERVISED.",
+            pid = pid,
+        );
+        return None;
+    };
+    tracing::info!(
+        app_id = %app_id, pid, scope = %scope.unit,
+        "boot client: adopting the running app; NOT launching and NOT touching the screen",
+    );
+    Some(Supervised {
+        app_id,
+        how: ExitSource::Adopted {
+            pid,
+            scope: scope.unit,
+        },
+        // Adopted apps have been up for an unknown time. `Instant::now()` makes
+        // the FIRST measured lifetime start here rather than pretending to know
+        // when it launched — which would be a fabricated number in a log line.
+        // The only cost is that an app adopted and then immediately crashed
+        // counts as one fast exit, which is true enough to act on.
+        launched_at: Instant::now(),
+    })
 }
 
 /// Launch the boot app and put it on screen, returning the supervision handle.
@@ -178,12 +309,22 @@ impl Supervised {
 /// distinguishes "never mapped" from "not observed"), so they are logged
 /// verbatim rather than re-worded into something less specific.
 pub fn start(compositor: &Arc<dyn Compositor>, decision: BootDecision) -> Option<Supervised> {
-    let BootDecision::Launch(app_id) = decision else {
-        tracing::info!(reason = decision.reason(), "boot client: not launching");
-        return None;
-    };
-    tracing::info!(app_id = %app_id, reason = decision.reason(), "boot client: launching");
-    launch_and_show(compositor, app_id)
+    match decision {
+        BootDecision::Launch(app_id) => {
+            tracing::info!(app_id = %app_id, reason = decision.reason(), "boot client: launching");
+            launch_and_show(compositor, app_id)
+        }
+        // A core restart under a live session. Supervision is re-armed WITHOUT
+        // launching or showing anything — see `adopt`.
+        BootDecision::Adopt(app_id) => {
+            tracing::info!(app_id = %app_id, reason = decision.reason(), "boot client: adopting");
+            adopt(compositor, app_id)
+        }
+        _ => {
+            tracing::info!(reason = decision.reason(), "boot client: not launching");
+            None
+        }
+    }
 }
 
 /// One launch + show, shared by the first start and every relaunch.
@@ -211,7 +352,7 @@ fn launch_and_show(compositor: &Arc<dyn Compositor>, app_id: AppId) -> Option<Su
     }
     Some(Supervised {
         app_id,
-        exits,
+        how: ExitSource::Launched(exits),
         launched_at,
     })
 }
@@ -233,22 +374,15 @@ pub fn supervise(
     let mut fast_exits = FastExits::default();
     loop {
         let app_id = current.app_id;
-        // The ONLY way this loop learns an app is gone. A closed channel means
-        // the reaper thread went away without reporting — treat it as a failed
-        // exit rather than silently stopping, since a supervisor that quits
-        // without a log line is the §9 complaint about v1.
-        let (kind, status) = match current.exits.recv() {
-            Ok(status) => (ExitKind::of(&status), Some(status)),
-            Err(_) => (ExitKind::Failed, None),
-        };
+        // The ONLY way this loop learns an app is gone — a channel we hold
+        // because we forked the process, or a scope we watched because we
+        // adopted it. Never an inference from the world.
+        let (kind, status) = current.wait(&mut sleep);
         let ran_for = current.launched_at.elapsed();
         fast_exits = fast_exits.record(ran_for, policy.fast_exit);
 
         let action = after_exit(policy, fast_exits, kind, compositor.on_screen_app(), app_id);
         let ran_ms = ran_for.as_millis() as u64;
-        let status = status.map(|s| s.to_string()).unwrap_or_else(|| {
-            "the launcher's reaper went away without reporting a status".to_string()
-        });
 
         let delay = match action {
             NextAction::Relaunch { delay } => {
@@ -375,6 +509,19 @@ pub enum ExitKind {
     Clean,
     /// Non-zero, or killed by a signal. The case durability is about.
     Failed,
+    /// **The app exited and we cannot know how.**
+    ///
+    /// This is the honest state for an ADOPTED app: `wait()` may only be called
+    /// on a process you forked, so a core that found the app already running has
+    /// no way to read its exit status. Watching the cgroup scope disappear tells
+    /// us THAT it exited, never WHY.
+    ///
+    /// It is a third variant rather than being folded into `Failed` because the
+    /// fold would be a guess with a bad failure mode: under `on-failure` it
+    /// would relaunch an app the user had just quit, and the team lead ranked
+    /// that worse than a black screen (you cannot get out of it). The policy
+    /// decides explicitly instead — see [`after_exit`].
+    Unknown,
 }
 
 impl ExitKind {
@@ -470,6 +617,8 @@ pub enum StopReason {
     PolicyNever,
     /// The give-up bound was configured and reached.
     GaveUp { consecutive_fast_exits: u32 },
+    /// An ADOPTED app exited and `on-failure` cannot tell a crash from a quit.
+    UnknowableExit,
 }
 
 impl NextAction {
@@ -497,6 +646,14 @@ impl NextAction {
             Self::Stop {
                 why: StopReason::GaveUp { .. },
             } => "the give-up bound was reached; the app will NOT be started again",
+            Self::Stop {
+                why: StopReason::UnknowableExit,
+            } => {
+                "this app was ADOPTED, so its exit status is unknowable — a status can only \
+                 be read for a process this core forked. Under boot_relaunch = \"on-failure\" \
+                 that cannot be told apart from a quit, so it is not relaunched. Set \
+                 boot_relaunch = \"always\" to keep an adopted app alive across crashes"
+            }
         }
     }
 }
@@ -530,6 +687,18 @@ pub fn after_exit(
         RelaunchPolicy::OnFailure if exit == ExitKind::Clean => {
             return NextAction::Stop {
                 why: StopReason::UserQuit,
+            }
+        }
+        // `on-failure` needs to know whether this WAS a failure, and for an
+        // adopted app nothing can tell it. Refusing is the safe half of an
+        // unavoidable trade: guessing "crash" resurrects an app the user quit
+        // and leaves them unable to escape it, while guessing "quit" costs a
+        // relaunch nobody sees. `always` has no such problem — it does not need
+        // to know — so an operator who wants adopted apps kept alive sets it,
+        // which is what the deployed box runs.
+        RelaunchPolicy::OnFailure if exit == ExitKind::Unknown => {
+            return NextAction::Stop {
+                why: StopReason::UnknowableExit,
             }
         }
         RelaunchPolicy::OnFailure | RelaunchPolicy::Always => {}
@@ -590,13 +759,23 @@ mod tests {
     /// whenever `boot_app` is set, and this goes red.
     #[test]
     fn a_restart_under_a_live_app_never_launches() {
+        // OUR app, already running: adopted for supervision, NOT launched.
+        // Adoption performs no compositor action — asserted below in
+        // `adopting_never_launches_and_never_touches_the_screen`.
         let live = Observed {
             base_layer: &[BOOT, SHELL],
             on_screen: Some(BOOT),
         };
+        assert_eq!(decide(Some(BOOT), Some(live)), BootDecision::Adopt(BOOT));
+
+        // SOMEONE ELSE's app: we walk away entirely.
+        let theirs = Observed {
+            base_layer: &[OTHER],
+            on_screen: Some(OTHER),
+        };
         assert_eq!(
-            decide(Some(BOOT), Some(live)),
-            BootDecision::AppOnScreen(BOOT)
+            decide(Some(BOOT), Some(theirs)),
+            BootDecision::AppOnScreen(OTHER)
         );
 
         // Either signal ALONE is still "in use": §5's point is that the atom and
@@ -616,7 +795,7 @@ mod tests {
         };
         assert_eq!(
             decide(Some(BOOT), Some(window_only)),
-            BootDecision::AppOnScreen(BOOT)
+            BootDecision::Adopt(BOOT)
         );
     }
 
@@ -898,6 +1077,151 @@ mod tests {
         assert_eq!(ExitKind::of(&bad), ExitKind::Failed);
     }
 
+    // -- adoption -------------------------------------------------------------
+    //
+    // THE GAP THIS CLOSES, found on hardware 2026-09-06: after a core restart
+    // the running boot app was unsupervised PERMANENTLY. The cause was the
+    // property that makes a restart safe — `Supervised` can only be constructed
+    // by a launch from this core — so a core that correctly declined to launch
+    // also adopted nothing. Since the core unit is `Restart=always`, crash
+    // durability lapsed the first time the core restarted and stayed lapsed.
+
+    /// **THE SAFETY PROPERTY.** Adoption attaches a watcher and does nothing
+    /// else: no launch, no show, no base-layer write. That is what keeps it from
+    /// becoming the thing the boot decision exists to prevent.
+    ///
+    /// Mutation-check: make `adopt` call `launch_and_show`, or make `start`'s
+    /// `Adopt` arm fall through to the `Launch` arm, and this goes red.
+    #[test]
+    fn adopting_never_launches_and_never_touches_the_screen() {
+        /// Every screen-touching method panics; only the two reads adoption is
+        /// allowed to make are implemented.
+        struct AdoptOnly {
+            pid: Option<u32>,
+        }
+        impl Compositor for AdoptOnly {
+            fn screen_state(&self) -> String {
+                "{}".into()
+            }
+            fn show(&self, _: AppId) -> String {
+                panic!("adoption showed something — it must not touch the screen")
+            }
+            fn home(&self) -> String {
+                panic!("adoption called home")
+            }
+            fn launch(&self, _: AppId, _: &[String]) -> String {
+                panic!("adoption launched something — it must not start a process")
+            }
+            fn launch_supervised(
+                &self,
+                _: AppId,
+            ) -> Result<std::sync::mpsc::Receiver<std::process::ExitStatus>, String> {
+                panic!("adoption launched something — it must not start a process")
+            }
+            fn on_screen_app(&self) -> Option<AppId> {
+                Some(BOOT)
+            }
+            fn running_app_pid(&self, _: AppId) -> Option<u32> {
+                self.pid
+            }
+        }
+
+        // A pid that is real (this process) but in no `app-steam-app*` scope, so
+        // `adopt` reaches its second refusal rather than watching a guess.
+        let c: Arc<dyn Compositor> = Arc::new(AdoptOnly {
+            pid: Some(std::process::id()),
+        });
+        // Whatever it decides, it must not have launched or shown anything —
+        // the panics above are the assertion.
+        let _ = start(&c, BootDecision::Adopt(BOOT));
+
+        // And with no pid at all it refuses cleanly rather than watching nothing.
+        let c: Arc<dyn Compositor> = Arc::new(AdoptOnly { pid: None });
+        assert!(
+            start(&c, BootDecision::Adopt(BOOT)).is_none(),
+            "an app with no resolvable pid must not be adopted"
+        );
+    }
+
+    /// An adopted app's exit is UNKNOWABLE, and the policy must say so rather
+    /// than guess.
+    ///
+    /// `wait()` may only be called on a process you forked, so a core that found
+    /// the app already running can watch its scope disappear but can never read
+    /// a status. Folding that into `Failed` would relaunch an app the user had
+    /// just quit — ranked worse than a black screen, because the user cannot get
+    /// out of it.
+    ///
+    /// Mutation-check: make `after_exit` treat `Unknown` like `Failed` and this
+    /// goes red.
+    #[test]
+    fn an_unknowable_exit_is_refused_under_on_failure_and_relaunched_under_always() {
+        assert_eq!(
+            after_exit(policy(), FastExits(0), ExitKind::Unknown, None, BOOT),
+            NextAction::Stop {
+                why: StopReason::UnknowableExit
+            },
+            "on-failure cannot tell an adopted crash from an adopted quit, so it must not guess"
+        );
+
+        let always = RestartPolicy {
+            relaunch: RelaunchPolicy::Always,
+            ..policy()
+        };
+        assert!(
+            matches!(
+                after_exit(always, FastExits(0), ExitKind::Unknown, None, BOOT),
+                NextAction::Relaunch { .. }
+            ),
+            "`always` does not need to know why, so an adopted app stays alive under it"
+        );
+
+        // And the refusal must SAY what to set — this is the one stop reason an
+        // operator can act on.
+        let why = NextAction::Stop {
+            why: StopReason::UnknowableExit,
+        }
+        .reason();
+        assert!(why.contains("adopted") || why.contains("ADOPTED"), "{why}");
+        assert!(
+            why.contains("always"),
+            "the reason must name the fix: {why}"
+        );
+    }
+
+    /// The screen guard still wins over an adopted app's exit, exactly as it
+    /// does for a launched one — adoption must not create a second path that
+    /// can stomp whatever the user moved on to.
+    #[test]
+    fn an_adopted_exit_still_yields_to_another_app() {
+        let always = RestartPolicy {
+            relaunch: RelaunchPolicy::Always,
+            ..policy()
+        };
+        assert_eq!(
+            after_exit(always, FastExits(0), ExitKind::Unknown, Some(OTHER), BOOT),
+            NextAction::Yield { to: Some(OTHER) }
+        );
+    }
+
+    /// `ExitKind::Unknown` is only ever produced by the adopted path, and a
+    /// launched app never reports it — otherwise the `on-failure` refusal would
+    /// start firing for apps whose status we really do have.
+    #[test]
+    fn only_an_adopted_app_reports_an_unknowable_exit() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(status(1)).unwrap();
+        let launched = Supervised {
+            app_id: BOOT,
+            how: ExitSource::Launched(rx),
+            launched_at: Instant::now(),
+        };
+        assert!(!launched.is_adopted());
+        let (kind, described) = launched.wait(|_| {});
+        assert_eq!(kind, ExitKind::Failed);
+        assert!(!described.is_empty());
+    }
+
     // -- the runner -----------------------------------------------------------
 
     /// Records calls, and hands out exit statuses from a script.
@@ -977,6 +1301,10 @@ mod tests {
         }
         fn on_screen_app(&self) -> Option<AppId> {
             *self.on_screen.lock().unwrap()
+        }
+        fn running_app_pid(&self, _: AppId) -> Option<u32> {
+            // The runner tests never adopt; adoption has its own tests.
+            None
         }
     }
 
@@ -1106,6 +1434,9 @@ mod tests {
             }
             fn on_screen_app(&self) -> Option<AppId> {
                 panic!("boot client read the screen on a skip")
+            }
+            fn running_app_pid(&self, _: AppId) -> Option<u32> {
+                panic!("boot client looked for a pid on a skip")
             }
         }
         let c: Arc<dyn Compositor> = Arc::new(Exploding);

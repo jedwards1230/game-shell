@@ -235,6 +235,17 @@
 # behaviour for anyone upgrading across the boundary. The deployment that is
 # early carries the override:
 #boot_relaunch = "always"
+#
+# ⚠ A SECOND REASON TO SET "always": ADOPTED APPS.
+#
+# When the core restarts while the boot app is running, it ADOPTS the app rather
+# than relaunching it (that is what stops a restart stealing the screen from a
+# live game). But an adopted app's exit status is unknowable — a status can only
+# be read for a process this core forked — so under "on-failure" the core cannot
+# tell an adopted crash from an adopted quit, refuses to guess, and stops
+# supervising. Under "always" it does not need to know, and an adopted app keeps
+# being kept alive. Since the core unit is Restart=always, a core restart is
+# routine, so this is not a corner case.
 
 # Fast-exit backoff, from dev/gamescope/client.sh:211-213 — constants chosen
 # against this hardware. An app that exits within boot_fast_exit_secs of launch,
