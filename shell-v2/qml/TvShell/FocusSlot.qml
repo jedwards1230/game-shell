@@ -32,7 +32,10 @@ FocusScope {
 
     required property FocusRouter router
 
-    readonly property bool current: slot.router.currentId === slot.slotId
+    // Null-guarded because QML clears object references during teardown: at
+    // shutdown the router can be destroyed before its slots, and an unguarded
+    // dereference here turns an ordinary exit into a page of TypeErrors.
+    readonly property bool current: slot.router !== null && slot.router.currentId === slot.slotId
 
     // Real Qt focus follows the model, never the other way round. The router is
     // the single writer of focus state; this is the one place it becomes an
@@ -43,9 +46,15 @@ FocusScope {
     // Any change to focusability -- including the container above going hidden --
     // republishes the graph. Both properties are watched because both feed
     // FocusRouter.cells().
-    onSlotEnabledChanged: slot.router.sync()
-    onVisibleChanged: slot.router.sync()
+    onSlotEnabledChanged: if (slot.router)
+        slot.router.sync()
+    onVisibleChanged: if (slot.router)
+        slot.router.sync()
 
-    Component.onCompleted: slot.router.register(slot)
-    Component.onDestruction: slot.router.unregister(slot)
+    Component.onCompleted: if (slot.router)
+        slot.router.register(slot)
+    // Same teardown guard as `current` above: a slot outliving its router by one
+    // destruction step must not throw on the way out.
+    Component.onDestruction: if (slot.router)
+        slot.router.unregister(slot)
 }

@@ -37,16 +37,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install build and X dependencies
-        # xcb dev headers for the tagger; the xcb PLATFORM plugin's runtime libs
-        # so QT_QPA_PLATFORM=xcb works under Xvfb; xvfb itself for the premap
-        # lane. libxcb-cursor0 is the one that is easy to forget — without it the
-        # xcb platform plugin refuses to load and the premap lane fails with
-        # "could not load the Qt platform plugin", not with an ordering error.
+        # Three groups, each for a different reason:
+        #   * -dev packages CMake needs at CONFIGURE time. xcb for the tagger, and
+        #     GL/EGL because Qt6Gui hard-requires WrapOpenGL — the `libgl1`
+        #     RUNTIME library is not enough and its absence fails find_package(Qt6)
+        #     with "Qt6Gui could not be found", which reads like a Qt problem.
+        #   * the xcb PLATFORM plugin's runtime libs, so QT_QPA_PLATFORM=xcb works
+        #     under Xvfb. libxcb-cursor0 is the one that is easy to forget —
+        #     without it the plugin refuses to load and the premap lane fails with
+        #     "could not load the Qt platform plugin", not with an ordering error.
+        #   * xvfb + x11-utils for the premap lane's display.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             cmake ninja-build pkg-config xvfb x11-utils \
-            libxcb1-dev \
+            libxcb1-dev libgl1-mesa-dev libegl1-mesa-dev \
             libglib2.0-0t64 libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
             libdbus-1-3 libfontconfig1 libfreetype6 libgssapi-krb5-2 \
             libharfbuzz0b libpng16-16 libmd4c0 \
