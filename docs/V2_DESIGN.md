@@ -31,7 +31,7 @@
 
 ## 2. The vision that does not change
 
-A 10-foot couch console: controller-first, B always goes back, every element D-pad reachable, sized for a 4K OLED at couch distance, HDR10 and VRR at 120 Hz. It launches Moonlight streams, local apps and web apps full-screen, owns the gamepad fleet exclusively, wakes and releases the AV chain on its own, and is machine-drivable over socket, HTTP, MCP and MQTT with one intent vocabulary. The kiosk invariant is the product. PRD §1–§4 and §6.8 describe the finished couch UI and are not restated.
+A 10-foot couch console: controller-first, B always goes back, every element D-pad reachable, sized for a 4K OLED at couch distance, HDR10 and VRR at 120 Hz. It launches Moonlight streams, local apps and web apps full-screen, owns the gamepad fleet exclusively, wakes and releases the AV chain on its own, and is machine-drivable over socket, HTTP, MCP and MQTT through one closed command vocabulary. The kiosk invariant is the product. PRD §1–§4 and §6.8 describe the finished couch UI and are not restated.
 
 ## 3. Why v1 failed
 
@@ -86,15 +86,15 @@ display manager (autologin, Relogin=true) ── selects one of:
 | Component | Owns | Never does |
 |---|---|---|
 | gamescope | Output mode, HDR/VRR state, which app id is on screen, keyboard/mouse focus, overlay plane, screenshots | Touch gamepads; know apps beyond an id |
-| core (`tv-shell-core`, the daemon's successor) | Base-layer list; app launch, scope, tag; pad grab and presenters; intents; IPC, HTTP, MCP, MQTT, metrics; AV control; HDR toggle; field assertions | Draw anything; hold a privileged surface; keep state on disk that the X server and systemd already hold |
+| core (`tv-shell-core`, the daemon's successor) | Base-layer list; app launch, scope, tag; pad grab and presenters; the command vocabulary and the event stream; IPC, HTTP, MCP, MQTT, metrics; AV control; HDR toggle; field assertions | Draw anything; hold a privileged surface; keep state on disk that the X server and systemd already hold |
 | shell (X11 client, fixed app id) | Home, Library, Settings, Widgets; drawers and QAM as separate `STEAM_OVERLAY` toplevels; tags its own windows | Talk to hardware; ask "who is on screen" |
 | per-player presenters (uinput) | One clean virtual pad per player, always present; only grab and routing toggle | Appear and vanish (that is a hotplug to every game) |
 | stats relay | Tail gamescope's stats FIFO into a file/socket both core and panel read | |
 | panel | Unit restart, journal, deploy, supervisor state, escape hatches | Hold another node's bridge token |
-| CEC sidecar | Observe the bus, report `<Active Source>`, forward remote keys as intents | Claim the display; share the adapter |
+| CEC sidecar | Observe the bus, report `<Active Source>`, forward remote keys as core commands | Claim the display; share the adapter |
 | `tv-shell-host` (streaming host) | Steam library, launch, quit, sleep | Unchanged from v1 |
 
-**Carried over unchanged in contract:** the Unix-socket IPC framing and reply grammar, the four-transport control surface over one `bridge_core`, the closed intent vocabulary, the settings store with one writer, the capability handshake, MQTT/HA topics, the `/metrics` catalogue, web apps, the Steam sidecar, `shell-state` (media state for the HA suspend rule, a separate channel from the frame heartbeat), and logind `Active` watching (grabs release when another session takes the seat).
+**Carried over unchanged in contract:** the Unix-socket IPC framing and reply grammar — newline-framed requests, and `ok` · `unknown` · `error:<msg>` · a bare compact JSON document in reply. That is the wire shape, not the verb list: the `intent` vocabulary is **not** carried over (§7 splits it by owner, and the event stream added there rides this same framing). Also unchanged: the four-transport control surface over one `bridge_core`, the settings store with one writer, the capability handshake, MQTT/HA topics, the `/metrics` catalogue, web apps, the Steam sidecar, `shell-state` (media state for the HA suspend rule, a separate channel from the frame heartbeat), and logind `Active` watching (grabs release when another session takes the seat).
 
 **Changed or deleted** (the IPC table in `docs/IPC_PROTOCOL.md` gets a deleted/renamed/kept column when the core lands):
 
@@ -104,6 +104,7 @@ display manager (autologin, Relogin=true) ── selects one of:
 | `display_mode.rs` (daemon and panel): `monitor=` rewriting with a revert timer | Mode is pinned in `[display]`; a resolution/refresh change is a gamescope restart under the same confirm-or-revert contract; VRR and HDR are root-atom writes |
 | `shell-focus on|off`, `overlay-focus` | The compositor publishes ownership; the shell's declaration survives only as the grab trigger (§7) |
 | `grab`/`release`/`handoff`, `[input.contracts]` | Presenters collapse to two (§7) |
+| The `intent` vocabulary, the `intent:*` broadcast, `key up\|down\|left\|right\|select\|back` | Retired, not ported: split by owner into core operations, a shell-local surface and real input injection (§7). The keyboard escapes it carried become `gamescope-action-binding` entries |
 | `resumeFocus.js`, `prewarm.js`/`appQuirks.js` launch paths, `HyprctlClients.qml`, every fullscreen assertion, the layer-shell `PanelWindow`, the QML duplicates of display-mode and CEC-wake | Deleted or rewritten against the core |
 | `WorkspaceAudioMuter.qml` / `audioOwnership.js` | Re-keyed to the base window's app id; the pure attribution logic is kept |
 | `config/hyprland.conf*`, `scripts/super-intent.sh`, `tv-shell-session.sh` | Stay, v1-only |
@@ -170,7 +171,27 @@ This supersedes PRD §5 "Input arbitration" (four presenters).
 - **Grab follows visibility, devices do not.** The grab is armed when the shell is the base window or a `STEAM_INPUT_FOCUS` overlay is mapped, and dropped otherwise; the uinput presenters stay present throughout (create/destroy is a hotplug event every game and Moonlight forward to the streaming host, #402). Sequence: overlay maps → grab → mask held buttons → route to the shell key-map; overlay unmaps → unmask → ungrab. With the pad ungrabbed a Guide tap reaches the game before the hold threshold; accepted, as in v1's Handoff.
 - **Escapes.** The Meta hold and the safety combos come from a passive, non-grabbing reader in the core, so they are unrefusable by the compositor but depend on the core being alive (`Upholds=` is the mitigation). The keyboard escapes (`Super`, `Super+Escape`, `Super+Backspace`) are `gamescope-action-binding` entries and survive a dead core.
 - **Keyboard stays with the compositor.** gamescope routes keyboard focus to the base window or the overlay deterministically (`GAMESCOPE_FOCUS_DISPLAY`); the shell reads keys through Qt, and automation injects nav keys via a uinput keyboard (or libei through `gamescope-eis`).
-- **Intents are unchanged**: `home`, `home-tap`, `home-hold`, `menu`, `settings`, `power`, the `settings:`/`overlay:`/`app:` deep links, `key up|down|left|right|select|back`.
+
+**The `intent` surface is retired, not ported.** It bundled three unrelated concerns behind one flat string vocabulary. That was coherent while the daemon was the only backend and the shell was its client; it stops being coherent once the core owns focus and the shell is a peer app among others. v2 splits it by owner:
+
+| Concern | v1 form | v2 form | Owner |
+|---|---|---|---|
+| Put an app on screen | `intent app:<wmClass>` | `show <appid>` / `home` — already in `core/` | core |
+| Launch an app | the shell shelled out | `launch <appid>` against the `[[app]]` class table — already in `core/` | core |
+| Observe the world | polling plus ad-hoc broadcasts | one event stream subscribers read | core → many |
+| Navigate the UI | `intent settings:bluetooth`, `overlay:volume`, `menu` | the shell's own surface; the core does not proxy it | shell |
+| Synthesise a keypress | `key up\|down\|left\|right\|select\|back` | real input injection (uinput, or libei through `gamescope-eis`) — not an IPC verb | core input layer |
+| Escape a wedged UI | `intent home-hold`, a message to the shell | a passive core-side reader performing a base-layer write | core |
+
+The escape row is the one that gets strictly better, and it is why this is a split rather than a tidy-up. In v1 the escape was a message to the shell, so it failed precisely when the shell was wedged — the only condition under which anyone reaches for it. In v2 the core owns the base layer, so the combo performs a core operation directly and works with the shell dead. That is the property `intent` was reaching for and never had.
+
+Five rules follow, and they outlive this decision:
+
+1. **A closed vocabulary, enforced by the type system rather than by naming convention.** The genuinely good part of `intent` was that its vocabulary was closed and enumerable. v2 gets that from `Command` in `core/src/protocol.rs`, where an exhaustive match forces every consumer to account for a new operation at compile time. Extend that enum; never add a parallel stringly-typed channel beside it.
+2. **Illegal states stay unrepresentable.** Already load-bearing in the crate — `Supervised` is a token that cannot be forged, `AppId` wraps a private field — and here it is the reason no `String` command name flows through the core.
+3. **The event stream publishes state, not deltas.** A broadcast channel lags slow subscribers. If every event is a full snapshot, a lagged or reconnecting subscriber takes the latest one and is correct; with deltas, lag corrupts and reconnect needs replay. That is what makes adding the stream safe at all.
+4. **One wire format.** Events ride §4's framing unchanged — newline-framed, `ok` · `unknown` · `error:<msg>` · a bare JSON document. No second protocol beside it.
+5. **One writer per piece of state.** v1's rule that the daemon is the sole settings writer was right and survives verbatim; the alternative is read-modify-write races between the shell and everything else that can set a key.
 
 ## 8. AV control
 
@@ -182,7 +203,7 @@ The chain is HTPC HDMI → the AVR (video, plus a CEC-only leg to a USB CEC adap
 | TV cold wake / power off | core, IP | WoL magic packet sent twice, webOS for state and standby |
 | Display ownership | core | The passive gate (`owns_display()` needs positive proof; `may_claim_active_source()` yields to a known other owner) is kept; its sensor moves from CEC callbacks to the AVR's `SI` push events, with the sidecar's `<Active Source>` as second witness |
 | Theater sleep on idle | core | Only when the HTPC is the AVR's selected input; otherwise release nothing |
-| CEC | sidecar, kernel driver | Observer only: bus scan, active-source events, remote keys as intents. Sole owner of the adapter. libcec and `cec-rs` leave the tree with the static-link CI leg |
+| CEC | sidecar, kernel driver | Observer only: bus scan, active-source events, remote keys as core commands. Sole owner of the adapter. libcec and `cec-rs` leave the tree with the static-link CI leg |
 | TV remote passthrough | goal, not constraint | No evidence of routine remote use; it was silently dead for weeks in v1 |
 
 Site preconditions (deployment, not code; listed in §11 cutover): AVR network control in standby enabled and no other telnet client holding the port; TV wake-over-network on and a webOS key provisioned; the v1 modprobe blacklist of the kernel CEC driver reversed and the Plex `bwrap` hiding kept.
@@ -281,7 +302,7 @@ couch:
 |---|---|
 | gamescope dies → session exits | `BindsTo=` on the target, plus the session script's `--wait`. Untested on hardware |
 | Core dies → restart, stateless, never writes "home" on boot | Implemented (`reconcile_on_start`) |
-| Stuck in an app → `intent home` | The base-layer write and its bounded verify exist; there is no intent surface on the core yet |
+| Stuck in an app → return to the shell | `home` and its bounded verify are implemented. The **escape that triggers it** is not: that needs the passive pad reader of §7, which is not in the crate |
 | Frames stop → forced-paint heartbeat | **Not implemented.** `[supervisor].stall_secs` has no reader |
 | Shell crash-loops → short-session tracker, then select v1 | **Not implemented.** No `ExecStartPre`/`ExecStopPost`, no counter, no deployment hook; `[supervisor].restart_threshold` / `restart_window_secs` have no reader. The gamescope unit briefly carried `StartLimitIntervalSec=60`/`StartLimitBurst=3` with a comment claiming to deliver this — the limiter was inert (`Restart=no`, so there is never a second attempt to count, and the session script's `reset-failed` clears the counter on every relogin) and has been removed rather than left standing as a protection that is not there. **Rollback is manual: select the v1 session at the display manager.** |
 | Shell dies → restart under the live compositor | The `Upholds=` is in the target; the shell unit does not exist yet |
@@ -308,7 +329,11 @@ because a single bound conflated two different waits:
 
 ## 13. Open questions
 
-1. **Shell runtime: Quickshell on xcb, or a plain Qt Quick application?** Whichever it is must set X11 properties on its own windows before map (a C++ helper or plugin) and split drawer, QAM and toasts into separate toplevels; Quickshell's layer-shell window is unusable here and its xcb operation is unverified. The plain `qml` runtime (Qt 6) worked as the prototype shell at 4K120. Porting cost of `shell/` versus a rewrite is the trade.
+1. **Shell runtime: Quickshell on xcb, or a plain Qt Quick application?** The two are not of equal standing and the asymmetry belongs on the record. §6 measured the plain `qml` runtime (Qt 6) working as the prototype shell under gamescope at 4K120; Quickshell's xcb operation is unverified, and its headline feature — layer-shell — does not exist under gamescope at all, so choosing it buys nothing the plain runtime lacks and carries an unmeasured risk. Either way the shell must set X11 properties on its own windows before map (a C++ helper or plugin) and split drawer, QAM and toasts into separate toplevels.
+
+   The trade was assumed to be a port versus a rewrite; measured, it is neither. Of the 124 QML files in `shell/`, 34 import Quickshell at all, only 4 touch `PanelWindow`/`WlrLayershell`, and `Socket` use is confined to the single `SocketClient.qml`. The bulk is `Process` — 50 sites across 16 files — much of which §4 already moves into the core regardless of this answer. So the cost is a shim exercise: roughly three helper types plus the four window files, not a rewrite of the UI.
+
+   **Still open**, because the evidence above is static analysis and a prototype, not the real shell on the real box. What closes it is a spike on hardware: build the shim, run today's `shell/` against it under gamescope on the pinned build, and confirm the self-tagging, the separate overlay toplevels and the pad path. §13 Q12's v2-`shell/` half waits on the same spike.
 2. **Plugin mechanism** for Home Assistant and music streaming: manifest-driven `.desktop` extensions, a core-side registry, or out-of-process plugins over the IPC.
 3. **Steam Remote Play under gamescope — the Steam Link half (kit criterion 10).** Partly answered 2026-09-05: **Big Picture as a tagged app works**, in its SDR form. The stream window is tagged (with the game's app id, by Steam itself), 120 fps held, input reached the game, and the base-layer question is settled against us (§9). What is still open is the **standalone Steam Link client**, which is not installed on the box, so only the kit's "not installed → exit 2" path is exercised: whether it is worth supporting beside Big Picture, and whether its HDR on Linux is any better than Big Picture's — the latter is capped by a Valve-side gate on `streaming_client`, so the standalone client is the only remaining place an HDR Remote Play could come from. The consequence of the SDR result is the live question: Remote Play is an SDR path for as long as Valve's client declines the HDR swapchain, which is a product decision (Moonlight stays the HDR path) rather than a compositor one. gamescope#2196 and the v1 finding that Steam's capture-window selection is a Valve-side bug stay open. A failure of the remaining half narrows the supported flavour; it does not select the §12 fallback, since Big Picture passes.
 4. **Chromium: Xwayland or native Wayland, and per-app profiles.** Native has no focus selector under SteamControlled; Xwayland is the safe path but hardware decode and Widevine under Xwayland on this GPU are unmeasured, and the per-app `--user-data-dir` split costs shared logins.
@@ -337,6 +362,7 @@ because a single bound conflated two different waits:
 | 2026-09-05 | **Kit criterion 10 measured.** Steam Remote Play runs under the prototype: Big Picture as a tagged app passes in its **SDR** form (120 fps, pad reaches the game, stream window tagged with the game's app id and deferred to). Remote Play is **SDR by a Valve-side gate** — the client declines the HDR swapchain the compositor offers — so Moonlight stays the HDR path. **Steam owns the base-layer atom** and rewrites it per stream start and stop; the core reconciles after Steam rather than contending. Steam Link is **unmeasured** (not installed). `--expose-wayland` disables the WSI layer for Steam-runtime apps; the per-app `WAYLAND_DISPLAY`-unset fix is proven and the flag stays. The decision rule (criteria 1 and 3) is untouched and still passes — gamescope remains the v2 compositor | this document, jedwards1230/tv-shell#458 |
 | 2026-09-05 | Review findings folded in: `app-steam-app` scope prefix is the upstream contract and the primary id; shell self-tags; the core is stateless and reads the base-layer list back on restart; v1 and v2 share no config file, prefix or unit name; the heartbeat is a forced-paint probe with one FIFO reader; `GAMESCOPE_FOCUSED_WINDOW` not `_APP` is the truth under an overlay; presenters collapse to `gamepad`/`keyboard` with persistent uinput devices | this document |
 | 2026-09-06 | **§13 Q12 answered for the core**: a new crate `tv-shell-core` in `core/`, beside `daemon/`, not an evolution of it — v1 (`daemon/`, `host/`, `protocol/`, `panel/`) is untouched and still builds, and the two share no config file (`core.toml`, since v1's root is `deny_unknown_fields`), socket (`tv-shell-core.sock`) or unit name. The crate lands with the typed atom layer, `ScreenState`, scope launching, base-layer show/home and the IPC server; input, CEC, the network surfaces, the heartbeat and the v2 `shell/` are not in it | this document, `core/README.md` |
+| 2026-09-07 | **The `intent` control surface is retired in v2, not ported.** It bundled three unrelated concerns — core operations, shell-local navigation, and synthetic keypresses — behind one flat string vocabulary; §7 splits them by owner, and the wedged-UI escape becomes a core-side base-layer write that works with the shell dead, which is what `intent home-hold` was reaching for and never had. The one property worth keeping — a closed, enumerable vocabulary — is now the `Command` enum in `core/src/protocol.rs`, enforced by exhaustive match rather than by naming convention. Recorded with it: illegal states unrepresentable, an event stream that publishes state rather than deltas, one wire format, one writer per piece of state. §13 Q1 is sharpened but **not** answered — the plain `qml` runtime is the measured one and the port is a shim, but a hardware spike closes it | this document |
 
 ## 15. References
 
