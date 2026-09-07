@@ -415,7 +415,19 @@ worth repeating by hand:
 - Make `presenter::translate` map `SYN_DROPPED` to `Forward::Sync`.
   `syn_report_flushes_and_syn_dropped_does_not` must fail.
 
-Three mutations SURVIVED the first pass, and each exposed a test that proved
+And against `core/tests/input_uinput.rs`, which runs on a real kernel:
+
+- Give the canonical profile an id no controller database knows.
+  `a_created_presenter_gets_a_devnode_that_discovery_refuses_as_ours` must fail
+  on its *precondition* — that test's whole point is that the presenter's id IS
+  database-known, so ownership is the only thing refusing it.
+- Build the presenter's axes with `range.max` instead of `range.neutral()`.
+  `a_created_presenter_advertises_the_canonical_profile_at_rest` must fail.
+- Drop the slot from `PadProfile::device_name`.
+  `each_player_gets_its_own_presenter_device` must fail. **It did not, at first**
+  — see survivor 4 below.
+
+Four mutations SURVIVED the first pass, and each exposed a test that proved
 less than it claimed. They are recorded because the fixes are the interesting
 part:
 
@@ -433,6 +445,26 @@ part:
    polls in the same millisecond carry the same stamp, so the assertion held
    either way. `polls_completed` was added beside the timestamp precisely so
    "it did not run" is distinguishable from "it ran again quickly".
+4. **Dropping the slot from `PadProfile::device_name`.**
+   `each_player_gets_its_own_presenter_device` compared each created device
+   against `device_name(n)` — the very function being mutated — so both sides
+   moved together and the test passed while every presenter shared one name.
+   A test that checks a value against the function that produced it is asserting
+   an identity, not a property. It now asserts the two names DIFFER from each
+   other, that each carries its own slot, and that both are recognisably ours —
+   none of which reference `device_name`.
+
+The safety flag has its own entry, because it is the easiest thing here to test
+vacuously:
+
+- Move the `enabled` check in `input::decide` to AFTER `config.resolve()`.
+  `a_disabled_config_does_no_work_at_all` must fail. Note the mutation still
+  returns `Disabled` for a disabled config in the happy path — asserting only
+  "returns `Disabled`" or "the flag parses as false" would pass against it. The
+  test uses an unreadable `controller_db` as a **probe**: `resolve` reads it, so
+  the same config comes back `Disabled` only if the gate short-circuited, and
+  the test's second half flips `enabled` alone to prove the probe is live and
+  the file really would have been read.
 
 ## Not yet here
 

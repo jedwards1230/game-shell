@@ -44,8 +44,11 @@ pub mod identity;
 pub mod presenter;
 pub mod session;
 
+/// Public so `core/tests/input_uinput.rs` can drive it against a real kernel.
+/// That file is the ONLY place the hardware claims are checked, so the module
+/// has to be reachable from outside the crate.
 #[cfg(target_os = "linux")]
-mod evdev_backend;
+pub mod evdev_backend;
 #[cfg(target_os = "linux")]
 mod runtime;
 
@@ -126,6 +129,44 @@ impl InputReports {
     }
 }
 
+/// What [`start`] should do, decided **without doing any of it**.
+///
+/// The gate is a value rather than an early `return` inside `start` for one
+/// reason: `start` spawns a thread that opens `/dev/uinput`, so it cannot run in
+/// a test, and a safety rule whose only expression is inside an untestable
+/// function is undefended. This is testable everywhere, including on a host with
+/// no seat.
+#[derive(Debug)]
+pub enum StartDecision {
+    /// `[input].enabled` is off. Nothing is enumerated, opened or created —
+    /// and nothing has been *read*, either (see the module docs).
+    Disabled,
+    /// Enabled, and the config resolved.
+    Start(ResolvedInput),
+    /// Enabled, but the config could not be resolved. Named so the operator
+    /// learns which key was wrong.
+    Misconfigured(String),
+}
+
+/// Decide whether the input layer runs, and settle its config if it does.
+///
+/// **The `enabled` check comes first and short-circuits everything.** Not as an
+/// optimisation: `resolve` reads a file from disk, so a gate placed after it
+/// would do observable work on behalf of a layer that is switched off. That
+/// ordering is what
+/// [`a_disabled_config_does_no_work_at_all`](self#tests) pins, using the file
+/// read as the probe — a disabled config pointing at an unreadable database must
+/// come back `Disabled`, not `Misconfigured`.
+pub fn decide(config: &InputConfig) -> StartDecision {
+    if !config.enabled {
+        return StartDecision::Disabled;
+    }
+    match config.resolve() {
+        Ok(resolved) => StartDecision::Start(resolved),
+        Err(e) => StartDecision::Misconfigured(e.to_string()),
+    }
+}
+
 /// Start the input layer if — and only if — it is enabled.
 ///
 /// Returns `None` when `[input].enabled` is false, **before** anything is
@@ -139,22 +180,104 @@ impl InputReports {
 /// not be hostage to `/dev/uinput` permissions.
 #[cfg(target_os = "linux")]
 pub fn start(config: &InputConfig) -> Option<InputHandle> {
-    if !config.enabled {
-        tracing::info!("[input] is disabled; no input device will be enumerated or opened");
-        return None;
-    }
-    let resolved = match config.resolve() {
-        Ok(r) => r,
-        Err(e) => {
+    let resolved = match decide(config) {
+        StartDecision::Disabled => {
+            tracing::info!("[input] is disabled; no input device will be enumerated or opened");
+            return None;
+        }
+        StartDecision::Misconfigured(e) => {
             tracing::error!("input layer not started: {e}");
             return None;
         }
+        StartDecision::Start(resolved) => resolved,
     };
     match runtime::spawn(resolved) {
         Ok(handle) => Some(handle),
         Err(e) => {
             tracing::error!("input layer not started: {e}");
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config that is disabled but would fail loudly if anything acted on it.
+    fn disabled_but_would_fail() -> InputConfig {
+        InputConfig {
+            enabled: false,
+            // Resolving this is a file read that ERRORS. It is the probe: if the
+            // gate ran after `resolve`, this config could not come back
+            // `Disabled`.
+            controller_db: "/nonexistent/gamecontrollerdb.txt".into(),
+            ..InputConfig::default()
+        }
+    }
+
+    /// **Rule: with the flag off, the layer does no work at all — not even a
+    /// file read.**
+    ///
+    /// The safety property the whole PR rests on, and the one that is easiest to
+    /// test vacuously. "`start` returns `None`" would pass against a gate placed
+    /// anywhere, including after the work; so would asserting the flag parses as
+    /// `false`. Neither says the layer was inert.
+    ///
+    /// This uses an **observable side effect as the probe**. `resolve` reads
+    /// `controller_db` from disk, and the path here does not exist, so the same
+    /// config differs by outcome depending on whether that read happened:
+    /// `Disabled` if the gate short-circuited, `Misconfigured` if it did not.
+    /// The second half proves the probe is live — that the file really would
+    /// have been read — so the first half cannot pass because the path was
+    /// harmless.
+    #[test]
+    fn a_disabled_config_does_no_work_at_all() {
+        let off = disabled_but_would_fail();
+        assert!(
+            matches!(decide(&off), StartDecision::Disabled),
+            "a disabled layer must not even resolve its config"
+        );
+
+        // The probe is live: flip ONLY `enabled`, and the very same config now
+        // reaches the file and fails on it.
+        let on = InputConfig {
+            enabled: true,
+            ..disabled_but_would_fail()
+        };
+        match decide(&on) {
+            StartDecision::Misconfigured(e) => assert!(e.contains("controller_db"), "{e}"),
+            other => panic!("the probe is dead — enabling changed nothing: {other:?}"),
+        }
+    }
+
+    /// The default config — what a box nobody reconfigured runs — is `Disabled`.
+    #[test]
+    fn the_default_config_starts_nothing() {
+        assert!(matches!(
+            decide(&InputConfig::default()),
+            StartDecision::Disabled
+        ));
+    }
+
+    /// An enabled, valid config resolves and carries its settings through, so
+    /// the gate is not simply refusing everything.
+    #[test]
+    fn an_enabled_config_resolves_and_carries_its_settings() {
+        let config = InputConfig {
+            enabled: true,
+            players: 2,
+            ..InputConfig::default()
+        };
+        match decide(&config) {
+            StartDecision::Start(resolved) => {
+                assert_eq!(resolved.players, 2);
+                assert!(
+                    resolved.db.is_known(0x045e, 0x028e),
+                    "the baseline db loaded"
+                );
+            }
+            other => panic!("an enabled valid config must start: {other:?}"),
         }
     }
 }

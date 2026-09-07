@@ -46,6 +46,12 @@ libc = "0.2"
 # `RustConnection` backend is the only one used.
 x11rb = { version = "0.14", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# `core/tests/input_uinput.rs` opens the presenters it created and reads their
+# capabilities back, so the integration test (a separate crate) needs evdev in
+# its own right.
+evdev = { version = "0.13", features = ["tokio"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # evdev and uinput are Linux kernel interfaces, so the backend that speaks them
 # is Linux-only. Every DECISION the input layer makes lives in the pure modules
