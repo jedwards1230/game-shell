@@ -46,6 +46,9 @@ pub struct CoreConfig {
     pub display: DisplayConfig,
     pub session: SessionConfig,
     pub supervisor: SupervisorConfig,
+    /// `[input]` — the pad fleet (V2_DESIGN §7). **Disabled by default**; see
+    /// [`crate::input::config::InputConfig`].
+    pub input: crate::input::InputConfig,
     /// `[[app]]` — the app-class table (§12).
     ///
     /// Named `app` because that is the TOML array-of-tables header an operator
@@ -532,6 +535,7 @@ impl CoreConfig {
 
     /// Reject values that would fail confusingly later.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.input.validate()?;
         if self.display.width == 0 || self.display.height == 0 {
             anyhow::bail!(
                 "config: [display] width and height must both be non-zero (got {}x{})",
@@ -1322,6 +1326,13 @@ restart_window_secs = 120
             // destructures `AppConfig` exhaustively for exactly the same reason:
             // adding a field there stops THAT test compiling.
             app: _,
+            // `[input]` classifies its own keys, in `input::config`'s
+            // `every_input_key_is_classified` — the same excuse `[[app]]` has:
+            // the numeric `field_count` below cannot represent a String or an
+            // Option, and a table that owns a module owns its own schema test.
+            // That test destructures `InputConfig` exhaustively, so adding a
+            // field there stops IT compiling.
+            input: _,
         } = CoreConfig::default();
         let DisplayConfig {
             width,

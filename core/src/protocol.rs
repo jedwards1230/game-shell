@@ -25,6 +25,9 @@ pub enum Command {
     Ping,
     /// One `ScreenState` snapshot as compact JSON.
     ScreenState,
+    /// One `InputReport` snapshot as compact JSON: the pad fleet, the player
+    /// slots, the presenter devices, and what discovery is refusing.
+    InputState,
     /// Put an app on screen.
     Show(String),
     /// `show` with no argument.
@@ -55,6 +58,7 @@ impl Command {
         match cmd {
             "ping" => return Command::Ping,
             "screen-state" => return Command::ScreenState,
+            "input-state" => return Command::InputState,
             "home" => return Command::Home,
             // A bare verb that requires a body is a usage error, not `unknown`:
             // the client asked for something real and got the arity wrong.
@@ -162,7 +166,17 @@ mod tests {
     fn bare_verbs_parse() {
         assert_eq!(Command::parse("ping"), Command::Ping);
         assert_eq!(Command::parse("screen-state"), Command::ScreenState);
+        assert_eq!(Command::parse("input-state"), Command::InputState);
         assert_eq!(Command::parse("home"), Command::Home);
+    }
+
+    /// `input-state` is a bare read verb: it takes no body, so anything glued to
+    /// it is a different word and must not be mistaken for it.
+    #[test]
+    fn input_state_takes_no_body() {
+        assert_eq!(Command::parse("  input-state "), Command::InputState);
+        assert_eq!(Command::parse("input-stateX"), Command::Unknown);
+        assert_eq!(Command::parse("input-state 1"), Command::Unknown);
     }
 
     #[test]

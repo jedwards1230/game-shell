@@ -30,6 +30,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
 use crate::atoms::AppId;
+use crate::input::InputReports;
 use crate::protocol::{self, Command};
 
 /// Everything the IPC layer needs from the compositor.
@@ -79,15 +80,20 @@ pub trait Compositor: Send + Sync + 'static {
 }
 
 /// Bind the socket (removing any stale file), chmod 0600, and serve forever.
-pub async fn serve(sock_path: String, compositor: Arc<dyn Compositor>) -> Result<()> {
+pub async fn serve(
+    sock_path: String,
+    compositor: Arc<dyn Compositor>,
+    input: InputReports,
+) -> Result<()> {
     let listener = bind(&sock_path)?;
     tracing::info!("listening on {sock_path}");
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let compositor = Arc::clone(&compositor);
+                let input = input.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, compositor).await {
+                    if let Err(e) = handle_client(stream, compositor, input).await {
                         tracing::debug!("client connection ended: {e}");
                     }
                 });
@@ -130,20 +136,32 @@ fn bind(sock_path: &str) -> Result<UnixListener> {
 }
 
 /// One command per line, one reply per command, until the client goes away.
-async fn handle_client(stream: UnixStream, compositor: Arc<dyn Compositor>) -> Result<()> {
+async fn handle_client(
+    stream: UnixStream,
+    compositor: Arc<dyn Compositor>,
+    input: InputReports,
+) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(protocol::MAX_LINE));
     while let Some(line) = framed.next().await {
         let line = line.context("reading command line")?;
-        let reply = dispatch(&compositor, Command::parse(&line)).await;
+        let reply = dispatch(&compositor, &input, Command::parse(&line)).await;
         framed.send(reply).await?;
     }
     Ok(())
 }
 
 /// Resolve a command to its reply line.
-pub async fn dispatch(compositor: &Arc<dyn Compositor>, cmd: Command) -> String {
+pub async fn dispatch(
+    compositor: &Arc<dyn Compositor>,
+    input: &InputReports,
+    cmd: Command,
+) -> String {
     match cmd {
         Command::Ping => protocol::resp_ok(),
+        // Answered from a snapshot, on the reactor: it reads no device and takes
+        // no lock the input loop holds, so it cannot hang when that loop is the
+        // thing being diagnosed.
+        Command::InputState => protocol::resp_json(&input.report()),
         Command::ScreenState => {
             let c = Arc::clone(compositor);
             blocking(move || c.screen_state()).await
@@ -235,7 +253,7 @@ mod tests {
     }
 
     async fn reply(c: &Arc<dyn Compositor>, line: &str) -> String {
-        dispatch(c, Command::parse(line)).await
+        dispatch(c, &InputReports::disabled(), Command::parse(line)).await
     }
 
     #[tokio::test]
@@ -252,6 +270,23 @@ mod tests {
             reply(&c, "launch 9003 moonlight stream").await,
             r#"{"app_id":9003,"command":["moonlight","stream"]}"#
         );
+    }
+
+    /// **Rule: `input-state` answers with an honest empty report when the layer
+    /// is off, rather than an error.**
+    ///
+    /// "Input is disabled" is a state this verb exists to report. Returning an
+    /// error would make a correctly-configured default core look broken.
+    #[tokio::test]
+    async fn input_state_reports_disabled_without_touching_hardware() {
+        let c = fake(false);
+        let r = reply(&c, "input-state").await;
+        assert!(!r.starts_with("error:"), "{r}");
+        let parsed: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(parsed["enabled"], serde_json::json!(false));
+        assert_eq!(parsed["pads"], serde_json::json!([]));
+        assert_eq!(parsed["presenters"], serde_json::json!([]));
+        assert_eq!(parsed["last_poll_unix_ms"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -299,7 +334,15 @@ mod tests {
     #[tokio::test]
     async fn no_reply_ever_contains_a_newline() {
         let c = fake(true);
-        for line in ["ping", "show", "show 9003", "home", "launch", "frobnicate"] {
+        for line in [
+            "ping",
+            "show",
+            "show 9003",
+            "home",
+            "launch",
+            "input-state",
+            "frobnicate",
+        ] {
             let r = reply(&c, line).await;
             assert!(!r.contains('\n'), "{line} -> {r:?}");
         }
@@ -333,7 +376,7 @@ mod tests {
             .join(format!("tv-core-ipc-test-{}.sock", std::process::id()))
             .to_string_lossy()
             .to_string();
-        let server = tokio::spawn(serve(sock.clone(), fake(false)));
+        let server = tokio::spawn(serve(sock.clone(), fake(false), InputReports::disabled()));
 
         for _ in 0..100 {
             if std::path::Path::new(&sock).exists() {

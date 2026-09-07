@@ -349,3 +349,62 @@
 #QT_QPA_PLATFORM = "xcb"
 #SDL_VIDEODRIVER = "x11"
 #ENABLE_GAMESCOPE_WSI = "1"
+
+# ---------------------------------------------------------------------------
+# [input] — the gamepad fleet (V2_DESIGN §7)
+# ---------------------------------------------------------------------------
+#
+# DEFAULT OFF, DELIBERATELY. With `enabled = false` — which is what you get if
+# you never write this table — the core enumerates nothing, opens nothing and
+# grabs nothing. There is no code path from a disabled core to /dev/input or
+# /dev/uinput at all. Deploying a core that contains this layer therefore changes
+# nothing on a box until someone edits this file, which is the point: on this
+# hardware the pad reaching Moonlight is the thing that must not break.
+#
+# TO TURN IT OFF AGAIN: set `enabled = false` and restart the core. That is
+# sufficient and total. An EVIOCGRAB lives on an open file descriptor, so every
+# grab is released when the process exits — by SIGTERM, by SIGKILL, by a panic —
+# and the uinput presenters disappear with it. `systemctl --user kill
+# tv-shell-core` releases your controllers just as completely as a clean stop;
+# there is no state left behind to clean up.
+#
+# WHAT THIS LAYER DOES TODAY: claims every controller the database recognises,
+# assigns each a stable player slot, and re-presents it on a permanent per-player
+# virtual pad. On its own that is BEHAVIOURALLY INVISIBLE — what reads the
+# presenter sees the same input the physical pad was sending.
+#
+# WHAT IT DOES NOT DO YET: route anything to a shell, translate the pad to a
+# keyboard for web apps, or implement the Meta-hold escape. Those need a shell to
+# route to. Rumble, battery, LEDs and companion touchpad/motion-node inhibition
+# are also still to come.
+
+#[input]
+# The safety flag.
+#enabled = false
+#
+# Player slots, and so how many permanent uinput presenters exist. A CAPACITY,
+# not a count of connected pads: the presenters are created at startup whether or
+# not anyone is holding a controller, because a presenter that appeared when a
+# pad did would be a hotplug event to every game and to Moonlight — which is
+# exactly the defect jedwards1230/tv-shell#402 records. 1-8.
+#players = 4
+#
+# How often the fleet is re-enumerated. Polled rather than driven by a udev
+# listener, per V2_DESIGN §10: v1's residual defect was an attached listener that
+# processed nothing, and a poll that stops has no equivalent quiet failure mode.
+# 100-60000 ms.
+#poll_interval_ms = 2000
+#
+# An SDL_GameControllerDB file layered OVER the bundled baseline, for a
+# controller the baseline does not know. A path that cannot be read, or a file
+# that parses to zero entries, is an ERROR and not a silent fallback — otherwise
+# a wrong path reads as "my controller is unsupported".
+#controller_db = "/etc/tv-shell/gamecontrollerdb.txt"
+#
+# Operator pin: claim ONLY this vendor/product, bypassing the database entirely.
+# The escape hatch for a pad no database knows. It EXCLUDES as well as includes —
+# with a pin set, database-known pads that are not the pinned model are refused —
+# so it is a whitelist of one, not a hint. Both keys or neither; a half-pin is
+# rejected at startup.
+#pin_vendor = 0x045e
+#pin_product = 0x028e

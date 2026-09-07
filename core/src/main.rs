@@ -90,6 +90,7 @@ async fn serve() -> ExitCode {
 
     // Read before `config` moves into the compositor.
     let boot_app = config.boot_app();
+    let input_config = config.input.clone();
     let restart_policy = boot::RestartPolicy::from_config(&config);
 
     let compositor = match GamescopeCompositor::connect(config, None) {
@@ -113,9 +114,18 @@ async fn serve() -> ExitCode {
         }),
     );
 
+    // The input layer, if an operator turned it on. `None` — the default —
+    // means nothing was enumerated, opened or grabbed, and `input-state` still
+    // answers, reporting exactly that.
+    let mut input = tv_shell_core::input::start(&input_config);
+    let input_reports = input
+        .as_ref()
+        .map(|h| h.reports())
+        .unwrap_or_else(tv_shell_core::input::InputReports::disabled);
+
     let sock_path = config::socket_path();
     let compositor = tv_shell_core::compositor::shared(compositor);
-    let server = ipc::serve(sock_path.clone(), Arc::clone(&compositor));
+    let server = ipc::serve(sock_path.clone(), Arc::clone(&compositor), input_reports);
 
     // AFTER the listener exists, and off the reactor. A cold app start can take
     // seconds — the map bound alone is 30 s — and §9 makes the control surface
@@ -165,6 +175,13 @@ async fn serve() -> ExitCode {
             ExitCode::SUCCESS
         }
     };
+
+    // Release every pad before the socket goes, so a stop is quiet on the couch.
+    // Not load-bearing for safety: a grab lives on a file descriptor, so even a
+    // SIGKILL releases everything (see `input::evdev_backend`).
+    if let Some(handle) = input.as_mut() {
+        handle.shutdown();
+    }
 
     // Unlink our own socket. Best-effort: the file may already be gone, and a
     // failure here must not turn a clean shutdown into a failed one.

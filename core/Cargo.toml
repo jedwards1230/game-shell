@@ -45,3 +45,11 @@ libc = "0.2"
 # rationale) intact. `allow-unsafe-code` is deliberately NOT enabled: the safe
 # `RustConnection` backend is the only one used.
 x11rb = { version = "0.14", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# evdev and uinput are Linux kernel interfaces, so the backend that speaks them
+# is Linux-only. Every DECISION the input layer makes lives in the pure modules
+# beside it, which build and test on any host -- that is what keeps the rules
+# covered by CI on a runner with no seat. Same version the v1 daemon has run on
+# this hardware for months; `tokio` gives the async `EventStream`.
+evdev = { version = "0.13", features = ["tokio"] }
