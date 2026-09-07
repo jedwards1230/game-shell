@@ -1,0 +1,135 @@
+# The v2 shell (shell-v2/): CMake build, qmllint, and all three test lanes.
+#
+# This area exists because v2's shell has a BUILD STEP — the pre-map X11 tagging
+# needs C++ — which v1's interpreted QML deliberately does not. See
+# docs/V2_SHELL.md.
+#
+# Three lanes, all in one job so the X-backed lane runs against the same build:
+#
+#   surfacetags  pure C++ role -> atoms. No display, no Qt GUI, no X.
+#   qml          the TvShell module offscreen (focus graph + the real QML types).
+#   premap       a REAL X server (Xvfb), asserting PropertyNotify before MapNotify.
+#
+# The premap lane is opt-in behind TV_SHELL_TEST_XVFB, the same shape core/ uses
+# for its own X-backed tests — and this workflow SETS that variable, so the lane
+# actually executes. The "Assert all three lanes ran" step below exists because
+# jedwards1230/tv-shell#469 was exactly the failure of an ignore-gated leg wired
+# to nothing: a gate that silently skips is indistinguishable from a gate that
+# passed, so the count is checked rather than assumed.
+#
+# Invoked by the CI orchestrator (.github/workflows/ci.yml). ci.yml is the single
+# required-check surface.
+
+name: Shell v2
+
+run-name: "Shell v2 — ${{ github.event_name }} on ${{ github.ref_name }} by @${{ github.actor }}"
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build and X dependencies
+        # xcb dev headers for the tagger; the xcb PLATFORM plugin's runtime libs
+        # so QT_QPA_PLATFORM=xcb works under Xvfb; xvfb itself for the premap
+        # lane. libxcb-cursor0 is the one that is easy to forget — without it the
+        # xcb platform plugin refuses to load and the premap lane fails with
+        # "could not load the Qt platform plugin", not with an ordering error.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            cmake ninja-build pkg-config xvfb x11-utils \
+            libxcb1-dev \
+            libglib2.0-0t64 libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1 libfreetype6 libgssapi-krb5-2 \
+            libharfbuzz0b libpng16-16 libmd4c0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 \
+            libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-glx0 \
+            libxcb-shm0 libxcb-util1 libsm6 libice6
+
+      - name: Install Qt 6.8.3
+        # NOT jurplel/install-qt-action — this repo enforces sha_pinning_required
+        # on Actions and that check applies to TRANSITIVE action references, which
+        # that action does not satisfy. Same plain-`run:` install the other Qt
+        # jobs use (see lint.yml for the full rationale), same pinned version so
+        # qmllint severities do not drift between jobs.
+        run: |
+          python3 -m pip install --break-system-packages --quiet 'aqtinstall==3.2.1'
+          aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+            --outputdir "$RUNNER_TEMP/Qt"
+          echo "$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+        env:
+          QT_VERSION: "6.8.3"
+
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          # Wait for the server rather than sleeping a guess: a race here would
+          # present as an intermittent premap failure, which is the worst kind.
+          for _ in $(seq 1 50); do
+            if xdpyinfo -display :99 >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+          xdpyinfo -display :99 >/dev/null
+
+      - name: Configure
+        # TV_SHELL_TEST_XVFB is read at CONFIGURE time, which is what registers
+        # the premap lane as a ctest test at all.
+        env:
+          TV_SHELL_TEST_XVFB: ":99"
+        run: cmake -S shell-v2 -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build
+
+      - name: qmllint (module-resolving)
+        # The CMake-generated target, not a bare `qmllint shell-v2/**`: it passes
+        # the module's own import paths, so TvShell types actually resolve and the
+        # check is about real defects rather than unresolved imports.
+        run: cmake --build build --target all_qmllint
+
+      - name: Test
+        # Software rendering throughout: the runner has no GPU, and forcing it
+        # here keeps the premap lane's failures about ORDERING rather than about
+        # a missing GL context.
+        env:
+          QT_QUICK_BACKEND: software
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Assert all three lanes ran
+        # An ignore-gated leg wired to nothing defends nothing
+        # (jedwards1230/tv-shell#469). ctest reports 2 tests when the premap lane
+        # was skipped at configure time and 3 when it was registered, so the count
+        # is the signal that the X leg genuinely executed.
+        run: |
+          names=$(ctest --test-dir build -N | sed -n 's/^ *Test *#[0-9]*: //p' | sort | tr '\n' ' ')
+          echo "registered lanes: $names"
+          for lane in premap qml surfacetags; do
+            case " $names " in
+              *" $lane "*) ;;
+              *) echo "::error::lane '$lane' did not run"; exit 1 ;;
+            esac
+          done
+
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "## shell-v2"
+            echo ""
+            echo "CMake build + qmllint + three test lanes (surfacetags, qml, premap)."
+            echo "The premap lane runs against a real Xvfb display and asserts that"
+            echo "the STEAM_* properties reach the X server BEFORE the window maps."
+            echo ""
+            echo "Result: **${JOB_STATUS}**."
+          } >> "$GITHUB_STEP_SUMMARY"

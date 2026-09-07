@@ -110,6 +110,32 @@ script must stay lint-clean and executable:
 shellcheck -x core/units/*.sh scripts/install-v2.sh
 ```
 
+### v2 shell (`shell-v2/` — Qt Quick + CMake, Linux)
+
+Unlike v1's `shell/`, this one BUILDS: the pre-map X11 tagging needs C++. See
+[docs/V2_SHELL.md](docs/V2_SHELL.md).
+
+```bash
+cmake -S shell-v2 -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+cmake --build build --target all_qmllint   # module-resolving qmllint
+ctest --test-dir build --output-on-failure
+```
+
+The X-backed lane (`premap`, which asserts the `STEAM_*` properties reach the
+server BEFORE the window maps) is opt-in behind `TV_SHELL_TEST_XVFB`, the same
+shape as `core/`'s X tests — so the commands above stay offline and need no
+display server. The variable is read at **configure** time, so it must be set
+before `cmake -S`, and `ctest` reports two lanes without it and three with it:
+
+```bash
+Xvfb :99 -screen 0 1280x800x24 &
+TV_SHELL_TEST_XVFB=:99 cmake -S shell-v2 -B build -G Ninja
+cmake --build build && ctest --test-dir build --output-on-failure
+```
+
+CI sets it, so the lane genuinely executes rather than silently skipping.
+
 ### QML shell (`shell/` — no build step; formatting and headless tests)
 
 ```bash
