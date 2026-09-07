@@ -14,6 +14,10 @@
 # workspace shares one target dir at the repo ROOT, so the build output is at
 # `../target/release/...` from `working-directory: daemon`.
 #
+# One job runs OUTSIDE the container on the bare runner VM: `core-uinput`, which
+# needs a real /dev/uinput. It is advisory (continue-on-error) until the leg has
+# proved it can execute on a hosted runner — see the comment above that job.
+#
 # Invoked by the CI orchestrator (.github/workflows/ci.yml), which decides via
 # path-based change detection whether the daemon/protocol crates changed, so
 # QML-only PRs never reach this workflow. ci.yml is the single required-check
@@ -262,14 +266,20 @@ jobs:
       # covers dev/gamescope/ only, and these ship as part of the core.
       #
       # scripts/install-v2.sh joins them: it is v2's installer, it is what the
-      # install tests above execute, and no other job lints it (v1's
-      # scripts/install.sh is still shellchecked by nothing — out of scope here).
-      - name: Shellcheck the session scripts and the v2 installer
+      # install tests above execute, and no other job lints it.
+      #
+      # scripts/install.sh — v1's installer — joins them here too. It was
+      # shellchecked by NO workflow, which is the worse gap of the two: v1 is
+      # what still boots the couch on a v2 rollback, so it is the script whose
+      # breakage has nowhere to fall back to. It is linted (not tested) in this
+      # job because this is the only job that already has shellcheck installed;
+      # nothing about the check is v2-specific.
+      - name: Shellcheck the session scripts and both installers
         id: shellcheck
         run: |
           shellcheck --version
-          shellcheck -x core/units/*.sh scripts/install-v2.sh
-          for f in core/units/*.sh scripts/install-v2.sh; do bash -n "$f"; done
+          shellcheck -x core/units/*.sh scripts/install-v2.sh scripts/install.sh
+          for f in core/units/*.sh scripts/install-v2.sh scripts/install.sh; do bash -n "$f"; done
 
       - name: Summary
         if: always()
@@ -285,6 +295,122 @@ jobs:
             echo "| Test | ${{ steps.test.outcome }} |"
             echo "| Test (Xvfb) | ${{ steps.test_xvfb.outcome }} |"
             echo "| Shellcheck | ${{ steps.shellcheck.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The uinput leg for core/tests/input_uinput.rs — four `#[ignore]`d tests keyed
+  # on TV_SHELL_TEST_UINPUT that landed in #466 and, until this job, ran nowhere.
+  #
+  # WHY IT EXISTS. The invariant they defend is the presenter slot-order check in
+  # core/src/input/evdev_backend.rs. That check was originally a
+  # `debug_assert_eq!` — which compiles out of exactly the release build the
+  # couch runs — and `emit` indexes presenters by slot, so a violation silently
+  # routes one player's input to another player's device. #466 turned it into a
+  # runtime `Err`. Reverting it to `debug_assert_eq!` and running
+  # `cargo test -p tv-shell-core --lib` in BOTH debug and release passes in both:
+  # the only test that catches it, `creating_presenters_out_of_order_is_refused`,
+  # lives in this ignore-gated file. So this bug class — already hit once — had
+  # zero automated defenders while the file sat unwired.
+  #
+  # WHY IT IS NON-BLOCKING (continue-on-error) ON THIS FIRST PASS. Whether a
+  # GitHub runner can `modprobe uinput`, and whether the /dev/input/eventN node
+  # the kernel then publishes is readable by the process running the tests, has
+  # to be OBSERVED, not assumed. #466's author declined to wire it for precisely
+  # this reason and named the precedent: assuming it is how the Xvfb tests spent
+  # months compiled everywhere and run nowhere. Flip this to blocking once the
+  # leg has a run history — a green-by-assumption required check is worse than an
+  # honest advisory one.
+  #
+  # WHY IT IS ITS OWN JOB AND NOT A STEP IN `core`. `core` runs inside the
+  # `rust:1-bookworm` container. GitHub container jobs are neither privileged nor
+  # given a mapped /dev/uinput, so `modprobe` has no CAP_SYS_MODULE and the device
+  # node is not present to begin with — a step added there could not execute,
+  # which is the exact failure this job exists to end. This leg therefore runs on
+  # the bare runner VM (passwordless sudo, real kernel).
+  core-uinput:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: .
+          key: core-uinput
+
+      # Fail HERE, naming uinput, if the module cannot be loaded — rather than
+      # letting a missing device present as a confusing panic inside a test.
+      # Same shape as the Xvfb leg's readiness check in the `core` job.
+      - name: Load the uinput module
+        id: modprobe
+        run: |
+          if ! sudo modprobe uinput; then
+            echo "::error::modprobe uinput failed — this runner cannot load the module, so the uinput tests cannot run."
+            exit 1
+          fi
+          if [ ! -e /dev/uinput ]; then
+            echo "::error::uinput loaded but /dev/uinput does not exist — no device node to talk to."
+            exit 1
+          fi
+          ls -l /dev/uinput
+
+      # TWO permissions are needed, not one, and they fail differently — this is
+      # the half that is easy to get wrong. Writing /dev/uinput is enough to
+      # CREATE a presenter; it is NOT enough to read one back, because the
+      # /dev/input/eventN the kernel publishes for it is plain `root:input 0660`
+      # with no ACL, and `evdev::enumerate()` silently OMITS what it cannot open.
+      # That surfaces as "the presenter must appear in an enumeration" — an
+      # assertion failure a long way from its cause. (Measured on hardware by
+      # #466's author; the test file's preflight documents it.)
+      #
+      # So the test binary is COMPILED as the runner user (keeping the cargo
+      # cache and target dir owned by that user) and EXECUTED under sudo, where
+      # both halves hold unconditionally. Relying on a udev rule to widen the
+      # eventN mode would work only if udevd is managing these nodes on the
+      # runner — one more thing to assume.
+      - name: Build the uinput test binary
+        id: build_test
+        run: |
+          bin=$(cargo test -p tv-shell-core --test input_uinput --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "input_uinput") | .executable' \
+            | grep -v '^null$' | tail -1)
+          if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+            echo "::error::could not locate the compiled input_uinput test binary"
+            exit 1
+          fi
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+
+      # `--test-threads=1` mirrors the Xvfb leg: these tests each create real
+      # uinput devices against one shared kernel and assert on what /dev/input
+      # enumeration then shows, so concurrent creation makes every enumeration
+      # assertion a race against the other tests' devices.
+      #
+      # The suite PANICS rather than skips when TV_SHELL_TEST_UINPUT is unset
+      # while --ignored is passed (see the file header). That is deliberate and
+      # must not be weakened: it is what makes this step incapable of passing by
+      # quietly running nothing.
+      - name: Test (uinput against the real kernel)
+        id: test_uinput
+        run: |
+          sudo TV_SHELL_TEST_UINPUT=1 "${{ steps.build_test.outputs.bin }}" \
+            --ignored --test-threads=1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Rust CI — \`core/\` uinput (advisory)"
+            echo ""
+            echo "| Step | Result |"
+            echo "|------|--------|"
+            echo "| modprobe uinput | ${{ steps.modprobe.outcome }} |"
+            echo "| Build test binary | ${{ steps.build_test.outcome }} |"
+            echo "| Test (uinput) | ${{ steps.test_uinput.outcome }} |"
+            echo ""
+            echo "Non-blocking on purpose while the leg proves it can execute on a hosted runner."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Separate leg for the OPTIONAL `cec` and `mcp` features (#94). Together they

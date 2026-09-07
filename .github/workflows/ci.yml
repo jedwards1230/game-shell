@@ -67,6 +67,10 @@ jobs:
               # would go unchecked.
               - 'scripts/install-v2.sh'
               - 'config/tv-shell-v2.desktop'
+              # v1's installer is shellchecked by the `core` job too. Nothing
+              # else lints it, so a change to it that skipped this area would be
+              # unchecked — and v1 is what still boots the couch on a rollback.
+              - 'scripts/install.sh'
               - '.github/workflows/rust.yml'
               - '.github/workflows/ci.yml'
             host:
