@@ -69,15 +69,82 @@ impl GamescopeCompositor {
     /// §9: on start the core is stateless and **never writes "home" on boot** —
     /// that would yank a live game. It observes and reports; it re-asserts only
     /// when something gives it an intent of its own.
-    pub fn reconcile_on_start(&self) {
+    /// Returns what it saw, because the boot client's decision is made from
+    /// exactly this observation (see [`crate::boot`]) — and `None` on a failed
+    /// read, which that decision treats as "no evidence", never as "empty".
+    pub fn reconcile_on_start(&self) -> Option<baselayer::Reconciled> {
         match baselayer::reconcile(&self.conn) {
-            Ok(r) => tracing::info!(
-                base_layer = ?r.base_layer,
-                on_screen = ?r.on_screen,
-                "reconciled with the running compositor; not asserting an intent of our own"
-            ),
-            Err(e) => tracing::warn!("could not read the base layer back: {e}"),
+            Ok(r) => {
+                tracing::info!(
+                    base_layer = ?r.base_layer,
+                    on_screen = ?r.on_screen,
+                    "reconciled with the running compositor; not asserting an intent of our own"
+                );
+                Some(r)
+            }
+            Err(e) => {
+                tracing::warn!("could not read the base layer back: {e}");
+                None
+            }
         }
+    }
+}
+
+/// What a launch will actually run: the argv, and the class environment split
+/// into the sets and the removals [`launch::LaunchEnv`] takes.
+///
+/// A named type rather than a tuple because the two env halves are both list-
+/// shaped and swapping them would compile — and swapping them means writing
+/// `WAYLAND_DISPLAY` instead of removing it, which is the exact bug this change
+/// exists to fix.
+#[derive(Debug)]
+struct ResolvedLaunch<'a> {
+    command: &'a [String],
+    set: Vec<(String, String)>,
+    unset: &'a [String],
+}
+
+/// Resolve the argv and environment for a launch.
+///
+/// The two forms and why both exist:
+///
+/// * **`launch <appid>`** (empty `command`) — the default path. The class table
+///   supplies both the command and the environment, so a caller cannot launch
+///   Moonlight while forgetting the four environment operations that stop it
+///   selecting native Wayland and never mapping a window.
+/// * **`launch <appid> <cmd...>`** — ad-hoc, for a one-off binary or a variant
+///   invocation. **It still takes the class environment when the id is a known
+///   class**, because the environment is a property of the CLASS, not of the
+///   argv: `launch 9003 /usr/bin/moonlight --quit-after` is still Moonlight and
+///   still needs `WAYLAND_DISPLAY` gone. An unknown id has no class, so an
+///   explicit command runs with no extra environment — that is the escape hatch.
+///
+/// An unknown id with NO command is the one combination that cannot be served,
+/// and it is an `Err` naming what to add. Never a bare exec.
+fn resolve_launch<'a>(
+    class: Option<&'a crate::config::AppConfig>,
+    app_id: AppId,
+    command: &'a [String],
+) -> Result<ResolvedLaunch<'a>, String> {
+    const NO_UNSET: &[String] = &[];
+    let owned = |class: &'a crate::config::AppConfig, command: &'a [String]| ResolvedLaunch {
+        command,
+        set: class.env.clone().into_iter().collect(),
+        unset: &class.env_unset,
+    };
+    match (class, command.is_empty()) {
+        (Some(class), true) => Ok(owned(class, &class.command)),
+        (Some(class), false) => Ok(owned(class, command)),
+        (None, false) => Ok(ResolvedLaunch {
+            command,
+            set: Vec::new(),
+            unset: NO_UNSET,
+        }),
+        (None, true) => Err(format!(
+            "no [[app]] class configured for app id {app_id}; add an [[app]] entry with \
+             id = {app_id} to core.toml (command + env), or pass a command explicitly: \
+             `launch {app_id} <cmd> [args...]`"
+        )),
     }
 }
 
@@ -101,6 +168,8 @@ pub fn launch_reply(
     confirm_timeout: std::time::Duration,
     app_id: AppId,
     command: &[String],
+    class: Option<&crate::config::AppConfig>,
+    on_exit: Option<std::sync::mpsc::Sender<std::process::ExitStatus>>,
 ) -> String {
     let Some(env) = env else {
         // NEVER an unscoped launch. gamescope identifies an app by its cgroup
@@ -108,7 +177,22 @@ pub fn launch_reply(
         // launch would look like it worked and the app would be unreachable.
         return protocol::resp_error(scope_error.unwrap_or("scope launching is unavailable"));
     };
-    match launch::launch(env, app_id, command, confirm_timeout) {
+    let resolved = match resolve_launch(class, app_id, command) {
+        Ok(resolved) => resolved,
+        Err(why) => return protocol::resp_error(&why),
+    };
+    let launch_env = launch::LaunchEnv {
+        set: &resolved.set,
+        unset: resolved.unset,
+    };
+    match launch::launch(
+        env,
+        app_id,
+        resolved.command,
+        launch_env,
+        confirm_timeout,
+        on_exit,
+    ) {
         Ok(launched) => {
             tracing::info!(
                 app_id = %app_id,
@@ -183,7 +267,43 @@ impl Compositor for GamescopeCompositor {
             self.config.launch_confirm_timeout(),
             app_id,
             command,
+            self.config.app_class(app_id),
+            None,
         )
+    }
+
+    fn launch_supervised(
+        &self,
+        app_id: AppId,
+    ) -> Result<std::sync::mpsc::Receiver<std::process::ExitStatus>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = launch_reply(
+            self.scope_env.as_ref(),
+            self.scope_error.as_deref(),
+            self.config.launch_confirm_timeout(),
+            app_id,
+            &[],
+            self.config.app_class(app_id),
+            Some(tx),
+        );
+        if reply.starts_with("error:") {
+            return Err(reply);
+        }
+        Ok(rx)
+    }
+
+    fn on_screen_app(&self) -> Option<AppId> {
+        match screen::read(&self.conn) {
+            Ok(state) => state.on_screen_app(),
+            // A failed read is not "nothing is on screen": the supervisor treats
+            // `None` as "the coast is clear", so answering None here would let a
+            // relaunch through on no evidence. Report the app we cannot see as
+            // *something*, which makes the supervisor yield — fail closed.
+            Err(e) => {
+                tracing::warn!("could not read what is on screen: {e}");
+                Some(crate::boot::SCREEN_UNREADABLE)
+            }
+        }
     }
 }
 
@@ -196,6 +316,121 @@ pub fn shared(c: GamescopeCompositor) -> Arc<dyn Compositor> {
 mod tests {
     use super::*;
     use std::time::Duration;
+    // -- the app-class table -------------------------------------------------
+
+    fn moonlight_class() -> crate::config::AppConfig {
+        crate::config::AppConfig {
+            id: 9003,
+            command: vec!["/usr/bin/moonlight".to_string()],
+            env: [
+                ("QT_QPA_PLATFORM".to_string(), "xcb".to_string()),
+                ("SDL_VIDEODRIVER".to_string(), "x11".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            env_unset: vec!["WAYLAND_DISPLAY".to_string()],
+        }
+    }
+
+    /// `launch <appid>` with no command takes BOTH halves from the class.
+    #[test]
+    fn the_class_form_supplies_the_command_and_the_environment() {
+        let class = moonlight_class();
+        let r = resolve_launch(Some(&class), AppId::new(9003), &[]).unwrap();
+        assert_eq!(r.command, ["/usr/bin/moonlight".to_string()]);
+        assert_eq!(r.unset, ["WAYLAND_DISPLAY".to_string()]);
+        assert!(r
+            .set
+            .contains(&("QT_QPA_PLATFORM".to_string(), "xcb".to_string())));
+    }
+
+    /// An explicit command for a KNOWN id keeps the class environment.
+    ///
+    /// The environment belongs to the app class, not to the argv: a variant
+    /// invocation of Moonlight is still Moonlight and still fails to map a
+    /// window with `WAYLAND_DISPLAY` set. Dropping the env here would make the
+    /// ad-hoc form silently different from the one that works, which is the
+    /// shape of the bug this whole change is fixing.
+    #[test]
+    fn an_explicit_command_for_a_known_class_keeps_its_environment() {
+        let class = moonlight_class();
+        let argv = vec!["/usr/bin/moonlight".to_string(), "--quit-after".to_string()];
+        let r = resolve_launch(Some(&class), AppId::new(9003), &argv).unwrap();
+        assert_eq!(
+            r.command, argv,
+            "the explicit argv wins over the class command"
+        );
+        assert_eq!(
+            r.unset,
+            ["WAYLAND_DISPLAY".to_string()],
+            "but the class environment still applies"
+        );
+        assert!(!r.set.is_empty());
+    }
+
+    /// An UNKNOWN id with an explicit command is the escape hatch: it runs, with
+    /// no class environment, because there is no class to take one from.
+    #[test]
+    fn an_unknown_id_with_a_command_runs_bare() {
+        let argv = vec!["/usr/bin/true".to_string()];
+        let r = resolve_launch(None, AppId::new(4242), &argv).unwrap();
+        assert_eq!(r.command, argv);
+        assert!(r.set.is_empty());
+        assert!(r.unset.is_empty());
+    }
+
+    /// An UNKNOWN id with NO command is a clean error naming what to add — never
+    /// a bare exec, and never a silent success.
+    ///
+    /// Mutation-check: make the `(None, true)` arm fall through to
+    /// `Ok((command, ...))` (an empty argv) and this goes red — as does
+    /// `launch`'s own `EmptyCommand` guard, which is the second line of defence.
+    #[test]
+    fn an_unknown_id_with_no_command_is_a_clean_error() {
+        let err = resolve_launch(None, AppId::new(4242), &[]).unwrap_err();
+        assert!(err.contains("4242"), "{err}");
+        assert!(
+            err.contains("[[app]]"),
+            "the error must name the fix: {err}"
+        );
+
+        // And through the whole verb, so the reply an operator sees is checked.
+        let reply = launch_reply(
+            None,
+            Some("preflight failed"),
+            Duration::from_millis(1),
+            AppId::new(4242),
+            &[],
+            None,
+            None,
+        );
+        assert!(reply.starts_with("error:"), "{reply}");
+        assert!(!reply.contains("\"pid\""), "{reply}");
+    }
+
+    /// The class error must survive the reply path on one line, like every other
+    /// refusal — it names a config key and is the longest message here.
+    #[test]
+    fn the_missing_class_refusal_stays_on_one_line() {
+        let env = crate::launch::ScopeEnv::resolve(
+            true,
+            Some("/run/user/1000"),
+            Some("unix:path=/run/user/1000/bus"),
+            |_| true,
+        )
+        .unwrap();
+        let reply = launch_reply(
+            Some(&env),
+            None,
+            Duration::from_millis(1),
+            AppId::new(4242),
+            &[],
+            None,
+            None,
+        );
+        assert!(reply.starts_with("error:"), "{reply}");
+        assert!(!reply.contains('\n'), "{reply:?}");
+    }
 
     /// H3: the place an unscoped fallback would actually be written.
     ///
@@ -209,6 +444,8 @@ mod tests {
             Duration::from_millis(1),
             AppId::new(9003),
             &["moonlight".to_string()],
+            None,
+            None,
         );
         assert!(reply.starts_with("error:"), "{reply}");
         assert!(reply.contains("XDG_RUNTIME_DIR"), "{reply}");
@@ -225,6 +462,8 @@ mod tests {
             Duration::from_millis(1),
             AppId::new(9003),
             &["moonlight".to_string()],
+            None,
+            None,
         );
         assert!(reply.starts_with("error:"), "{reply}");
         assert!(reply.len() > "error:".len(), "{reply}");
@@ -245,6 +484,8 @@ mod tests {
                 Duration::from_millis(1),
                 AppId::new(1),
                 &["x".to_string()],
+                None,
+                None,
             );
             assert!(!reply.contains('\n'), "{reply:?}");
         }

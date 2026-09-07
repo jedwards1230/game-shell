@@ -183,6 +183,81 @@
 # headroom for a loaded box, not an expected time.
 #launch_confirm_ms = 2000
 
+# The app class the core launches and shows once, on a FRESH session. 0 = none,
+# which is the default. Must name an [[app]] entry below, or the core refuses to
+# start — a boot_app pointing at nothing is a black television at the end of a
+# boot with an otherwise healthy core.
+#
+# THIS IS NOT "LAUNCH ON START", AND THE DIFFERENCE IS THE WHOLE POINT.
+#
+# §5/§9 forbid the core writing the base layer at startup: the core unit is
+# Restart=always, so a restart under a live game is the DESIGNED recovery path,
+# and relaunching there would yank the screen from something the user is playing.
+# So the boot client fires on an OBSERVATION, never on "the core started": the
+# reconcile must show an EMPTY base layer AND nothing on screen. A populated
+# list, an app already on screen, or a read that failed are all "session in use"
+# and the core keeps its hands off. That also means a core restart never
+# resurrects an app you quit — after a return to the shell the base layer holds
+# the shell id, so the session reads as in use.
+#
+# The launch happens after the IPC socket is listening, so a slow app start never
+# delays the control surface an operator would use to find out why.
+#boot_app = 9003
+
+# What the boot supervisor does when the app EXITS. Durability is not just
+# "reboot -> Moonlight": on this hardware a streaming client has wedged and died
+# repeatedly, and a boot client that launches once leaves a black television
+# until a human reboots it.
+#
+#   "on-failure"  relaunch only when the app exited non-zero or on a signal.
+#                 DEFAULT.
+#   "always"      relaunch on ANY exit — dev/gamescope/client.sh's behaviour.
+#   "never"       launch once.
+#
+# Why the default is not "always", even though the prototype relaunches
+# unconditionally: the prototype WAS the session, so a quit left a black screen
+# and relaunching was the only sane answer. The default here assumes a SHELL
+# behind the app, so a clean exit has somewhere to land — and relaunching over a
+# deliberate quit fights the user, who pressed Quit and expects the shell. A
+# crash is what durability is about, and a crash is not a clean exit.
+#
+# ⚠ IF YOU HAVE NO SHELL YET, SET "always". THAT IS EVERY v2 DEPLOYMENT TODAY.
+#
+# v2 has no shell: V2_DESIGN §13 Q1 (the shell's runtime) is still open,
+# core/units/tv-shell-gamescope-child.sh is still `exec sleep infinity`, and the
+# boot client below is the ONLY thing that ever puts a window on this
+# compositor. So with "on-failure" and no shell, a clean quit ends supervision
+# and lands on an EMPTY compositor — a black television, recoverable only from
+# another machine.
+#
+# The default stays "on-failure" because it is right for the design and because
+# a default that changed meaning between releases would silently change
+# behaviour for anyone upgrading across the boundary. The deployment that is
+# early carries the override:
+#boot_relaunch = "always"
+
+# Fast-exit backoff, from dev/gamescope/client.sh:211-213 — constants chosen
+# against this hardware. An app that exits within boot_fast_exit_secs of launch,
+# boot_fast_exit_limit times in a row, is not going to come up (a broken runtime,
+# a QML error, a client that cannot open the display), so the retry interval
+# stretches from boot_relaunch_delay_secs to boot_backoff_secs instead of
+# hot-spinning. Every backoff is logged at WARN with the running count: a silent
+# backoff is a session that looks idle while it is actually failing.
+#boot_fast_exit_secs = 10
+#boot_fast_exit_limit = 3
+#boot_backoff_secs = 60
+#boot_relaunch_delay_secs = 2
+
+# Give up after this many consecutive fast exits. 0 = never give up (DEFAULT).
+#
+# Never is the right default for an appliance: a permanent give-up guarantees a
+# black television until a human intervenes, while a 60 s backoff costs nothing
+# and recovers by itself the moment someone fixes the runtime — the prototype's
+# own reasoning. Set a bound if you would rather fail loudly and stop; the
+# give-up is logged at ERROR and says the television will show the shell until
+# someone intervenes.
+#boot_give_up_after = 0
+
 # --- Supervision (§9) ---------------------------------------------------------
 # NOT YET READ BY THE CORE — every key in this table. The forced-paint heartbeat
 # is a later change; nothing reads these today. They are defined now so the file
@@ -215,3 +290,51 @@
 
 # The window the restart threshold is counted over, in seconds.
 #restart_window_secs = 60
+
+# ---------------------------------------------------------------------------
+# [[app]] — the app-class table (V2_DESIGN §12)
+# ---------------------------------------------------------------------------
+#
+# One entry per app the core knows how to start. `launch <appid>` over the IPC
+# socket then takes BOTH the command and the environment from here, so no caller
+# has to remember either — including the boot client below.
+#
+# WHY THE ENVIRONMENT IS PART OF THE CLASS, AND WHY `env_unset` IS NOT OPTIONAL.
+#
+# Measured on hardware 2026-09-06: a bare `/usr/bin/moonlight` launched inside
+# the v2 session inherits, from the session the core runs in, a WAYLAND_DISPLAY
+# naming gamescope's own Wayland socket plus XDG_SESSION_TYPE=wayland.
+# Moonlight then selects native Wayland — which
+# §6 records Moonlight 6.1.0 segfaulting on under gamescope — and never maps a
+# window. The base layer is set correctly and the television stays black; the
+# core's own error says so exactly ("app 9003 never mapped a window ... the base
+# layer was set, so this is the app failing to start").
+#
+# The invocation that works removes one variable and sets three:
+#
+#   env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb SDL_VIDEODRIVER=x11 \
+#       ENABLE_GAMESCOPE_WSI=1 /usr/bin/moonlight
+#
+# Note that one of the four operations is a REMOVAL. No value substitutes for
+# absence: WAYLAND_DISPLAY="" is not the same as unset, and pressure-vessel
+# rewrites an empty one back to `wayland-0` (§11). Hence `env_unset`.
+#
+# `command` is argv, already split — the core never invokes a shell, so there are
+# no quoting rules to reason about.
+#
+# NOT MODELLED YET, though §12 lists them: an id strategy (scope / pid / class),
+# an input contract (gamepad / keyboard), and an HDR expectation. Nothing reads
+# them — the id strategy is fixed at "scope, tag as repair", §7's input layer
+# does not exist, and even display.hotplug_settle_ms above is still unconsumed.
+# A key whose stated consumer does not exist is the bug class this file's tests
+# exist to catch, so they land with their readers.
+
+#[[app]]
+#id = 9003
+#command = ["/usr/bin/moonlight"]
+#env_unset = ["WAYLAND_DISPLAY"]
+#
+#[app.env]
+#QT_QPA_PLATFORM = "xcb"
+#SDL_VIDEODRIVER = "x11"
+#ENABLE_GAMESCOPE_WSI = "1"

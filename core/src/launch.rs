@@ -232,6 +232,55 @@ pub fn scope_argv(unit: &str, command: &[String]) -> Vec<String> {
     argv
 }
 
+/// The per-app-class environment applied to a launched process.
+///
+/// Two lists, because the operations are genuinely different and only one of
+/// them can be expressed as a value: `set` writes variables, `unset` REMOVES
+/// them. See [`crate::config::AppConfig`] for the measurement that made removal
+/// load-bearing (Moonlight goes native Wayland and never maps a window unless
+/// `WAYLAND_DISPLAY` is *absent* — an empty string is not the same thing, and
+/// pressure-vessel rewrites an empty one back to `wayland-0`).
+///
+/// Borrowed rather than owned so the caller's config is the single copy.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LaunchEnv<'a> {
+    /// Variables to set, as `(name, value)`.
+    pub set: &'a [(String, String)],
+    /// Variables to remove. Applied AFTER `set`, so a name in both is removed.
+    pub unset: &'a [String],
+}
+
+/// Build the `Command` for a scoped launch, with the class environment applied.
+///
+/// Split out from [`launch`] for the same reason [`scope_argv`] is: it is the
+/// part whose exact shape has to be asserted, and a `Command` can be inspected
+/// (`get_envs`) without being run. So the test reads the REAL command this
+/// function hands to `spawn`, not a re-derivation of what it ought to contain —
+/// which matters here, because "the env table is applied" and "the env table is
+/// computed correctly" are different claims and only the first one is the bug
+/// that reaches the television.
+///
+/// The scope environment is applied first and the class environment second, so a
+/// class cannot accidentally break `systemd-run --user` by overwriting
+/// `XDG_RUNTIME_DIR`... except deliberately, which is left possible on purpose:
+/// an operator who sets it in a class has said something specific, and silently
+/// ignoring a key an operator wrote is the failure mode this crate keeps
+/// removing. `unset` last, per its documented precedence.
+pub fn prepare_command(argv: &[String], scope: &ScopeEnv, env: LaunchEnv<'_>) -> Command {
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .env("XDG_RUNTIME_DIR", &scope.runtime_dir)
+        .env("DBUS_SESSION_BUS_ADDRESS", &scope.dbus_address)
+        .stdin(Stdio::null());
+    for (name, value) in env.set {
+        cmd.env(name, value);
+    }
+    for name in env.unset {
+        cmd.env_remove(name);
+    }
+    cmd
+}
+
 /// A launched app: the pid that owns the scope, and the scope's name.
 ///
 /// **Only constructed for a CONFIRMED launch** — see [`launch`]. Every field is
@@ -296,11 +345,24 @@ pub struct Launched {
 /// bearing: `systemd-run --scope` **execs** the target command, so the pid the
 /// caller holds is the app's own pid the whole way down (verified by the kit),
 /// which keeps pid-matching, family walks and `wait` working unchanged.
+///
+/// # Reporting the exit
+///
+/// `on_exit`, when given, receives the process's `ExitStatus` from the reaper
+/// thread. It is the reaper and not a second waiter on purpose: `wait()` may be
+/// called once, and the reaper already exists to stop a spawned-and-forgotten
+/// launch becoming a zombie. A supervisor therefore learns about the exit from
+/// the one place that is entitled to know, rather than by polling liveness and
+/// guessing — and it learns the STATUS, which is what separates a crash from a
+/// user pressing Quit (see [`crate::boot::ExitKind`]). A send failure is normal
+/// and ignored: it just means nobody is supervising any more.
 pub fn launch(
     env: &ScopeEnv,
     app_id: AppId,
     command: &[String],
+    launch_env: LaunchEnv<'_>,
     confirm_timeout: Duration,
+    on_exit: Option<std::sync::mpsc::Sender<std::process::ExitStatus>>,
 ) -> Result<Launched, LaunchError> {
     if command.is_empty() {
         return Err(LaunchError::EmptyCommand);
@@ -317,11 +379,11 @@ pub fn launch(
     let unit = scope_unit(app_id, launcher_pid);
     let argv = scope_argv(&unit, command);
 
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
-        .env("XDG_RUNTIME_DIR", &env.runtime_dir)
-        .env("DBUS_SESSION_BUS_ADDRESS", &env.dbus_address)
-        .stdin(Stdio::null())
+    // NOTE the env goes on `systemd-run` itself, which is correct: `--scope`
+    // EXECS the target command in the same process, so the child's environment
+    // is this one. (`systemd-run --user --scope` does not sanitise it the way a
+    // service unit's `Environment=` would — there is no manager in between.)
+    let mut child = prepare_command(&argv, env, launch_env)
         .spawn()
         .map_err(|source| LaunchError::Spawn {
             unit: unit.clone(),
@@ -344,7 +406,12 @@ pub fn launch(
     let reaped = format!("{unit}.scope");
     std::thread::spawn(move || match child.wait() {
         Ok(status) => {
-            tracing::debug!(pid, scope = %reaped, %status, "launched process reaped")
+            tracing::debug!(pid, scope = %reaped, %status, "launched process reaped");
+            if let Some(tx) = on_exit {
+                // Ignored: a closed receiver means nobody is supervising, which
+                // is not an error — it is the ad-hoc `launch` case.
+                let _ = tx.send(status);
+            }
         }
         Err(e) => {
             tracing::debug!(pid, scope = %reaped, error = %e, "waiting on launched process failed")
@@ -534,6 +601,223 @@ fn which(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // -- the per-app-class launch environment --------------------------------
+    //
+    // MEASURED ON HARDWARE 2026-09-06: a bare `/usr/bin/moonlight` inside the v2
+    // session inherits `WAYLAND_DISPLAY=gamescope-0`, selects native Wayland, and
+    // never maps a window — so the base layer is set correctly and the screen
+    // stays black. The working invocation removes that variable and sets three
+    // others. These tests are about the REMOVAL, because a set-only environment
+    // could not express it and no value substitutes for absence.
+
+    /// A `ScopeEnv` without touching the process environment.
+    fn test_scope_env() -> ScopeEnv {
+        ScopeEnv::resolve(
+            true,
+            Some("/run/user/1000"),
+            Some("unix:path=/run/user/1000/bus"),
+            |_| true,
+        )
+        .expect("a fully-specified preflight resolves")
+    }
+
+    /// The Moonlight class as it ships in `config/core.toml.example`.
+    fn moonlight_env() -> (Vec<(String, String)>, Vec<String>) {
+        (
+            vec![
+                ("QT_QPA_PLATFORM".to_string(), "xcb".to_string()),
+                ("SDL_VIDEODRIVER".to_string(), "x11".to_string()),
+                ("ENABLE_GAMESCOPE_WSI".to_string(), "1".to_string()),
+            ],
+            vec!["WAYLAND_DISPLAY".to_string()],
+        )
+    }
+
+    /// The env operations reach the REAL `Command` the launch spawns.
+    ///
+    /// Asserted by inspecting `get_envs()` on the command `prepare_command`
+    /// returns, not by re-deriving what it ought to contain — "the table is
+    /// computed correctly" and "the table is applied" are different claims, and
+    /// only the second one is the bug that reaches the television.
+    ///
+    /// Mutation-check: delete the `env_remove` loop from `prepare_command` and
+    /// the `WAYLAND_DISPLAY => None` assertion below fails.
+    #[test]
+    fn the_class_environment_reaches_the_spawned_command() {
+        let scope = test_scope_env();
+        let (set, unset) = moonlight_env();
+        let argv = vec!["systemd-run".to_string(), "--scope".to_string()];
+        let cmd = prepare_command(
+            &argv,
+            &scope,
+            LaunchEnv {
+                set: &set,
+                unset: &unset,
+            },
+        );
+
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let get = |name: &str| {
+            envs.iter()
+                .find(|(k, _)| k == name)
+                .unwrap_or_else(|| panic!("{name} is not among the command's env ops: {envs:?}"))
+                .clone()
+        };
+
+        // The three sets.
+        assert_eq!(get("QT_QPA_PLATFORM").1.as_deref(), Some("xcb"));
+        assert_eq!(get("SDL_VIDEODRIVER").1.as_deref(), Some("x11"));
+        assert_eq!(get("ENABLE_GAMESCOPE_WSI").1.as_deref(), Some("1"));
+
+        // THE UNSET. `None` is how std records a removal; a variable that were
+        // merely set to "" would show as `Some("")` here — and pressure-vessel
+        // rewrites an empty WAYLAND_DISPLAY back to `wayland-0` (§11), so the
+        // difference between these two is the whole bug.
+        assert_eq!(
+            get("WAYLAND_DISPLAY").1,
+            None,
+            "WAYLAND_DISPLAY must be REMOVED, not set to anything"
+        );
+
+        // And the scope environment is still there — a class must not cost the
+        // launch its session bus.
+        assert_eq!(get("XDG_RUNTIME_DIR").1.as_deref(), Some("/run/user/1000"));
+        assert_eq!(
+            get("DBUS_SESSION_BUS_ADDRESS").1.as_deref(),
+            Some("unix:path=/run/user/1000/bus")
+        );
+    }
+
+    /// End-to-end: the variable is genuinely absent from a REAL child process.
+    ///
+    /// The test above asserts the recorded intent; this one runs `/usr/bin/env`
+    /// through the same `prepare_command` with `WAYLAND_DISPLAY` set in this
+    /// process, and reads the child's actual environment back. That is the claim
+    /// the hardware failure was about — "removed" has to mean the child cannot
+    /// see it, not that we asked nicely.
+    ///
+    /// Mutation-check: delete the `env_remove` loop and this fails too, on the
+    /// child's own output.
+    #[test]
+    fn wayland_display_is_absent_from_the_real_child_environment() {
+        // Serialized and restored: `set_var` is process-global, and this test
+        // spawns children — the same discipline `config.rs` uses for its own env
+        // mutation. Note `WAYLAND_DISPLAY` is read by nothing else in this crate.
+        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+
+        let env_bin = ["/usr/bin/env", "/bin/env"]
+            .into_iter()
+            .find(|p| Path::new(p).exists());
+        let Some(env_bin) = env_bin else {
+            // Not a silent skip: say so, loudly, in the one environment that
+            // could lack coreutils. The assertion above still covers the wiring.
+            panic!("no env(1) binary found; this test needs coreutils");
+        };
+
+        let prev = std::env::var_os("WAYLAND_DISPLAY");
+        // SAFETY: serialized by ENV_GUARD; restored before returning.
+        unsafe { std::env::set_var("WAYLAND_DISPLAY", "gamescope-0") };
+
+        let (set, unset) = moonlight_env();
+        let out = prepare_command(
+            &[env_bin.to_string()],
+            &test_scope_env(),
+            LaunchEnv {
+                set: &set,
+                unset: &unset,
+            },
+        )
+        .stdin(Stdio::null())
+        .output();
+
+        // SAFETY: serialized by ENV_GUARD; this is the restore half, and it runs
+        // before any assertion so a failure cannot leak the variable.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_DISPLAY", v),
+                None => std::env::remove_var("WAYLAND_DISPLAY"),
+            }
+        }
+
+        let out = out.expect("running env(1)");
+        assert!(out.status.success(), "env(1) failed: {out:?}");
+        let child_env = String::from_utf8_lossy(&out.stdout);
+        let names: Vec<&str> = child_env
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+            .collect();
+
+        assert!(
+            !names.contains(&"WAYLAND_DISPLAY"),
+            "the child can still see WAYLAND_DISPLAY, so Moonlight would select \
+             native Wayland and never map a window. Child env: {child_env}"
+        );
+        assert!(
+            child_env.contains("QT_QPA_PLATFORM=xcb"),
+            "the child is missing QT_QPA_PLATFORM=xcb: {child_env}"
+        );
+    }
+
+    /// `unset` wins over `set` for the same name, as the type documents.
+    ///
+    /// Not hypothetical: an operator who lists a variable in both has expressed
+    /// a contradiction, and the resolution has to be the one that is safe —
+    /// absence, which is what the app class needed in the first place.
+    #[test]
+    fn a_name_in_both_lists_is_removed() {
+        let set = vec![("WAYLAND_DISPLAY".to_string(), "gamescope-0".to_string())];
+        let unset = vec!["WAYLAND_DISPLAY".to_string()];
+        let cmd = prepare_command(
+            &["true".to_string()],
+            &test_scope_env(),
+            LaunchEnv {
+                set: &set,
+                unset: &unset,
+            },
+        );
+        let recorded = cmd
+            .get_envs()
+            .find(|(k, _)| k.to_string_lossy() == "WAYLAND_DISPLAY")
+            .expect("the name is recorded")
+            .1;
+        assert!(recorded.is_none(), "unset must win over set for one name");
+    }
+
+    /// An empty class environment leaves the launch exactly as it was before
+    /// this feature — no accidental behaviour change for a class that declares
+    /// no env, and for the ad-hoc `launch <id> <cmd>` form on an unknown id.
+    #[test]
+    fn an_empty_class_environment_changes_nothing() {
+        let cmd = prepare_command(
+            &["true".to_string()],
+            &test_scope_env(),
+            LaunchEnv::default(),
+        );
+        // `get_envs` yields the recorded ops in a sorted order, so compare as a
+        // set rather than pinning an order std owns and we do not.
+        let mut names: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                "XDG_RUNTIME_DIR".to_string()
+            ],
+            "only the scope environment should be applied"
+        );
+    }
     use super::*;
 
     /// A real cgroup v2 body, in the shape `/proc/<pid>/cgroup` actually has on
@@ -909,7 +1193,15 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            launch(&env, AppId::new(1), &[], Duration::from_millis(1)).unwrap_err(),
+            launch(
+                &env,
+                AppId::new(1),
+                &[],
+                LaunchEnv::default(),
+                Duration::from_millis(1),
+                None
+            )
+            .unwrap_err(),
             LaunchError::EmptyCommand
         ));
     }

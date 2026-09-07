@@ -47,6 +47,27 @@ pub trait Compositor: Send + Sync + 'static {
     fn home(&self) -> String;
     /// Launch a command in a scope for an app id.
     fn launch(&self, app_id: AppId, command: &[String]) -> String;
+
+    /// Launch an app CLASS and hand back a channel that receives its exit
+    /// status — the supervised form, used only by [`crate::boot`].
+    ///
+    /// Separate from [`Self::launch`] rather than an option on it, because the
+    /// receiver is the thing that makes supervision possible and a caller that
+    /// does not hold one cannot supervise. That is the structural half of "the
+    /// app exited" and "the core restarted" being different events: a supervisor
+    /// learns about an exit only through a channel it got by launching the
+    /// process itself, never by observing the world and inferring.
+    fn launch_supervised(
+        &self,
+        app_id: AppId,
+    ) -> Result<std::sync::mpsc::Receiver<std::process::ExitStatus>, String>;
+
+    /// The app id of whatever is on screen right now, if one resolves.
+    ///
+    /// The supervisor's guard against relaunching over something the user moved
+    /// on to. Implementations MUST fail closed — an unreadable screen is not
+    /// `None`.
+    fn on_screen_app(&self) -> Option<AppId>;
 }
 
 /// Bind the socket (removing any stale file), chmod 0600, and serve forever.
@@ -138,7 +159,7 @@ pub async fn dispatch(compositor: &Arc<dyn Compositor>, cmd: Command) -> String 
             }
             Err(_) => protocol::resp_error(&format!("not an app id: {app_id}")),
         },
-        Command::LaunchUsage => protocol::resp_usage("launch <appid> <cmd> [args...]"),
+        Command::LaunchUsage => protocol::resp_usage("launch <appid> [cmd args...]"),
         Command::Unknown => protocol::resp_unknown(),
     }
 }
@@ -180,6 +201,16 @@ mod tests {
         fn home(&self) -> String {
             self.show(AppId::new(9001))
         }
+        fn launch_supervised(
+            &self,
+            _: AppId,
+        ) -> Result<std::sync::mpsc::Receiver<std::process::ExitStatus>, String> {
+            // The IPC surface never supervises — only `crate::boot` does.
+            Err("error: not supervised in tests".into())
+        }
+        fn on_screen_app(&self) -> Option<AppId> {
+            None
+        }
         fn launch(&self, app_id: AppId, command: &[String]) -> String {
             protocol::resp_json(&serde_json::json!({
                 "app_id": app_id.get(),
@@ -218,7 +249,7 @@ mod tests {
         assert_eq!(reply(&c, "show").await, "error:usage: show <appid>");
         assert_eq!(
             reply(&c, "launch").await,
-            "error:usage: launch <appid> <cmd> [args...]"
+            "error:usage: launch <appid> [cmd args...]"
         );
         assert_eq!(reply(&c, "frobnicate").await, "unknown");
         assert_eq!(reply(&c, "hypr-active").await, "unknown");

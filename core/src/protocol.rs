@@ -31,7 +31,12 @@ pub enum Command {
     ShowUsage,
     /// Return to the shell.
     Home,
-    /// Launch a command in a scope for an app id.
+    /// Launch an app in a scope.
+    ///
+    /// `command` EMPTY means "use the `[[app]]` class for this id" — the default
+    /// path, and the only one that cannot forget the class environment. A
+    /// non-empty `command` is the ad-hoc form; it still picks up the class
+    /// environment when the id names a class (see `compositor::resolve_launch`).
     Launch {
         app_id: String,
         command: Vec<String>,
@@ -69,10 +74,13 @@ impl Command {
             let Some(app_id) = parts.next() else {
                 return Command::LaunchUsage;
             };
+            // An EMPTY command is no longer a usage error: it is the class form,
+            // `launch <appid>`, which the compositor resolves against `[[app]]`.
+            // It used to be rejected here, which forced every caller — the boot
+            // client included — to repeat the argv AND the environment, so a
+            // second place could forget the `WAYLAND_DISPLAY` unset that decides
+            // whether Moonlight maps a window at all.
             let command: Vec<String> = parts.map(str::to_string).collect();
-            if command.is_empty() {
-                return Command::LaunchUsage;
-            }
             return Command::Launch {
                 app_id: app_id.to_string(),
                 command,
@@ -177,7 +185,29 @@ mod tests {
         assert_eq!(Command::parse("show"), Command::ShowUsage);
         assert_eq!(Command::parse("show "), Command::ShowUsage);
         assert_eq!(Command::parse("launch"), Command::LaunchUsage);
-        assert_eq!(Command::parse("launch 9003"), Command::LaunchUsage);
+    }
+
+    /// `launch <appid>` with no command is the CLASS form, not a usage error.
+    ///
+    /// It used to be `LaunchUsage`, which forced every caller to repeat the argv
+    /// and — the part that actually broke on hardware — the class environment.
+    /// The arity error is now only the truly ambiguous case: no app id at all.
+    #[test]
+    fn launch_with_only_an_app_id_is_the_class_form() {
+        assert_eq!(
+            Command::parse("launch 9003"),
+            Command::Launch {
+                app_id: "9003".to_string(),
+                command: vec![],
+            }
+        );
+        assert_eq!(
+            Command::parse("launch  9003  "),
+            Command::Launch {
+                app_id: "9003".to_string(),
+                command: vec![],
+            }
+        );
     }
 
     #[test]

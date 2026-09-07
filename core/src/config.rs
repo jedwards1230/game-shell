@@ -46,6 +46,71 @@ pub struct CoreConfig {
     pub display: DisplayConfig,
     pub session: SessionConfig,
     pub supervisor: SupervisorConfig,
+    /// `[[app]]` — the app-class table (§12).
+    ///
+    /// Named `app` because that is the TOML array-of-tables header an operator
+    /// writes; see [`AppConfig`].
+    pub app: Vec<AppConfig>,
+}
+
+/// One `[[app]]` entry: an app class the core knows how to start.
+///
+/// # Why the environment is part of the class, and why UNSET is not optional
+///
+/// Measured on hardware 2026-09-06: launching `/usr/bin/moonlight` bare inside
+/// the v2 session gives it `DISPLAY=:0` — and also `WAYLAND_DISPLAY=gamescope-0`
+/// and `XDG_SESSION_TYPE=wayland`, inherited from the session the core runs in.
+/// Moonlight then selects native Wayland, and §6 records that Moonlight 6.1.0
+/// segfaults on gamescope's native Wayland; it never maps a window, so the base
+/// layer is set correctly and nothing appears. The core's own error said so
+/// precisely ("app 9003 never mapped a window ... the base layer was set, so
+/// this is the app failing to start"), which is the *right* failure — but the
+/// launch should not need a human to remember the environment.
+///
+/// The working invocation was
+/// `env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb SDL_VIDEODRIVER=x11
+/// ENABLE_GAMESCOPE_WSI=1 /usr/bin/moonlight`, which is what
+/// `dev/gamescope/lib.sh`'s `gs_moonlight_x11_env` already encodes for the
+/// prototype. Note the shape: **one of the four operations is a REMOVAL.** A
+/// set-only environment table could not express it, and no value substitutes for
+/// absence — `WAYLAND_DISPLAY=""` is not the same as unset, and pressure-vessel
+/// rewrites an empty one back to `wayland-0` (§11). So [`Self::env_unset`] is a
+/// first-class half of this type, not a convenience.
+///
+/// # What §12 lists that is deliberately NOT here yet
+///
+/// §12 also gives an app class an **id strategy** (scope / pid / class), an
+/// **input contract** (`gamepad` / `keyboard`) and an **HDR expectation**. None
+/// of the three is modelled here, because nothing in this crate could read them:
+/// the id strategy is fixed at "scope, tag as repair" in [`crate::launch`] and
+/// is not selectable, §7's input layer does not exist, and the HDR settle gate
+/// (`display.hotplug_settle_ms`) is itself still unconsumed. Adding them now
+/// would be three more keys whose stated consumer does not exist — the #416
+/// class this crate's config test exists to catch. They land with their readers.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfig {
+    /// The gamescope app id. This is the `%u` in
+    /// `app-steam-app<id>-<tag>.scope` and the value written to
+    /// `GAMESCOPECTRL_BASELAYER_APPID`, so it is the whole identity of the class.
+    ///
+    /// Required — there is no sensible default for "which app is this".
+    pub id: u32,
+    /// argv, already split. Required and non-empty.
+    ///
+    /// A list rather than a string because the core never invokes a shell: a
+    /// string would need quoting rules, and the one thing a shell would buy —
+    /// `env -u VAR` — is expressed properly by [`Self::env_unset`] instead.
+    pub command: Vec<String>,
+    /// Variables to SET in the launched process's environment.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Variables to REMOVE from the launched process's environment.
+    ///
+    /// Applied after [`Self::env`], so a name in both is removed. See the type
+    /// docs for why removal cannot be expressed as a value.
+    #[serde(default)]
+    pub env_unset: Vec<String>,
 }
 
 /// `[display]` — the output mode gamescope is pinned to, and HDR policy.
@@ -195,6 +260,88 @@ pub struct SessionConfig {
     /// [`crate::launch::launch`] polls `/proc/<pid>/cgroup` until the scope
     /// appears; this is how long it waits before calling the launch unconfirmed.
     pub launch_confirm_ms: u64,
+    /// The app class the core starts and shows once, on a FRESH session.
+    ///
+    /// `0` means none, which is also the default: a core that launches something
+    /// nobody configured is worse than one that launches nothing.
+    ///
+    /// **This is not "launch on start".** §5/§9 forbid the core writing the base
+    /// layer at startup, because a core restart under a live game would yank the
+    /// screen. The distinction is made by OBSERVATION, not by a flag: see
+    /// [`crate::boot::decide`], which launches only when the reconcile shows an
+    /// empty base layer *and* nothing on screen. Everything else — a populated
+    /// list, an app already on screen, or a read that failed — is a session in
+    /// use, and the core keeps its hands off it.
+    ///
+    /// Consumed by [`crate::boot`], which `main` runs after the IPC socket is
+    /// listening.
+    pub boot_app: u32,
+    /// When the boot app exits, whether to start it again.
+    ///
+    /// `on-failure` (default), `always`, or `never`. See [`RelaunchPolicy`] for
+    /// why the default is not `always` even though the prototype's supervisor
+    /// relaunches unconditionally.
+    pub boot_relaunch: RelaunchPolicy,
+    /// An exit sooner than this after launch counts as a FAST exit.
+    ///
+    /// The prototype's `FAST_EXIT_SECS`, chosen against this hardware
+    /// (`dev/gamescope/client.sh`).
+    pub boot_fast_exit_secs: u64,
+    /// How many fast exits in a row before the retry interval stretches to
+    /// [`Self::boot_backoff_secs`]. The prototype's `FAST_EXIT_LIMIT`.
+    pub boot_fast_exit_limit: u32,
+    /// The stretched retry interval once the fast-exit limit is hit.
+    /// The prototype's `BACKOFF_SECS`.
+    pub boot_backoff_secs: u64,
+    /// The ordinary retry interval, before any backoff.
+    pub boot_relaunch_delay_secs: u64,
+    /// Give up after this many consecutive fast exits. `0` = never give up.
+    ///
+    /// **Defaults to 0, deliberately.** A permanent give-up on an appliance
+    /// guarantees a black television until a human intervenes, while a 60 s
+    /// backoff costs nothing and recovers by itself the moment someone fixes the
+    /// runtime — which is exactly the prototype's reasoning ("it never stops
+    /// relaunching: a fixed runtime is picked up on the next attempt"). The key
+    /// exists so a deployment that would rather fail loudly can choose to.
+    pub boot_give_up_after: u32,
+}
+
+/// What the boot supervisor does when the app exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelaunchPolicy {
+    /// Relaunch only when the app exited NON-ZERO or on a signal. **Default.**
+    ///
+    /// The prototype relaunches unconditionally and was right to: it *was* the
+    /// session, so a quit left a black screen. This default assumes a SHELL
+    /// behind the app, so a clean exit has somewhere to land and relaunching
+    /// over a deliberate quit would fight the user, who pressed Quit and expects
+    /// the shell. A crash is what durability is about, and a crash is not a
+    /// clean exit.
+    ///
+    /// # ⚠ THE ASSUMPTION IS NOT TRUE YET
+    ///
+    /// **v2 has no shell.** §13 Q1 (the shell's runtime) is open,
+    /// `core/units/tv-shell-gamescope-child.sh` is still `exec sleep infinity`,
+    /// and [`crate::boot`] is the only thing that ever puts a window on that
+    /// compositor. So on a deployment without a shell a clean quit lands on an
+    /// EMPTY COMPOSITOR — a black television with no way back except a second
+    /// machine — which is the worst outcome this design has.
+    ///
+    /// **Until a shell exists, such a deployment should set
+    /// `boot_relaunch = "always"`.** That is a per-deployment override rather
+    /// than a different default on purpose: a default that changes meaning
+    /// between releases would silently change behaviour for anyone upgrading
+    /// across the boundary, with no config change to explain it — which is the
+    /// class of silent change this crate keeps removing. The default is correct
+    /// for the design; the deployment that is early carries the override.
+    #[default]
+    OnFailure,
+    /// Relaunch on ANY exit — the prototype's behaviour, for a deployment that
+    /// wants the app to be the session.
+    Always,
+    /// Never relaunch. The boot client becomes launch-once.
+    Never,
 }
 
 impl Default for SessionConfig {
@@ -209,6 +356,17 @@ impl Default for SessionConfig {
             switch_timeout_ms: crate::baselayer::DEFAULT_SWITCH_TIMEOUT.as_millis() as u64,
             map_timeout_ms: crate::baselayer::DEFAULT_MAP_TIMEOUT.as_millis() as u64,
             launch_confirm_ms: DEFAULT_LAUNCH_CONFIRM.as_millis() as u64,
+            // None. A default that started an app would make an all-defaults
+            // config (a missing file) take over the television.
+            boot_app: 0,
+            boot_relaunch: RelaunchPolicy::OnFailure,
+            // The prototype's measured constants (dev/gamescope/client.sh:211).
+            boot_fast_exit_secs: 10,
+            boot_fast_exit_limit: 3,
+            boot_backoff_secs: 60,
+            boot_relaunch_delay_secs: 2,
+            // Never give up — see the field docs.
+            boot_give_up_after: 0,
         }
     }
 }
@@ -279,6 +437,27 @@ impl CoreConfig {
     /// The bound on confirming a launch reached its scope.
     pub fn launch_confirm_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.session.launch_confirm_ms)
+    }
+
+    /// The `[[app]]` entry for `app_id`, if one is configured.
+    ///
+    /// Linear over a handful of entries — a map would be a second
+    /// representation of the same list to keep in sync, and `validate()` already
+    /// refuses duplicate ids, which is the only thing an index would buy.
+    pub fn app_class(&self, app_id: AppId) -> Option<&AppConfig> {
+        self.app.iter().find(|a| a.id == app_id.get())
+    }
+
+    /// The configured boot app class, or `None` when `boot_app = 0`.
+    ///
+    /// Returning `Option` rather than a raw `0` sentinel at every call site is
+    /// the point: "no boot app" is then a case the caller must handle, not a
+    /// magic number it can forget to compare against.
+    pub fn boot_app(&self) -> Option<AppId> {
+        match self.session.boot_app {
+            0 => None,
+            id => Some(AppId::new(id)),
+        }
     }
 
     /// Render the environment file the gamescope unit's `ExecStart` reads.
@@ -431,6 +610,82 @@ impl CoreConfig {
         }
         if self.supervisor.restart_window_secs == 0 {
             anyhow::bail!("config: [supervisor] restart_window_secs must be non-zero");
+        }
+
+        // -- [[app]] -------------------------------------------------------
+        //
+        // Every check here is a failure that would otherwise surface at launch
+        // time, on the couch, as something that reads like a compositor problem.
+        let mut seen: Vec<u32> = Vec::new();
+        for app in &self.app {
+            if app.id == 0 {
+                anyhow::bail!(
+                    "config: [[app]] id must be non-zero; 0 is gamescope's \"no app\" value \
+                     and could never be focused"
+                );
+            }
+            if app.id == STEAM_CLIENT_APP_ID {
+                anyhow::bail!(
+                    "config: [[app]] id must not be {STEAM_CLIENT_APP_ID}; that id belongs to \
+                     the Steam client under gamescope's --steam focus policy (V2_DESIGN §5), \
+                     and Steam rewrites the base layer for it"
+                );
+            }
+            if app.id == self.session.shell_app_id {
+                anyhow::bail!(
+                    "config: [[app]] id {} is also [session] shell_app_id; an app class \
+                     sharing the shell's id would make `show` ambiguous between them",
+                    app.id
+                );
+            }
+            if seen.contains(&app.id) {
+                anyhow::bail!(
+                    "config: two [[app]] entries share id {}; a lookup would silently take \
+                     the first and the second would never launch",
+                    app.id
+                );
+            }
+            seen.push(app.id);
+            if app.command.is_empty() {
+                anyhow::bail!(
+                    "config: [[app]] id {} has an empty command; there would be nothing to exec",
+                    app.id
+                );
+            }
+            if app.command[0].trim().is_empty() {
+                anyhow::bail!(
+                    "config: [[app]] id {} has an empty program name in command[0]",
+                    app.id
+                );
+            }
+            // An `=` or an empty name in an env key is not something the child
+            // process could ever observe correctly — `Command::env` would either
+            // panic or produce a variable nothing can read. Refuse it here,
+            // where the message can name the app.
+            for name in app.env.keys().chain(app.env_unset.iter()) {
+                if name.is_empty() || name.contains('=') || name.contains('\0') {
+                    anyhow::bail!(
+                        "config: [[app]] id {} has an invalid environment variable name {name:?}; \
+                         a name may not be empty or contain '=' or NUL",
+                        app.id
+                    );
+                }
+            }
+        }
+
+        // A boot app naming a class that does not exist is the one config error
+        // whose symptom is a BLACK TELEVISION at the end of a boot, with the
+        // core otherwise healthy. Catch it at startup, where it is one line.
+        if let Some(boot) = self.boot_app() {
+            if self.app_class(boot).is_none() {
+                anyhow::bail!(
+                    "config: [session] boot_app = {} names no [[app]] entry; the core would \
+                     come up with nothing to show. Add an [[app]] with id = {} or set \
+                     boot_app = 0",
+                    boot.get(),
+                    boot.get()
+                );
+            }
         }
         Ok(())
     }
@@ -1032,6 +1287,17 @@ restart_window_secs = 120
             "session.switch_timeout_ms",
             "session.map_timeout_ms",
             "session.launch_confirm_ms",
+            // Read by `crate::boot` via `CoreConfig::boot_app()`, which `main`
+            // acts on after the socket is listening.
+            "session.boot_app",
+            // Read by `boot::RestartPolicy::from_config`, which `boot::supervise`
+            // acts on after every exit of the boot app.
+            "session.boot_relaunch",
+            "session.boot_fast_exit_secs",
+            "session.boot_fast_exit_limit",
+            "session.boot_backoff_secs",
+            "session.boot_relaunch_delay_secs",
+            "session.boot_give_up_after",
             "display.width",
             "display.height",
             "display.refresh",
@@ -1049,6 +1315,13 @@ restart_window_secs = 120
             display,
             session,
             supervisor,
+            // The `[[app]]` table is a LIST, not a scalar key, so it is not part
+            // of the scalar classification below — a per-entry field cannot be
+            // named `table.field` or round-tripped as `[table]\nfield = 1`. It is
+            // classified by `every_app_class_field_is_consumed` instead, which
+            // destructures `AppConfig` exhaustively for exactly the same reason:
+            // adding a field there stops THAT test compiling.
+            app: _,
         } = CoreConfig::default();
         let DisplayConfig {
             width,
@@ -1065,6 +1338,13 @@ restart_window_secs = 120
             switch_timeout_ms,
             map_timeout_ms,
             launch_confirm_ms,
+            boot_app,
+            boot_relaunch,
+            boot_fast_exit_secs,
+            boot_fast_exit_limit,
+            boot_backoff_secs,
+            boot_relaunch_delay_secs,
+            boot_give_up_after,
         } = session;
         let SupervisorConfig {
             stall_secs,
@@ -1084,6 +1364,15 @@ restart_window_secs = 120
             switch_timeout_ms,
             map_timeout_ms,
             launch_confirm_ms,
+            u64::from(boot_app),
+            // The supervisor's tunables. `boot_relaunch` is an enum, so it is
+            // counted via its discriminant rather than a numeric cast.
+            boot_relaunch as u64,
+            boot_fast_exit_secs,
+            u64::from(boot_fast_exit_limit),
+            boot_backoff_secs,
+            boot_relaunch_delay_secs,
+            u64::from(boot_give_up_after),
             stall_secs,
             u64::from(restart_threshold),
             restart_window_secs,
@@ -1099,14 +1388,230 @@ restart_window_secs = 120
         // dead string in the list above.
         for key in unconsumed.iter().chain(consumed.iter()) {
             let (table, name) = key.split_once('.').expect("keys are `table.name`");
-            let value = if name == "hdr" || name == "vrr" {
-                "true"
-            } else {
-                "1"
+            let value = match name {
+                "hdr" | "vrr" => "true",
+                // An enum key needs one of its own variants, not an integer.
+                "boot_relaunch" => "\"on-failure\"",
+                _ => "1",
             };
             CoreConfig::parse(&format!("[{table}]\n{name} = {value}\n"))
                 .unwrap_or_else(|e| panic!("{key} is not a real config key: {e}"));
         }
+    }
+
+    /// **THE DEPLOYMENT QUESTION: does the core.toml already on the box still
+    /// load once new keys exist?**
+    ///
+    /// `deny_unknown_fields` cuts both ways and the answer is not symmetric, so
+    /// it is pinned here rather than reasoned about before a reboot:
+    ///
+    /// * A file MISSING new keys loads fine — every struct is `#[serde(default)]`,
+    ///   so an absent key takes its default. There is no migration step and
+    ///   nothing to run: an existing file is read as-is.
+    /// * A file carrying an UNKNOWN key is REFUSED, loudly, naming the key.
+    ///   That is the half `deny_unknown_fields` buys, and it is why a typo can
+    ///   never silently run a default.
+    ///
+    /// So the file the installer seeded on 2026-09-06 keeps working untouched:
+    /// it gains `boot_app = 0` (no boot client) and the prototype's restart
+    /// constants, and changes behaviour only when someone adds `[[app]]` and a
+    /// `boot_app` deliberately.
+    #[test]
+    fn an_existing_config_without_the_new_keys_still_loads() {
+        // Exactly what `scripts/install-v2.sh` seeds, minus everything added
+        // since: the file as it exists on the box today.
+        let old = "\
+[display]\n\
+width = 3840\n\
+height = 2160\n\
+refresh = 120\n\
+hdr = true\n\
+\n\
+[session]\n\
+shell_app_id = 9001\n\
+xwayland_count = 2\n\
+";
+        let c = CoreConfig::parse(old).expect("an older core.toml must still parse");
+        c.validate().expect("and must still validate");
+
+        // The new keys are present as defaults, and the defaults are inert.
+        assert_eq!(c.boot_app(), None, "no boot client without an explicit key");
+        assert!(c.app.is_empty(), "no app classes without explicit entries");
+        assert_eq!(c.session.boot_relaunch, RelaunchPolicy::OnFailure);
+        assert_eq!(c.session.boot_fast_exit_secs, 10);
+
+        // And the values the operator DID set survive — a default must never
+        // overwrite a written value.
+        assert_eq!(c.display.width, 3840);
+        assert_eq!(c.session.shell_app_id, 9001);
+    }
+
+    /// The other half: an unknown key is refused by name, not ignored.
+    #[test]
+    fn an_unknown_key_is_refused_and_named() {
+        let err = CoreConfig::parse("[session]\nboot_ap = 9003\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("boot_ap"),
+            "the error must name the key: {err}"
+        );
+    }
+
+    /// A `boot_relaunch` typo is refused with the accepted values in reach,
+    /// because it is the one new key whose value is a closed vocabulary.
+    #[test]
+    fn a_bad_relaunch_policy_is_refused() {
+        assert!(CoreConfig::parse("[session]\nboot_relaunch = \"sometimes\"\n").is_err());
+        for good in ["on-failure", "always", "never"] {
+            CoreConfig::parse(&format!("[session]\nboot_relaunch = \"{good}\"\n"))
+                .unwrap_or_else(|e| panic!("{good} must parse: {e}"));
+        }
+    }
+
+    // -- the [[app]] class table ---------------------------------------------
+
+    /// The stanza `config/core.toml.example` ships, parsed for real.
+    const MOONLIGHT_STANZA: &str = r#"
+[session]
+boot_app = 9003
+
+[[app]]
+id = 9003
+command = ["/usr/bin/moonlight"]
+env_unset = ["WAYLAND_DISPLAY"]
+
+[app.env]
+QT_QPA_PLATFORM = "xcb"
+SDL_VIDEODRIVER = "x11"
+ENABLE_GAMESCOPE_WSI = "1"
+"#;
+
+    #[test]
+    fn the_shipped_moonlight_class_parses_and_validates() {
+        let c = CoreConfig::parse(MOONLIGHT_STANZA).expect("the example stanza must parse");
+        c.validate().expect("and must validate");
+
+        let class = c
+            .app_class(AppId::new(9003))
+            .expect("app_class finds the entry");
+        assert_eq!(class.command, ["/usr/bin/moonlight".to_string()]);
+        // THE MEASURED FIX, as data: three sets and one REMOVAL.
+        assert_eq!(
+            class.env.get("QT_QPA_PLATFORM").map(String::as_str),
+            Some("xcb")
+        );
+        assert_eq!(
+            class.env.get("SDL_VIDEODRIVER").map(String::as_str),
+            Some("x11")
+        );
+        assert_eq!(
+            class.env.get("ENABLE_GAMESCOPE_WSI").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(class.env_unset, ["WAYLAND_DISPLAY".to_string()]);
+
+        assert_eq!(c.boot_app(), Some(AppId::new(9003)));
+    }
+
+    #[test]
+    fn an_absent_boot_app_is_none_not_zero() {
+        let c = CoreConfig::default();
+        assert_eq!(c.boot_app(), None);
+        assert!(c.app.is_empty());
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn app_class_misses_cleanly_for_an_unconfigured_id() {
+        let c = CoreConfig::parse(MOONLIGHT_STANZA).unwrap();
+        assert!(c.app_class(AppId::new(4242)).is_none());
+    }
+
+    /// A boot app naming no class is the config error whose symptom is a black
+    /// television at the end of a boot with a healthy-looking core.
+    ///
+    /// Mutation-check: delete the `boot_app` arm of `validate` and this goes red.
+    #[test]
+    fn a_boot_app_with_no_class_is_refused() {
+        let c = CoreConfig::parse("[session]\nboot_app = 9003\n").unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("boot_app"), "{err}");
+        assert!(err.contains("9003"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_app_entry_is_refused_with_its_id() {
+        // Each of these is a launch-time failure moved to startup.
+        for (text, needle) in [
+            ("[[app]]\nid = 0\ncommand = [\"x\"]\n", "non-zero"),
+            ("[[app]]\nid = 769\ncommand = [\"x\"]\n", "769"),
+            ("[[app]]\nid = 9001\ncommand = [\"x\"]\n", "shell_app_id"),
+            ("[[app]]\nid = 9003\ncommand = []\n", "empty command"),
+            (
+                "[[app]]\nid = 9003\ncommand = [\"  \"]\n",
+                "empty program name",
+            ),
+            (
+                "[[app]]\nid = 9003\ncommand = [\"x\"]\nenv_unset = [\"BAD=NAME\"]\n",
+                "environment variable name",
+            ),
+            (
+                "[[app]]\nid = 9003\ncommand = [\"x\"]\n\n[[app]]\nid = 9003\ncommand = [\"y\"]\n",
+                "share id",
+            ),
+        ] {
+            let c = CoreConfig::parse(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            let err = c.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(needle),
+                "expected {needle:?} in the error for {text:?}, got: {err}"
+            );
+        }
+    }
+
+    /// `id` and `command` are REQUIRED — a class missing either is a parse
+    /// error, not a default. There is no sensible default for "which app".
+    #[test]
+    fn an_app_entry_without_an_id_or_command_does_not_parse() {
+        assert!(CoreConfig::parse("[[app]]\ncommand = [\"x\"]\n").is_err());
+        assert!(CoreConfig::parse("[[app]]\nid = 9003\n").is_err());
+        // And an unknown key is still refused, like every other table.
+        assert!(CoreConfig::parse("[[app]]\nid = 9003\ncommand = [\"x\"]\nwat = 1\n").is_err());
+    }
+
+    /// The `AppConfig` counterpart of
+    /// `every_key_is_either_consumed_or_declared_unconsumed`: an array-of-tables
+    /// entry cannot be named `table.field`, so it is classified here — and the
+    /// exhaustive destructure means ADDING A FIELD STOPS THIS COMPILING until
+    /// someone says who reads it.
+    ///
+    /// §12 also lists an id strategy, an input contract and an HDR expectation
+    /// for an app class. None is modelled: the id strategy is fixed at "scope,
+    /// tag as repair" and not selectable, §7's input layer does not exist, and
+    /// the HDR settle key is itself still unconsumed. Three more keys whose
+    /// stated consumer does not exist is the #416 class; they land with readers.
+    #[test]
+    fn every_app_class_field_is_consumed() {
+        let class = CoreConfig::parse(MOONLIGHT_STANZA)
+            .unwrap()
+            .app
+            .into_iter()
+            .next()
+            .unwrap();
+        let AppConfig {
+            id,
+            command,
+            env,
+            env_unset,
+        } = class;
+        // Each is read on the launch path: `id` by `app_class`, `command` and
+        // both env halves by `compositor::resolve_launch` into
+        // `launch::prepare_command`.
+        assert_eq!(id, 9003);
+        assert!(!command.is_empty());
+        assert!(!env.is_empty());
+        assert!(!env_unset.is_empty());
     }
 
     // -- the install link ----------------------------------------------------
