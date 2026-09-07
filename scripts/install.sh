@@ -154,9 +154,11 @@ fi
 #     that case just log so the operator can migrate it deliberately.
 if [ "$PREFIX" = "/opt/tv-shell" ]; then
     if [ ! -e "$LEGACY_PREFIX" ] || [ -L "$LEGACY_PREFIX" ]; then
-        ln -sfn "$PREFIX" "$LEGACY_PREFIX" \
-            && log "compat symlink $LEGACY_PREFIX -> $PREFIX" \
-            || log "note: could not create compat symlink $LEGACY_PREFIX (continuing)"
+        if ln -sfn "$PREFIX" "$LEGACY_PREFIX"; then
+            log "compat symlink $LEGACY_PREFIX -> $PREFIX"
+        else
+            log "note: could not create compat symlink $LEGACY_PREFIX (continuing)"
+        fi
     else
         log "note: $LEGACY_PREFIX exists as a real directory — skipping compat symlink (remove it to enable)"
     fi
@@ -235,12 +237,14 @@ if [ -f "$UNIT_SRC" ]; then
     if command -v systemctl >/dev/null 2>&1; then
         TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || true)"
         if [ -n "$TARGET_UID" ] && [ -S "/run/user/$TARGET_UID/bus" ]; then
-            sudo -u "$TARGET_USER" \
+            if sudo -u "$TARGET_USER" \
                 XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
                 DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus" \
-                systemctl --user daemon-reload >/dev/null 2>&1 \
-                && log "ran systemctl --user daemon-reload for $TARGET_USER" \
-                || log "note: systemctl --user daemon-reload skipped (user manager not reachable now — picked up on next login/start)"
+                systemctl --user daemon-reload >/dev/null 2>&1; then
+                log "ran systemctl --user daemon-reload for $TARGET_USER"
+            else
+                log "note: systemctl --user daemon-reload skipped (user manager not reachable now — picked up on next login/start)"
+            fi
         else
             log "note: no user bus for $TARGET_USER yet — systemd will load the unit on next login"
         fi
