@@ -187,12 +187,21 @@ proves nothing until you have seen it fail.
 | Overlay carries no app id | `Overlay` gains `STEAM_GAME` | caught |
 | Toast is input-inert | `Toast` gains `STEAM_INPUT_FOCUS` | caught |
 | Base carries the app id | `Base` returns no tags | caught |
+| **Tags land before the map** | `applyTags()` moved AFTER `QQuickWindow::setVisible(true)` | caught |
+
+The last row is the one this PR turns on, and it needed a real X server, so it was
+run on a throwaway branch through CI rather than on a workstation with no `Xvfb`.
+`premap` failed on all three roles with the intended message — *"STEAM_GAME was
+set AFTER the window mapped (property at 3, map at 2) — gamescope had already
+decided"* — and the other two lanes stayed green, so the failure was the ordering
+and nothing else.
 
 **R5** — neighbours are derived from coordinates alone — is structural rather than
 assertable: there is no field in a cell that could name another cell.
 
-The pre-map ordering assertion (`tst_premap`) needs a real X server and is
-therefore verified in CI rather than on this workstation, which has no `Xvfb`.
+The pre-map ordering assertion (`tst_premap`) needs a real X server, so both its
+pass and its mutation were verified in CI rather than on a workstation with no
+`Xvfb`.
 
 ### Where the decisions live
 
@@ -250,10 +259,49 @@ hurt to be wrong:
    loaded lazily; a `Surface` created inside a `Loader` gets `componentComplete()`
    at a different moment, and that has not been exercised.
 6. **The residual upcast gap in §5** is a convention, not a guarantee.
-7. **Qt version drift.** Developed against Qt 6.11 locally, gated in CI at 6.8.3.
+7. **`Surface` gives up what QML's `Window` provides.** It subclasses
+   `QQuickWindow`, not `QQuickWindowQmlImpl` (which is private API), so the
+   conveniences QML's `Window` adds on top — `visibility`, screen handling, the
+   `Window` attached property — are not inherited. Nothing in the placeholder
+   needed them; a real screen might.
+8. **Qt version drift.** Developed against Qt 6.11 locally, gated in CI at 6.8.3.
    The couch's Qt is a third number. `Q_PROPERTY` shadowing and
    `QNativeInterface::QX11Application` are both stable API, but "stable" is not
    "measured on the deployment".
+
+## 8a. The strongest argument that this whole shim is unnecessary
+
+Stated here rather than left for a reviewer to find, because if it is right the
+build-tooling reversal in §9.1 evaporates with it.
+
+**The premise of the shim is that post-map tagging is too late.** gamescope
+evaluates a window at creation, so a property that arrives after `MapNotify` has
+missed the decision. That is why the shell tags itself rather than asking the core
+to do it: the core learns about a window *from* `MapNotify`, which is by
+construction after the fact.
+
+**But `V2_DESIGN.md` §5 already has the core tagging windows post-map**, as the
+"tag as repair" rule — it watches `MapNotify` on every server and writes
+`STEAM_GAME` on windows whose cgroup scope did not resolve. Those two statements
+cannot both be unconditionally true. Either:
+
+- post-map tagging **works** (gamescope re-evaluates on `PropertyNotify`), in which
+  case the core could tag the shell's windows the same way it tags a browser's,
+  the shell needs no C++ at all, the plain `qml` runtime is sufficient, and
+  `shell-v2/`'s build step is unnecessary complexity; or
+- post-map tagging **does not work**, in which case the shim is right *and* the
+  core's repair path is a latent bug — it would be silently failing on exactly the
+  multi-process apps §5 introduced it for.
+
+Neither branch is comfortable, and this spike does not resolve it: nothing here
+has watched gamescope respond to a late `PropertyNotify`. **This is the first thing
+the hardware spike should measure**, ahead of anything about the shell's own
+appearance — one window, tagged after map, and whether it becomes a focus
+candidate. A cheap measurement that could delete a whole subsystem, or find a real
+defect in one that is already designed.
+
+The pure layers survive either answer: `surfacetags` is a mapping, not a
+mechanism, and `focusGraph.js` never knew about X.
 
 ## 9. Two repo rules this reverses
 
