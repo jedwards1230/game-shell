@@ -183,8 +183,20 @@ impl InputBackend for EvdevBackend {
             ));
         }
 
-        // Slots are created in order, so the index is the slot.
-        debug_assert_eq!(self.presenters.len(), slot as usize);
+        // The index IS the slot: `emit` indexes `presenters` by `slot as usize`,
+        // so a presenter pushed at the wrong index silently routes one player's
+        // input to another player's device. This was a `debug_assert_eq!`, which
+        // compiles to nothing in exactly the release build the couch runs — the
+        // check would have been absent precisely where the corruption matters.
+        // A violated invariant here is not recoverable, so it fails the start.
+        if self.presenters.len() != slot as usize {
+            return Err(fail(format!(
+                "presenters must be created in slot order: asked for slot {slot} with {} \
+                 already created. Creating them out of order would index one player's \
+                 input at another player's device",
+                self.presenters.len()
+            )));
+        }
         self.presenters.push(device);
         Ok(nodes)
     }

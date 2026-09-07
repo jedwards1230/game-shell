@@ -18,6 +18,29 @@
 //! timer, so the failure mode "the notifier stopped and nothing noticed" does
 //! not exist. The stream read is an optimisation on top — it retires a yanked
 //! pad in milliseconds instead of at the next tick — never the sole sensor.
+//!
+//! # What a panic on this thread does
+//!
+//! It takes the input layer down and nothing else, and it **releases every
+//! grab**. The loop below reads one event, then acts on it; a panic between
+//! those two points leaves that event unprocessed and the session mid-state. But
+//! the panic unwinds this thread only — the core's compositor half, its IPC
+//! socket and the escape hatches all keep running on other threads — and
+//! unwinding drops `session`, which drops the backend, which closes every pad's
+//! descriptor. `EVIOCGRAB` lives on the descriptor, so the controllers are
+//! handed back on the way out; the uinput presenters disappear with it.
+//!
+//! So the failure mode is "input stops working until the core is restarted",
+//! never "input is wedged and the pad is still held hostage". That is the shape
+//! that matters here: the couch can always fall back to the physical pad.
+//!
+//! There is deliberately **no `catch_unwind`** and no supervisor restarting this
+//! thread. A loop that panicked once will panic again on the next event of the
+//! same shape, and a self-restarting one would grab and release the fleet in a
+//! tight cycle — which every game sees as a controller reconnect storm, strictly
+//! worse than the pad simply reverting to direct use. `Upholds=` on the unit
+//! restarts the whole core instead, which is a clean start rather than a partial
+//! one.
 
 use tokio::sync::{oneshot, watch};
 

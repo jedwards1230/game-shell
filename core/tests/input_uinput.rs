@@ -242,6 +242,46 @@ fn a_created_presenter_advertises_the_canonical_profile_at_rest() {
     }
 }
 
+/// **Creating presenters out of slot order is refused, in a release build.**
+///
+/// `emit` indexes `presenters` by `slot as usize`, so a presenter pushed at the
+/// wrong index routes one player's input to another player's device — silently,
+/// and with no way to notice from either end. This was a `debug_assert_eq!`,
+/// which compiles to nothing in exactly the release build that runs on the
+/// couch: the check would have been absent precisely where the corruption
+/// matters. Flagged in review on jedwards1230/tv-shell#466.
+///
+/// The test lives here rather than beside a double because the ordering
+/// invariant belongs to the backend that holds the `Vec`, and a double would be
+/// asserting against its own bookkeeping.
+#[test]
+#[ignore = "needs /dev/uinput: set TV_SHELL_TEST_UINPUT and run with --ignored"]
+fn creating_presenters_out_of_order_is_refused() {
+    require_opt_in();
+
+    let mut backend = tv_shell_core::input::evdev_backend::EvdevBackend::new();
+    let profile = PadProfile::canonical();
+
+    // Slot 1 with no slot 0 yet would land at index 0 and answer to slot 1.
+    let out_of_order = backend.create_presenter(1, &profile);
+    assert!(
+        out_of_order.is_err(),
+        "creating slot 1 before slot 0 must fail, not silently misalign the table"
+    );
+
+    // In order, it works — so the check is an ordering rule and not a refusal
+    // of everything.
+    backend.create_presenter(0, &profile).expect("slot 0");
+    backend.create_presenter(1, &profile).expect("slot 1");
+
+    // And a repeat of a slot already created is equally refused: it would push
+    // a second device at an index that is now past its own slot.
+    assert!(
+        backend.create_presenter(1, &profile).is_err(),
+        "re-creating an existing slot must fail"
+    );
+}
+
 /// **The presenters are independent devices, one per player.**
 ///
 /// They share a profile, so a bug that returned the same device twice would be

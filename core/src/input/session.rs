@@ -102,6 +102,18 @@ pub struct InputReport {
     /// running or dead. A timestamp that stops advancing distinguishes them.
     /// `None` before the first poll, and while disabled.
     pub last_poll_unix_ms: Option<u64>,
+    /// Events the backend REFUSED to emit.
+    ///
+    /// Distinct from `drops`, which are events this crate decided not to
+    /// forward. These are events it did forward and the device rejected -- a
+    /// uinput node in a bad state, or one that went away.
+    ///
+    /// It exists because `retire` documents that it returns a presenter to rest,
+    /// and a failed emit makes that claim false with nothing else able to
+    /// notice: the pad is gone, so no later event corrects the stuck button, and
+    /// from a game's side no device disconnected. A non-zero count here means a
+    /// player may be holding a button nothing will release.
+    pub emit_failures: u64,
     /// How many discovery passes have COMPLETED.
     ///
     /// Beside the timestamp rather than instead of it, for two different
@@ -128,6 +140,7 @@ impl InputReport {
             pads: Vec::new(),
             refused: Vec::new(),
             drops: BTreeMap::new(),
+            emit_failures: 0,
             last_poll_unix_ms: None,
             polls_completed: 0,
         }
@@ -157,6 +170,7 @@ pub struct InputSession<B: InputBackend> {
     /// The most recent poll's refusals, so `input-state` explains what the core
     /// is currently declining rather than everything it ever declined.
     refused: Vec<RefusedReport>,
+    emit_failures: u64,
     last_poll_unix_ms: Option<u64>,
     polls_completed: u64,
 }
@@ -210,6 +224,7 @@ impl<B: InputBackend> InputSession<B> {
             presenters,
             drops: BTreeMap::new(),
             refused: Vec::new(),
+            emit_failures: 0,
             last_poll_unix_ms: None,
             polls_completed: 0,
         })
@@ -350,8 +365,18 @@ impl<B: InputBackend> InputSession<B> {
         self.backend.release(path);
     }
 
+    /// Emit onto a presenter, counting a refusal.
+    ///
+    /// A failure is logged and counted rather than propagated: there is nothing
+    /// useful a caller can do about a uinput node that will not take an event,
+    /// and both callers — a live passthrough and a leave's quiesce — have to
+    /// carry on regardless. Counting is what keeps it from being *silent*. A
+    /// quiesce that fails leaves a button held on a presenter whose pad is gone,
+    /// and nothing downstream can notice, because from a game's side no device
+    /// disconnected. See [`InputReport::emit_failures`].
     fn emit(&mut self, slot: u8, forward: Forward) {
         if let Err(e) = self.backend.emit(slot, forward) {
+            self.emit_failures += 1;
             tracing::warn!("{e}");
         }
     }
@@ -377,6 +402,7 @@ impl<B: InputBackend> InputSession<B> {
                 .collect(),
             refused: self.refused.clone(),
             drops: self.drops.clone(),
+            emit_failures: self.emit_failures,
             last_poll_unix_ms: self.last_poll_unix_ms,
             polls_completed: self.polls_completed,
         }
@@ -445,6 +471,8 @@ mod tests {
         presenter_without_devnode: bool,
         /// When set, `enumerate` fails.
         enumerate_fails: bool,
+        /// When set, the presenter refuses every event.
+        emit_fails: bool,
     }
 
     impl Recorder {
@@ -455,6 +483,7 @@ mod tests {
                 claim_fails: BTreeSet::new(),
                 presenter_without_devnode: false,
                 enumerate_fails: false,
+                emit_fails: false,
             }
         }
     }
@@ -501,6 +530,12 @@ mod tests {
         }
 
         fn emit(&mut self, slot: u8, forward: Forward) -> Result<(), InputError> {
+            if self.emit_fails {
+                return Err(InputError::Emit {
+                    slot,
+                    detail: "the uinput node refused the event".into(),
+                });
+            }
             self.log.borrow_mut().emitted.push((slot, forward));
             Ok(())
         }
@@ -701,6 +736,42 @@ mod tests {
         assert!(h.log.borrow().emitted.is_empty());
     }
 
+    /// **Rule: a presenter that refuses an event is counted, not just logged.**
+    ///
+    /// `retire` documents that it returns the presenter to rest. If those emits
+    /// fail, that claim is false and **nothing downstream can notice**: the pad
+    /// is gone, so no later event corrects the stuck button, and from a game's
+    /// side no device disconnected. A log line alone leaves the only evidence in
+    /// a journal nobody is reading at the time. The count makes it a number on
+    /// `input-state`.
+    #[test]
+    fn a_presenter_that_refuses_events_is_counted() {
+        let mut h = harness(2);
+        let p = pad("/dev/input/event3", "a");
+        *h.devices.borrow_mut() = vec![p.clone()];
+        h.session.poll();
+        assert_eq!(h.session.report().emit_failures, 0);
+
+        h.session.backend.emit_fails = true;
+
+        // A live passthrough event the device refuses.
+        h.session.forward(&p.path, ev::KEY, btn::SOUTH, 1);
+        assert_eq!(h.session.report().emit_failures, 1);
+
+        // And a whole quiesce that cannot land: every release and axis reset,
+        // plus the sync. The pad still leaves — holding it would be worse — but
+        // the incomplete reset is now visible rather than silent.
+        h.devices.borrow_mut().clear();
+        h.session.poll();
+        let failures = h.session.report().emit_failures;
+        assert!(
+            failures > 1,
+            "a failed quiesce must be counted, got {failures}"
+        );
+        assert!(h.session.report().pads.is_empty(), "the pad still leaves");
+        assert_eq!(h.log.borrow().released, vec![p.path.clone()]);
+    }
+
     /// **Rule: dropped events are counted, per reason.**
     #[test]
     fn drops_are_counted_and_reported() {
@@ -880,6 +951,7 @@ mod tests {
         assert_eq!(r.players, 0);
         assert!(r.presenters.is_empty() && r.pads.is_empty() && r.refused.is_empty());
         assert!(r.drops.is_empty());
+        assert_eq!(r.emit_failures, 0);
         assert_eq!(r.last_poll_unix_ms, None);
     }
 

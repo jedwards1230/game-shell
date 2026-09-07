@@ -417,6 +417,15 @@ worth repeating by hand:
 
 And against `core/tests/input_uinput.rs`, which runs on a real kernel:
 
+- Put the slot-order check in `evdev_backend::create_presenter` back to the
+  `debug_assert_eq!` it started as. `creating_presenters_out_of_order_is_refused`
+  must fail — and **it must be run `--release` to see the point**: in a debug
+  build the assert fires and the test fails on the panic, but in release the
+  assert compiles to nothing, the out-of-order creation *succeeds*, and the test
+  fails on its own assertion instead. Measured 2026-09-06. That is the whole
+  reason it is a real check: `emit` indexes `presenters` by slot, so the release
+  build the couch runs was the one build with no guard at all.
+
 - Give the canonical profile an id no controller database knows.
   `a_created_presenter_gets_a_devnode_that_discovery_refuses_as_ours` must fail
   on its *precondition* — that test's whole point is that the presenter's id IS
@@ -453,6 +462,13 @@ part:
    an identity, not a property. It now asserts the two names DIFFER from each
    other, that each carries its own slot, and that both are recognisably ours —
    none of which reference `device_name`.
+
+- Drop the `self.emit_failures += 1` from `session::emit`, leaving the log line.
+  `a_presenter_that_refuses_events_is_counted` must fail. `retire` documents that
+  it returns a presenter to rest; if those emits fail that claim is false and
+  **nothing downstream can notice**, because the pad is gone and from a game's
+  side no device disconnected. A journal line is not a signal anyone is reading
+  at the time.
 
 The safety flag has its own entry, because it is the easiest thing here to test
 vacuously:
