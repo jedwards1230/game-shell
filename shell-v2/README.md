@@ -7,6 +7,11 @@ it maps, and it takes controller focus.**
 Every pixel is placeholder. The structure is not — this tree sets the patterns
 every later screen follows, so the parts worth reviewing are the shapes.
 
+Why it has to exist at all is measured, not assumed: gamescope resolves a window's
+app id at **creation** and never re-reads it, so a property arriving after the map
+has missed the decision (bench 2026-09-06 on the pinned 3.16.28, plus a live
+control on 2026-09-07 — `../docs/V2_SHELL.md` §8a).
+
 Full rationale, the two repo rules it reverses, the mutation record, and (at
 equal length) what it does **not** prove: [`../docs/V2_SHELL.md`](../docs/V2_SHELL.md).
 The compositor contract it implements: [`../docs/V2_DESIGN.md`](../docs/V2_DESIGN.md) §5, §7, §13 Q1.

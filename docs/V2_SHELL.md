@@ -6,8 +6,10 @@
 > as the rest — what it does **not** prove.
 >
 > It answers the first half of [`V2_DESIGN.md`](V2_DESIGN.md) §13 Q1 (the runtime)
-> and the shell half of §13 Q12 (repo layout). It does not close either: both wait
-> on a hardware spike under gamescope, which is a separate, user-gated step.
+> and the shell half of §13 Q12 (repo layout). Q1 is not closed — that waits on
+> today's shell running against the shim under gamescope, a separate, user-gated
+> step. What **is** settled is the shim's necessity: post-map tagging was measured
+> on the deployment on 2026-09-07 and does not work (§8a).
 
 ## 1. What this is
 
@@ -54,9 +56,13 @@ place to set application identity). So:
   layers (`surfacetags`, `focusGraph.js`) are runtime-agnostic.
 - **Not the bare `qml` runtime.** See §5.
 
-**This remains a spike answer.** §13 Q1 says what closes it: today's shell running
-against the shim under gamescope on the pinned build, on hardware. That has not
-happened. Q1 stays open.
+**The premise is measured; the runtime choice is not yet.** That a C++ type is
+needed at all rests on two independent legs, both now established: gamescope
+requires the properties in place before the window maps (measured, §8a), and Qt
+provides no virtual hook to put them there (§5). What remains open is §13 Q1's own
+question — today's shell running against this shim under gamescope on the pinned
+build. Until that runs, this is the right answer for the reason given, not a
+finished one.
 
 ## 4. One QML module, one URI
 
@@ -242,10 +248,12 @@ and therefore no drift.
 A spike that cannot fail is not a spike. In descending order of how much it would
 hurt to be wrong:
 
-1. **Nothing here has run under gamescope, or on hardware at all.** Every claim
-   about what gamescope does with these atoms comes from `V2_DESIGN.md` §5 and the
-   `dev/gamescope/` prototype, not from this code. The hardware spike is a
-   separate, user-gated step, and it is what closes §13 Q1.
+1. **This code has not run under gamescope.** The *contract* it implements is
+   measured — post-map tagging does not work, and a scoped launch is a focus
+   candidate untagged (§8a) — but that was measured with the kit's clients, not
+   with these windows. Whether `shell-v2` maps, is tagged in time, and takes the
+   pad is still unobserved. The hardware spike is a separate, user-gated step, and
+   it is what closes §13 Q1.
 2. **The `Toast` pair is unverified.** `STEAM_OVERLAY` + `STEAM_NOTIFICATION`
    together is this spike's reading of §5's prose; the prototype exercised only the
    `Overlay` pair. If gamescope treats a notification differently, `surfacetags.cpp`
@@ -269,39 +277,68 @@ hurt to be wrong:
    `QNativeInterface::QX11Application` are both stable API, but "stable" is not
    "measured on the deployment".
 
-## 8a. The strongest argument that this whole shim is unnecessary
+## 8a. Why the shim is necessary — measured, not argued
 
-Stated here rather than left for a reviewer to find, because if it is right the
-build-tooling reversal in §9.1 evaporates with it.
+This section began as an open fork: the shim's whole premise is that post-map
+tagging is too late, yet `V2_DESIGN.md` §5 *also* has the core tagging windows
+post-map as its "tag as repair" rule, and both could not be unconditionally true.
+Either post-map tagging works — in which case the core could tag the shell's
+windows too, the plain `qml` runtime would suffice and this build step would be
+unnecessary complexity — or it does not, in which case the shim is right and the
+repair path is broken.
 
-**The premise of the shim is that post-map tagging is too late.** gamescope
-evaluates a window at creation, so a property that arrives after `MapNotify` has
-missed the decision. That is why the shell tags itself rather than asking the core
-to do it: the core learns about a window *from* `MapNotify`, which is by
-construction after the fact.
+**It was measured on 2026-09-07, on the deployment, against the pinned build. The
+second branch is the true one: post-map tagging does not work.** Two independent
+sources agree.
 
-**But `V2_DESIGN.md` §5 already has the core tagging windows post-map**, as the
-"tag as repair" rule — it watches `MapNotify` on every server and writes
-`STEAM_GAME` on windows whose cgroup scope did not resolve. Those two statements
-cannot both be unconditionally true. Either:
+**1. The bench, 2026-09-06, gamescope 3.16.28** (pinned up from 3.16.23 that day,
+jedwards1230/homelab-ansible#321). Already recorded in `dev/gamescope/lib.sh`:
 
-- post-map tagging **works** (gamescope re-evaluates on `PropertyNotify`), in which
-  case the core could tag the shell's windows the same way it tags a browser's,
-  the shell needs no C++ at all, the plain `qml` runtime is sufficient, and
-  `shell-v2/`'s build step is unnecessary complexity; or
-- post-map tagging **does not work**, in which case the shim is right *and* the
-  core's repair path is a latent bug — it would be silently failing on exactly the
-  multi-process apps §5 introduced it for.
+```
+launch                                   GAMESCOPE_FOCUSABLE_WINDOWS
+plain launch, post-hoc tag attempted     (empty)
+plain launch, control                    (empty)
+inside app-steam-app9003-2970.scope      8388625, 9003, 2998
+```
 
-Neither branch is comfortable, and this spike does not resolve it: nothing here
-has watched gamescope respond to a late `PropertyNotify`. **This is the first thing
-the hardware spike should measure**, ahead of anything about the shell's own
-appearance — one window, tagged after map, and whether it becomes a focus
-candidate. A cheap measurement that could delete a whole subsystem, or find a real
-defect in one that is already designed.
+The scoped launch became a focus candidate with **no tagging at all** —
+`STEAM_GAME` was never set — and the display went to `fps=120.000000 /
+focus=9003`. Both unscoped launches produced no focus candidate, tagged or not.
+Note the version detail: post-hoc tagging *used to* appear to work, and stopped at
+3.16.28. Anything that depended on it was depending on tolerance, not contract.
 
-The pure layers survive either answer: `surfacetags` is a mapping, not a
-mechanism, and `focusGraph.js` never knew about X.
+**2. A live control against the running v2 session, 2026-09-07.** An unscoped,
+untagged `xmessage` mapped, its process confirmed alive, and never entered
+`GAMESCOPE_FOCUSABLE_WINDOWS`, which stayed on Moonlight's triplet throughout.
+
+**The mechanism.** gamescope resolves a window's app id at window **creation**,
+from the pid the X server reports via `XRes`, by
+`sscanf(cgroup, "app-steam-app%u-%d.scope", …)` in `src/Utils/Process.cpp`. A
+property arriving after `MapNotify` has missed the decision — there is nothing in
+that path that re-reads it.
+
+### What follows for this PR
+
+**The shim is justified by measurement, not only by the Qt finding in §5.** Those
+are two independent legs: gamescope requires the properties to be in place before
+the window maps, and Qt provides no virtual hook to put them there. The first says
+the ordering matters; the second says enforcing it costs a C++ type. Together they
+make §9.1's build-tooling reversal forced by evidence rather than argued from Qt
+internals — and they retire the "why not just have the core do it" question, which
+would otherwise have been the first thing asked of every later screen.
+
+### What follows for the core
+
+The other half of the fork is a real defect, filed as
+**jedwards1230/tv-shell#472** — the core's "tag as repair" path cannot work as
+specified. `dev/gamescope/lib.sh` had independently spotted the same
+chicken-and-egg on the kit side ("`gs_tag_pid` DISCOVERS candidate windows through
+`GAMESCOPE_FOCUSABLE_WINDOWS`, so with that atom empty it can never find a window
+to tag").
+
+**Not fixed here, deliberately.** It lives in `core/` and correcting
+`V2_DESIGN.md` §5 belongs to #472; this PR keeps its zero-files-touched-in-`core/`
+property. Read #472 for the detail rather than this section.
 
 ## 9. Two repo rules this reverses
 
@@ -312,12 +349,15 @@ Both are stated here rather than slipped in, and both are edited in the same PR.
 `CLAUDE.md` said, as a design constraint: *"No build tooling: no bundler, no
 compiler, no package manager for QML. Files are deployed as-is."*
 
-That is no longer true of v2's shell, and it cannot be. The pre-map tagging needs
-`XChangeProperty` from the shell process before its window maps; QML cannot issue
-it, so a C++ type is required, so CMake is required. `V2_DESIGN.md` §13 Q1
-anticipated this ("a C++ helper or plugin") but the repo's stated rule still said
-otherwise, which would have left the first person to read both with a real
-contradiction.
+That is no longer true of v2's shell, and it cannot be — a conclusion that now
+rests on measurement rather than on reading Qt's headers. gamescope resolves a
+window's app id at creation and never re-reads it, so the properties must be in
+place before the window maps (measured 2026-09-07, §8a); QML cannot issue
+`XChangeProperty`; Qt exposes no virtual hook between window creation and map
+(§5). A C++ type is therefore required, and CMake follows from it. `V2_DESIGN.md`
+§13 Q1 anticipated exactly this ("a C++ helper or plugin") while the repo's stated
+rule still said otherwise, which would have left the first person to read both
+with a real contradiction.
 
 `CLAUDE.md` is amended in this PR to scope the rule to v1's `shell/`, where it
 remains true and remains valuable — v1's shell is still interpreted, still deployed
