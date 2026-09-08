@@ -44,6 +44,7 @@ jobs:
       widgets: ${{ steps.filter.outputs.widgets }}
       mqtt: ${{ steps.filter.outputs.mqtt }}
       gamescope: ${{ steps.filter.outputs.gamescope }}
+      shellv2: ${{ steps.filter.outputs.shellv2 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
@@ -112,6 +113,13 @@ jobs:
               - 'scripts/mqtt-smoke-test.sh'
               - '.github/workflows/mqtt.yml'
               - '.github/workflows/ci.yml'
+            # The v2 shell. Unlike v1's `qml` area this one BUILDS — CMake, C++
+            # and a real X server for the pre-map tagging assertion — so it is
+            # its own area rather than a lane inside qml-test.yml.
+            shellv2:
+              - 'shell-v2/**'
+              - '.github/workflows/shell-v2.yml'
+              - '.github/workflows/ci.yml'
             # The gamescope kit's shell logic, exercised against a fake X
             # display by dev/gamescope/tests/. Pure shell on a stock runner —
             # no gamescope, no Steam, no network.
@@ -160,6 +168,11 @@ jobs:
     if: needs.changes.outputs.gamescope == 'true'
     uses: ./.github/workflows/gamescope.yml
 
+  shellv2:
+    needs: changes
+    if: needs.changes.outputs.shellv2 == 'true'
+    uses: ./.github/workflows/shell-v2.yml
+
   # Deliberately unconditional — no `needs: changes`, no filter. This one scans
   # the whole tree in about a second, and site identity can be reintroduced from
   # any source path, so skipping it on an "unrelated" PR is exactly how it came
@@ -170,7 +183,7 @@ jobs:
   # The ONLY required check. Always runs; fails if any area job failed/was
   # cancelled. Skipped area jobs (their area didn't change) count as success.
   ci-gate:
-    needs: [changes, rust, host, qml, qmlformat, widgets, mqtt, gamescope, site-identity]
+    needs: [changes, rust, host, qml, qmlformat, widgets, mqtt, gamescope, shellv2, site-identity]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -186,6 +199,7 @@ jobs:
           echo "  widgets=${{ needs.widgets.result }}"
           echo "  mqtt=${{ needs.mqtt.result }}"
           echo "  gamescope=${{ needs.gamescope.result }}"
+          echo "  shellv2=${{ needs.shellv2.result }}"
           echo "  site-identity=${{ needs['site-identity'].result }}"
           exit 1
       - name: All required jobs passed or were skipped
