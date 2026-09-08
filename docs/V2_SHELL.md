@@ -287,9 +287,9 @@ windows too, the plain `qml` runtime would suffice and this build step would be
 unnecessary complexity — or it does not, in which case the shim is right and the
 repair path is broken.
 
-**It was measured on 2026-09-07, on the deployment, against the pinned build. The
-second branch is the true one: post-map tagging does not work.** Two independent
-sources agree.
+**It has been measured on the deployment, against the pinned build. The second
+branch is the true one: post-map tagging does not work.** Two independent sources,
+a day apart, agree.
 
 **1. The bench, 2026-09-06, gamescope 3.16.28** (pinned up from 3.16.23 that day,
 jedwards1230/homelab-ansible#321). Already recorded in `dev/gamescope/lib.sh`:
